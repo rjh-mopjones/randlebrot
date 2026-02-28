@@ -1,3 +1,6 @@
+use bevy::image::{ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+use bevy_egui::EguiContexts;
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use rb_core::{AppMode, ModeTransitionEvent, handle_mode_shortcuts};
@@ -41,6 +44,8 @@ fn main() {
             handle_mode_shortcuts,
             toggle_layer.run_if(in_state(AppMode::WorldGenerator)),
             regenerate_world.run_if(in_state(AppMode::WorldGenerator)),
+            camera_zoom,
+            camera_pan,
             log_mode_transition,
         ))
         .run();
@@ -150,7 +155,7 @@ fn setup_world_map(
 }
 
 fn create_image(width: usize, height: usize, data: Vec<u8>) -> Image {
-    Image::new(
+    let mut image = Image::new(
         Extent3d {
             width: width as u32,
             height: height as u32,
@@ -160,7 +165,16 @@ fn create_image(width: usize, height: usize, data: Vec<u8>) -> Image {
         data,
         TextureFormat::Rgba8UnormSrgb,
         default(),
-    )
+    );
+
+    // Use nearest-neighbor filtering for crisp pixels when zoomed
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        mag_filter: ImageFilterMode::Nearest,
+        min_filter: ImageFilterMode::Nearest,
+        ..default()
+    });
+
+    image
 }
 
 fn toggle_layer(
@@ -245,4 +259,75 @@ fn regenerate_world(
     }
 
     println!("World regenerated.");
+}
+
+fn camera_zoom(
+    mut scroll_events: EventReader<MouseWheel>,
+    mut query: Query<&mut OrthographicProjection, With<Camera2d>>,
+) {
+    let mut scroll_delta = 0.0;
+
+    for event in scroll_events.read() {
+        scroll_delta += match event.unit {
+            MouseScrollUnit::Line => event.y * 0.1,
+            MouseScrollUnit::Pixel => event.y * 0.001,
+        };
+    }
+
+    if scroll_delta == 0.0 {
+        return;
+    }
+
+    for mut projection in &mut query {
+        // Zoom in (scroll up) decreases scale, zoom out (scroll down) increases scale
+        let zoom_factor = 1.0 - scroll_delta;
+        projection.scale = (projection.scale * zoom_factor).clamp(0.1, 10.0);
+    }
+}
+
+fn camera_pan(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut motion_events: EventReader<bevy::input::mouse::MouseMotion>,
+    mut query: Query<(&mut Transform, &OrthographicProjection), With<Camera2d>>,
+    time: Res<Time>,
+    mut contexts: EguiContexts,
+) {
+    let mut pan_delta = Vec2::ZERO;
+
+    // Keyboard panning (arrow keys)
+    let pan_speed = 300.0;
+    if keyboard.pressed(KeyCode::ArrowLeft) {
+        pan_delta.x -= pan_speed * time.delta_secs();
+    }
+    if keyboard.pressed(KeyCode::ArrowRight) {
+        pan_delta.x += pan_speed * time.delta_secs();
+    }
+    if keyboard.pressed(KeyCode::ArrowUp) {
+        pan_delta.y += pan_speed * time.delta_secs();
+    }
+    if keyboard.pressed(KeyCode::ArrowDown) {
+        pan_delta.y -= pan_speed * time.delta_secs();
+    }
+
+    // Left click drag panning (when not over UI)
+    let over_ui = contexts.ctx_mut().is_pointer_over_area();
+    if mouse.pressed(MouseButton::Left) && !over_ui {
+        for event in motion_events.read() {
+            pan_delta -= event.delta;
+        }
+    } else {
+        // Clear motion events if not panning
+        motion_events.clear();
+    }
+
+    if pan_delta == Vec2::ZERO {
+        return;
+    }
+
+    for (mut transform, projection) in &mut query {
+        // Scale pan speed by current zoom level
+        transform.translation.x += pan_delta.x * projection.scale;
+        transform.translation.y += pan_delta.y * projection.scale;
+    }
 }
