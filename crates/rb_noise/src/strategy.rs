@@ -1,62 +1,64 @@
 use noise::{NoiseFn, OpenSimplex};
 use rb_core::NoiseStrategy;
 
-/// Generates continentalness values using 6-octave fBm.
+/// Generates continentalness values using 16-octave fBm.
+/// Matches fungal-jungle parameters.
 ///
 /// Output range: approximately [-1.0, 1.0]
 /// Higher values = more continental (land), lower values = more oceanic (water)
 pub struct ContinentalnessStrategy {
     noise: OpenSimplex,
-    scale: f64,
     octaves: u32,
-    persistence: f64,
+    frequency: f64,
     lacunarity: f64,
+    persistence: f64,
 }
 
 impl ContinentalnessStrategy {
     pub fn new(seed: u32) -> Self {
         Self {
             noise: OpenSimplex::new(seed),
-            scale: 100.0,
-            octaves: 8,
-            persistence: 0.59,
-            lacunarity: 2.0,
+            octaves: 16,       // fungal-jungle uses 16 octaves
+            frequency: 1.0,    // continent_frequency
+            lacunarity: 2.0,   // continent_lacunarity
+            persistence: 0.59, // fungal-jungle persistence
         }
     }
 
     pub fn with_params(
         seed: u32,
-        scale: f64,
         octaves: u32,
-        persistence: f64,
+        frequency: f64,
         lacunarity: f64,
+        persistence: f64,
     ) -> Self {
         Self {
             noise: OpenSimplex::new(seed),
-            scale,
             octaves,
-            persistence,
+            frequency,
             lacunarity,
+            persistence,
         }
     }
 
     /// Generate fBm (fractal Brownian motion) noise.
+    /// Uses 0.01 scale factor like fungal-jungle.
     fn fbm(&self, x: f64, y: f64, detail_level: u32) -> f64 {
         let mut value = 0.0;
         let mut amplitude = 1.0;
-        let mut frequency = 1.0;
+        let mut freq = self.frequency;
         let mut max_amplitude = 0.0;
 
-        // Add extra octaves based on detail level for finer detail at higher zoom
         let total_octaves = self.octaves + detail_level;
 
         for _ in 0..total_octaves {
-            let nx = x * frequency / self.scale;
-            let ny = y * frequency / self.scale;
+            // Apply 0.01 scale factor like fungal-jungle
+            let nx = x * freq * 0.01;
+            let ny = y * freq * 0.01;
             value += self.noise.get([nx, ny]) * amplitude;
             max_amplitude += amplitude;
             amplitude *= self.persistence;
-            frequency *= self.lacunarity;
+            freq *= self.lacunarity;
         }
 
         // Normalize to [-1, 1]

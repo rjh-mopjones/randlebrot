@@ -4,7 +4,7 @@ pub mod biome;
 pub mod coords;
 pub mod noise;
 
-pub use biome::BiomeType;
+pub use biome::{BiomeType, TileType};
 pub use coords::{ChunkCoord, DetailLevel, TileCoord, WorldPos};
 pub use noise::NoiseStrategy;
 

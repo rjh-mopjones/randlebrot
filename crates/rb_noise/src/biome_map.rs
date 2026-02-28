@@ -1,4 +1,4 @@
-use rb_core::{BiomeType, NoiseStrategy};
+use rb_core::{NoiseStrategy, TileType};
 
 use crate::strategy::ContinentalnessStrategy;
 use crate::tidally_locked::LatitudeTemperatureStrategy;
@@ -15,7 +15,7 @@ pub struct BiomeMap {
     pub width: usize,
     pub height: usize,
     /// Computed biome for each pixel
-    pub biomes: Vec<BiomeType>,
+    pub biomes: Vec<TileType>,
     /// Raw continentalness values for each pixel
     pub continentalness: Vec<f64>,
     /// Raw temperature values for each pixel
@@ -52,7 +52,7 @@ impl BiomeMap {
                 let temp = temp_strategy.generate(fx, fy, 0);
 
                 // Determine biome from climate
-                let biome = BiomeType::from_climate(cont, temp, SEA_LEVEL);
+                let biome = TileType::from_climate(cont, temp, SEA_LEVEL);
 
                 continentalness.push(cont);
                 temperature.push(temp);
@@ -114,7 +114,7 @@ impl BiomeMap {
     }
 
     /// Get biome at specific coordinates.
-    pub fn get_biome(&self, x: usize, y: usize) -> Option<BiomeType> {
+    pub fn get_biome(&self, x: usize, y: usize) -> Option<TileType> {
         if x < self.width && y < self.height {
             Some(self.biomes[y * self.width + x])
         } else {

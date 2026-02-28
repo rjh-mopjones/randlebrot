@@ -1,112 +1,97 @@
-/// Biome types for world map generation.
-/// Determined by continentalness (elevation) and temperature.
+/// Biome/tile types for world map generation.
+/// Matches the fungal-jungle tiling strategy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum BiomeType {
-    // Water biomes
+pub enum TileType {
     #[default]
-    Ocean,
-    IcePack,
-    HotOcean,
-
-    // Coastal biomes
+    Sea,
     Beach,
-    SnowBeach,
-
-    // Lowland biomes
     Plains,
-    Tundra,
-    Desert,
-
-    // Midland biomes
     Forest,
-
-    // Highland biomes
+    Desert,
+    Sahara,
     Mountain,
     Plateau,
-    SnowPeaks,
+    Snow,
+    White, // Frozen ocean/ice
 }
 
-impl BiomeType {
-    /// Returns the RGBA color for this biome.
-    /// Colors match the fungal-jungle style: tan land, green forests, blue ocean.
-    pub fn color(&self) -> [u8; 4] {
+impl TileType {
+    /// Returns the RGB color for this tile type.
+    /// Exact colors from fungal-jungle.
+    pub fn rgb(&self) -> [u8; 3] {
         match self {
-            // Water - cyan/turquoise blue
-            Self::Ocean => [64, 191, 255, 255],      // Cyan blue
-            Self::IcePack => [200, 230, 255, 255],   // Light ice blue
-            Self::HotOcean => [64, 191, 255, 255],   // Same as ocean (hot water still blue)
-
-            // Coastal - tan/sandy
-            Self::Beach => [210, 180, 140, 255],     // Tan
-            Self::SnowBeach => [180, 190, 200, 255], // Cool gray-tan
-
-            // Lowland/temperate - tan for warm, green for moderate
-            Self::Plains => [210, 180, 140, 255],    // Tan (warm plains are dry)
-            Self::Tundra => [180, 190, 200, 255],    // Cool gray
-            Self::Desert => [210, 180, 140, 255],    // Tan (same as plains - dry land)
-
-            // Forest - dark green (cooler, wetter areas)
-            Self::Forest => [0, 128, 0, 255],        // Dark green
-
-            // Highland
-            Self::Mountain => [140, 130, 120, 255],  // Gray-brown
-            Self::Plateau => [180, 150, 120, 255],   // Light brown
-            Self::SnowPeaks => [220, 220, 230, 255], // Light gray/white
+            Self::Sea => [0, 191, 255],        // Cyan blue
+            Self::Beach => [222, 184, 135],   // Tan/burlywood
+            Self::Plains => [50, 205, 50],    // Lime green
+            Self::Forest => [0, 100, 0],      // Dark green
+            Self::Desert => [255, 215, 0],    // Gold
+            Self::Sahara => [255, 165, 0],    // Orange
+            Self::Mountain => [105, 105, 105], // Dark gray
+            Self::Plateau => [139, 69, 19],   // Saddle brown
+            Self::Snow => [211, 211, 211],    // Light gray
+            Self::White => [255, 255, 255],   // Pure white (frozen ocean)
         }
     }
 
-    /// Determine biome from continentalness and temperature.
+    /// Returns the RGBA color for this tile type.
+    pub fn color(&self) -> [u8; 4] {
+        let [r, g, b] = self.rgb();
+        [r, g, b, 255]
+    }
+
+    /// Determine tile type from continentalness and temperature.
+    /// Uses the fungal-jungle tiling strategy thresholds.
     ///
     /// # Arguments
-    /// * `continentalness` - Elevation factor, typically in [-1.0, 1.0]
-    /// * `temperature` - Temperature in Celsius-like scale, typically [-100, 100]
-    /// * `sea_level` - The continentalness threshold for water vs land (default -0.025)
+    /// * `continentalness` - Elevation factor from noise, typically [-1.0, 1.0]
+    /// * `temperature` - Temperature value, typically [-50, 100]
+    /// * `sea_level` - Threshold for ocean vs land (default: -0.025)
     pub fn from_climate(continentalness: f64, temperature: f64, sea_level: f64) -> Self {
         if continentalness < sea_level {
-            // Ocean biomes
+            // Ocean
             if temperature < -15.0 {
-                Self::IcePack
+                Self::White // Frozen ocean
             } else if temperature > 50.0 {
-                Self::HotOcean
+                Self::Desert // Hot ocean (rare)
             } else {
-                Self::Ocean
+                Self::Sea
             }
         } else if continentalness < sea_level + 0.02 {
-            // Coastal/beach biomes
+            // Coastal zone
             if temperature > 3.0 {
                 Self::Beach
             } else {
-                Self::SnowBeach
+                Self::Snow
             }
         } else if continentalness < sea_level + 0.1 {
-            // Lowland biomes
+            // Low land
             if temperature < 3.0 {
-                Self::Tundra
+                Self::Snow
             } else if temperature > 60.0 {
-                Self::Desert
+                Self::Sahara
             } else {
                 Self::Plains
             }
         } else if continentalness < sea_level + 0.2 {
-            // Midland biomes
+            // Mid land
             if temperature < 3.0 {
-                Self::Tundra
+                Self::Snow
             } else if temperature > 60.0 {
-                Self::Desert
+                Self::Sahara
             } else {
                 Self::Forest
             }
         } else if continentalness < sea_level + 0.3 {
-            // Highland biomes
+            // High land (mountains)
             if temperature > 70.0 {
                 Self::Plateau
             } else {
                 Self::Mountain
             }
         } else {
-            // High mountain peaks
+            // Extreme elevation
             if temperature < 70.0 {
-                Self::SnowPeaks
+                Self::Snow
             } else {
                 Self::Plateau
             }
@@ -114,43 +99,52 @@ impl BiomeType {
     }
 }
 
+// Re-export as BiomeType for backwards compatibility
+pub type BiomeType = TileType;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn deep_ocean_is_blue() {
-        let biome = BiomeType::from_climate(-0.5, 20.0, -0.025);
-        assert_eq!(biome, BiomeType::Ocean);
+    fn ocean_below_sea_level() {
+        let tile = TileType::from_climate(-0.5, 20.0, -0.025);
+        assert_eq!(tile, TileType::Sea);
     }
 
     #[test]
-    fn frozen_ocean_is_ice() {
-        let biome = BiomeType::from_climate(-0.5, -30.0, -0.025);
-        assert_eq!(biome, BiomeType::IcePack);
+    fn frozen_ocean() {
+        let tile = TileType::from_climate(-0.5, -30.0, -0.025);
+        assert_eq!(tile, TileType::White);
     }
 
     #[test]
-    fn lowland_warm_is_plains() {
-        let biome = BiomeType::from_climate(0.05, 25.0, -0.025);
-        assert_eq!(biome, BiomeType::Plains);
+    fn beach_near_coast() {
+        let tile = TileType::from_climate(-0.01, 25.0, -0.025);
+        assert_eq!(tile, TileType::Beach);
     }
 
     #[test]
-    fn midland_warm_is_forest() {
-        let biome = BiomeType::from_climate(0.15, 25.0, -0.025);
-        assert_eq!(biome, BiomeType::Forest);
+    fn plains_low_land() {
+        let tile = TileType::from_climate(0.05, 25.0, -0.025);
+        assert_eq!(tile, TileType::Plains);
     }
 
     #[test]
-    fn highland_cool_is_mountain() {
-        let biome = BiomeType::from_climate(0.25, 30.0, -0.025);
-        assert_eq!(biome, BiomeType::Mountain);
+    fn forest_mid_land() {
+        let tile = TileType::from_climate(0.15, 25.0, -0.025);
+        assert_eq!(tile, TileType::Forest);
     }
 
     #[test]
-    fn very_high_cold_is_snow_peaks() {
-        let biome = BiomeType::from_climate(0.35, 20.0, -0.025);
-        assert_eq!(biome, BiomeType::SnowPeaks);
+    fn mountain_high_land() {
+        let tile = TileType::from_climate(0.25, 30.0, -0.025);
+        assert_eq!(tile, TileType::Mountain);
+    }
+
+    #[test]
+    fn sahara_hot_lowland() {
+        let tile = TileType::from_climate(0.05, 70.0, -0.025);
+        assert_eq!(tile, TileType::Sahara);
     }
 }
