@@ -10,3 +10,6 @@ rb_tilemap.workspace = true
 bevy.workspace = true
 serde.workspace = true
 ron.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

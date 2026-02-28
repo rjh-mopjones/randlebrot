@@ -8,3 +8,4 @@ rb_core.workspace = true
 rb_noise.workspace = true
 bevy.workspace = true
 serde.workspace = true
+ron.workspace = true

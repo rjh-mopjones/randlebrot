@@ -8,5 +8,6 @@ rb_core.workspace = true
 rb_noise.workspace = true
 rb_world.workspace = true
 rb_tilemap.workspace = true
+rb_persistence.workspace = true
 bevy.workspace = true
 bevy_egui.workspace = true

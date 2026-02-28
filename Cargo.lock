@@ -3962,6 +3962,7 @@ dependencies = [
  "bevy_egui",
  "rb_core",
  "rb_noise",
+ "rb_persistence",
  "rb_tilemap",
  "rb_world",
 ]
@@ -3995,6 +3996,7 @@ dependencies = [
  "rb_world",
  "ron",
  "serde",
+ "tempfile",
 ]
 
 [[package]]
@@ -4023,6 +4025,7 @@ dependencies = [
  "bevy",
  "rb_core",
  "rb_noise",
+ "ron",
  "serde",
 ]
 
@@ -4486,6 +4489,19 @@ dependencies = [
  "num-traits",
  "serde",
  "slotmap",
+]
+
+[[package]]
+name = "tempfile"
+version = "3.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82a72c767771b47409d2345987fda8628641887d5466101319899796367354a0"
+dependencies = [
+ "fastrand",
+ "getrandom 0.3.4",
+ "once_cell",
+ "rustix 1.1.4",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
