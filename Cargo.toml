@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rb_core",
+    "crates/rb_noise",
+    "crates/rb_world",
+    "crates/rb_tilemap",
+    "crates/rb_entity_spawn",
+    "crates/rb_editor",
+    "crates/rb_player",
+    "crates/rb_persistence",
+]
+
+[workspace.dependencies]
+bevy = { version = "0.15", default-features = true }
+bevy_egui = "0.31"
+noise = "0.9"
+serde = { version = "1", features = ["derive"] }
+ron = "0.8"
+bitflags = "2"
+
+# Internal crate dependencies
+rb_core = { path = "crates/rb_core" }
+rb_noise = { path = "crates/rb_noise" }
+rb_world = { path = "crates/rb_world" }
+rb_tilemap = { path = "crates/rb_tilemap" }
+rb_entity_spawn = { path = "crates/rb_entity_spawn" }
+rb_editor = { path = "crates/rb_editor" }
+rb_player = { path = "crates/rb_player" }
+rb_persistence = { path = "crates/rb_persistence" }
+
+[package]
+name = "randlebrot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy.workspace = true
+rb_core.workspace = true
+rb_noise.workspace = true
+rb_world.workspace = true
+rb_tilemap.workspace = true
+rb_entity_spawn.workspace = true
+rb_editor.workspace = true
+rb_player.workspace = true
+rb_persistence.workspace = true

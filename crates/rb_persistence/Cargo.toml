@@ -1,0 +1,12 @@
+[package]
+name = "rb_persistence"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rb_core.workspace = true
+rb_world.workspace = true
+rb_tilemap.workspace = true
+bevy.workspace = true
+serde.workspace = true
+ron.workspace = true

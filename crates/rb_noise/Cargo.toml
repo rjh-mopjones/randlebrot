@@ -1,0 +1,16 @@
+[package]
+name = "rb_noise"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rb_core.workspace = true
+noise.workspace = true
+bevy.workspace = true
+
+[dev-dependencies]
+bevy.workspace = true
+
+[[example]]
+name = "noise_preview"
+path = "examples/noise_preview.rs"

@@ -1,0 +1,10 @@
+[package]
+name = "rb_tilemap"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rb_core.workspace = true
+rb_world.workspace = true
+bevy.workspace = true
+bitflags.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "rb_world"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rb_core.workspace = true
+rb_noise.workspace = true
+bevy.workspace = true
+serde.workspace = true
