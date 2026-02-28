@@ -26,6 +26,7 @@ fn main() {
         .add_event::<ModeTransitionEvent>()
         .init_resource::<CurrentLayer>()
         .init_resource::<GeneratorParams>()
+        .init_resource::<CursorWorldPos>()
         // Plugins
         .add_plugins((
             rb_core::RbCorePlugin,
@@ -46,6 +47,8 @@ fn main() {
             regenerate_world.run_if(in_state(AppMode::WorldGenerator)),
             camera_zoom,
             camera_pan,
+            update_cursor_world_pos,
+            update_chunk_highlight,
             log_mode_transition,
         ))
         .run();
@@ -106,6 +109,17 @@ struct WorldMapTextures {
 #[derive(Component)]
 struct WorldMapSprite;
 
+/// Marker component for the chunk highlight overlay.
+#[derive(Component)]
+struct ChunkHighlight;
+
+/// Resource tracking cursor position in world space.
+#[derive(Resource, Default)]
+struct CursorWorldPos(Vec2);
+
+/// Size of macro chunks in pixels (for highlighting grid).
+const CHUNK_SIZE: f32 = 64.0;
+
 fn setup_world_map(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -147,6 +161,17 @@ fn setup_world_map(
             ..default()
         },
         WorldMapSprite,
+    ));
+
+    // Spawn chunk highlight overlay (semi-transparent rectangle)
+    commands.spawn((
+        Sprite {
+            color: Color::srgba(1.0, 1.0, 0.8, 0.3),
+            custom_size: Some(Vec2::splat(CHUNK_SIZE)),
+            ..default()
+        },
+        Transform::from_xyz(-10000.0, -10000.0, 0.5), // Start off-screen
+        ChunkHighlight,
     ));
 
     println!("World map ready.");
@@ -330,4 +355,58 @@ fn camera_pan(
         transform.translation.x += pan_delta.x * projection.scale;
         transform.translation.y += pan_delta.y * projection.scale;
     }
+}
+
+fn update_cursor_world_pos(
+    windows: Query<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    mut cursor_pos: ResMut<CursorWorldPos>,
+) {
+    let Ok(window) = windows.get_single() else { return };
+    let Some(cursor_screen_pos) = window.cursor_position() else { return };
+    let Ok((camera, camera_transform)) = camera_query.get_single() else { return };
+
+    if let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_screen_pos) {
+        cursor_pos.0 = world_pos;
+    }
+}
+
+fn update_chunk_highlight(
+    cursor_pos: Res<CursorWorldPos>,
+    world_def: Res<WorldDefinition>,
+    mut highlight_query: Query<&mut Transform, With<ChunkHighlight>>,
+    mut contexts: EguiContexts,
+) {
+    let Ok(mut highlight_transform) = highlight_query.get_single_mut() else { return };
+
+    // Hide highlight if cursor is over UI
+    if contexts.ctx_mut().is_pointer_over_area() {
+        highlight_transform.translation.x = -10000.0;
+        return;
+    }
+
+    // Convert world position to map coordinates
+    let half_width = world_def.width as f32 / 2.0;
+    let half_height = world_def.height as f32 / 2.0;
+
+    let map_x = cursor_pos.0.x + half_width;
+    let map_y = half_height - cursor_pos.0.y; // Flip Y
+
+    // Check if cursor is within map bounds
+    if map_x < 0.0 || map_x >= world_def.width as f32 || map_y < 0.0 || map_y >= world_def.height as f32 {
+        // Hide highlight when outside map
+        highlight_transform.translation.x = -10000.0;
+        return;
+    }
+
+    // Snap to chunk grid
+    let chunk_x = (map_x / CHUNK_SIZE).floor() * CHUNK_SIZE;
+    let chunk_y = (map_y / CHUNK_SIZE).floor() * CHUNK_SIZE;
+
+    // Convert back to world coordinates (center of chunk)
+    let world_x = chunk_x + CHUNK_SIZE / 2.0 - half_width;
+    let world_y = half_height - chunk_y - CHUNK_SIZE / 2.0;
+
+    highlight_transform.translation.x = world_x;
+    highlight_transform.translation.y = world_y;
 }
