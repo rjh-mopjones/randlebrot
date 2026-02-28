@@ -12,7 +12,7 @@ pub use chunk_hierarchy::{
 };
 pub use resource::WorldChunks;
 pub use strategy::{ContinentalnessStrategy, TemperatureStrategy};
-pub use tidally_locked::TidallyLockedTemperatureStrategy;
+pub use tidally_locked::{LatitudeTemperatureStrategy, TidallyLockedTemperatureStrategy};
 
 /// Noise generation plugin for Randlebrot.
 /// Provides fractal noise hierarchy with LRU caching.

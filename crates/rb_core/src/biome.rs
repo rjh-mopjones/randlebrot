@@ -28,20 +28,30 @@ pub enum BiomeType {
 
 impl BiomeType {
     /// Returns the RGBA color for this biome.
+    /// Colors match the fungal-jungle style: tan land, green forests, blue ocean.
     pub fn color(&self) -> [u8; 4] {
         match self {
-            Self::Ocean => [0, 191, 255, 255],       // Deep blue
-            Self::IcePack => [255, 255, 255, 255],   // White
-            Self::HotOcean => [255, 165, 0, 255],    // Orange (hot water)
-            Self::Beach => [222, 184, 135, 255],    // Tan/sandy
-            Self::SnowBeach => [200, 200, 210, 255], // Light gray-blue
-            Self::Plains => [50, 205, 50, 255],     // Lime green
-            Self::Tundra => [211, 211, 211, 255],   // Light gray
-            Self::Desert => [255, 165, 0, 255],     // Orange
-            Self::Forest => [0, 100, 0, 255],       // Dark green
-            Self::Mountain => [105, 105, 105, 255], // Dark gray
-            Self::Plateau => [139, 69, 19, 255],    // Brown
-            Self::SnowPeaks => [240, 240, 245, 255], // Near white
+            // Water - cyan/turquoise blue
+            Self::Ocean => [64, 191, 255, 255],      // Cyan blue
+            Self::IcePack => [200, 230, 255, 255],   // Light ice blue
+            Self::HotOcean => [64, 191, 255, 255],   // Same as ocean (hot water still blue)
+
+            // Coastal - tan/sandy
+            Self::Beach => [210, 180, 140, 255],     // Tan
+            Self::SnowBeach => [180, 190, 200, 255], // Cool gray-tan
+
+            // Lowland/temperate - tan for warm, green for moderate
+            Self::Plains => [210, 180, 140, 255],    // Tan (warm plains are dry)
+            Self::Tundra => [180, 190, 200, 255],    // Cool gray
+            Self::Desert => [210, 180, 140, 255],    // Tan (same as plains - dry land)
+
+            // Forest - dark green (cooler, wetter areas)
+            Self::Forest => [0, 128, 0, 255],        // Dark green
+
+            // Highland
+            Self::Mountain => [140, 130, 120, 255],  // Gray-brown
+            Self::Plateau => [180, 150, 120, 255],   // Light brown
+            Self::SnowPeaks => [220, 220, 230, 255], // Light gray/white
         }
     }
 

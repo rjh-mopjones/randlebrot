@@ -1,7 +1,7 @@
 use rb_core::{BiomeType, NoiseStrategy};
 
 use crate::strategy::ContinentalnessStrategy;
-use crate::tidally_locked::TidallyLockedTemperatureStrategy;
+use crate::tidally_locked::LatitudeTemperatureStrategy;
 
 /// Sea level threshold for continentalness.
 /// Values below this are ocean, values above are land.
@@ -23,7 +23,8 @@ pub struct BiomeMap {
 }
 
 impl BiomeMap {
-    /// Generate a biome map for a tidally-locked world.
+    /// Generate a biome map with latitude-based temperature.
+    /// Cold at top (y=0), hot at bottom (y=height).
     ///
     /// # Arguments
     /// * `seed` - Random seed for noise generation
@@ -31,11 +32,8 @@ impl BiomeMap {
     /// * `height` - Map height in pixels (e.g., 512)
     pub fn generate(seed: u32, width: usize, height: usize) -> Self {
         let cont_strategy = ContinentalnessStrategy::new(seed);
-        let temp_strategy = TidallyLockedTemperatureStrategy::new(
+        let temp_strategy = LatitudeTemperatureStrategy::new(
             seed.wrapping_add(1),
-            width as f64 / 2.0,  // terminator at center
-            width as f64 * 0.2, // twilight zone is 40% of map width
-            width as f64,
             height as f64,
         );
 
@@ -172,26 +170,26 @@ mod tests {
     }
 
     #[test]
-    fn dark_side_has_ice() {
+    fn top_is_cold() {
         let map = BiomeMap::generate(42, 1024, 512);
-        // Far west edge should be frozen
-        let biome = map.get_biome(10, 256).unwrap();
+        // Top of map should be cold
+        let temp = map.get_temperature(512, 10).unwrap();
         assert!(
-            biome == BiomeType::IcePack || biome == BiomeType::Tundra || biome == BiomeType::SnowPeaks,
-            "Dark side biome {:?} should be frozen",
-            biome
+            temp < 0.0,
+            "Top temperature {} should be cold (< 0)",
+            temp
         );
     }
 
     #[test]
-    fn sun_side_has_desert() {
+    fn bottom_is_hot() {
         let map = BiomeMap::generate(42, 1024, 512);
-        // Far east edge should be hot
-        let biome = map.get_biome(1010, 256).unwrap();
+        // Bottom of map should be hot
+        let temp = map.get_temperature(512, 500).unwrap();
         assert!(
-            biome == BiomeType::Desert || biome == BiomeType::HotOcean || biome == BiomeType::Plateau,
-            "Sun side biome {:?} should be hot",
-            biome
+            temp > 50.0,
+            "Bottom temperature {} should be hot (> 50)",
+            temp
         );
     }
 }
