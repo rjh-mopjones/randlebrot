@@ -139,6 +139,67 @@ impl BiomeMap {
             None
         }
     }
+
+    /// Generate a meso-level (zoomed in) biome map for a specific world region.
+    ///
+    /// # Arguments
+    /// * `seed` - Random seed for noise generation
+    /// * `world_x` - World X coordinate of the region's top-left corner
+    /// * `world_y` - World Y coordinate of the region's top-left corner
+    /// * `world_size` - Size of the world region to sample (e.g., 64.0 for one macro chunk)
+    /// * `output_size` - Output image size in pixels (e.g., 512)
+    /// * `world_height` - Total world height for temperature calculation
+    /// * `detail_level` - Noise detail level (1 for meso, 2 for micro)
+    pub fn generate_region(
+        seed: u32,
+        world_x: f64,
+        world_y: f64,
+        world_size: f64,
+        output_size: usize,
+        world_height: f64,
+        detail_level: u32,
+    ) -> Self {
+        let cont_strategy = ContinentalnessStrategy::new(seed);
+        let temp_strategy = LatitudeTemperatureStrategy::new(
+            seed.wrapping_add(1),
+            world_height,
+        );
+
+        let total_pixels = output_size * output_size;
+        let mut biomes = Vec::with_capacity(total_pixels);
+        let mut continentalness = Vec::with_capacity(total_pixels);
+        let mut temperature = Vec::with_capacity(total_pixels);
+
+        // Scale factor: how many world units per pixel
+        let scale = world_size / output_size as f64;
+
+        for py in 0..output_size {
+            for px in 0..output_size {
+                // Convert pixel to world coordinates
+                let wx = world_x + (px as f64 * scale);
+                let wy = world_y + (py as f64 * scale);
+
+                // Sample noise layers with specified detail level
+                let cont = cont_strategy.generate(wx, wy, detail_level);
+                let temp = temp_strategy.generate(wx, wy, detail_level);
+
+                // Determine biome from climate
+                let biome = TileType::from_climate(cont, temp, SEA_LEVEL);
+
+                continentalness.push(cont);
+                temperature.push(temp);
+                biomes.push(biome);
+            }
+        }
+
+        Self {
+            width: output_size,
+            height: output_size,
+            biomes,
+            continentalness,
+            temperature,
+        }
+    }
 }
 
 #[cfg(test)]
