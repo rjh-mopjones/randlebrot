@@ -1,6 +1,11 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::culture::Culture;
+use crate::faction::Faction;
+use crate::roads::{Road, TradeRoute};
+use crate::territory::TerritoryMap;
+
 /// World definition resource containing all authored world data.
 ///
 /// This is the top-level serializable structure for a world,
@@ -29,6 +34,17 @@ pub struct WorldDefinition {
     pub cities: Vec<City>,
     /// Authored landmarks.
     pub landmarks: Vec<Landmark>,
+    /// Cultures present in this world.
+    pub cultures: Vec<Culture>,
+    /// Political factions.
+    pub factions: Vec<Faction>,
+    /// Road network.
+    pub roads: Vec<Road>,
+    /// Trade routes.
+    pub trade_routes: Vec<TradeRoute>,
+    /// Cached territory ownership (regenerated on load, not serialized).
+    #[serde(skip)]
+    pub territory_cache: Option<TerritoryMap>,
 }
 
 impl Default for WorldDefinition {
@@ -45,6 +61,11 @@ impl Default for WorldDefinition {
             regions: Vec::new(),
             cities: Vec::new(),
             landmarks: Vec::new(),
+            cultures: Vec::new(),
+            factions: Vec::new(),
+            roads: Vec::new(),
+            trade_routes: Vec::new(),
+            territory_cache: None,
         }
     }
 }
@@ -312,6 +333,9 @@ pub struct WorldIdGenerator {
     next_region_id: u32,
     next_city_id: u32,
     next_landmark_id: u32,
+    next_faction_id: u32,
+    next_road_id: u32,
+    next_trade_route_id: u32,
 }
 
 impl WorldIdGenerator {
@@ -330,6 +354,24 @@ impl WorldIdGenerator {
     pub fn next_landmark_id(&mut self) -> u32 {
         let id = self.next_landmark_id;
         self.next_landmark_id += 1;
+        id
+    }
+
+    pub fn next_faction_id(&mut self) -> u32 {
+        let id = self.next_faction_id;
+        self.next_faction_id += 1;
+        id
+    }
+
+    pub fn next_road_id(&mut self) -> u32 {
+        let id = self.next_road_id;
+        self.next_road_id += 1;
+        id
+    }
+
+    pub fn next_trade_route_id(&mut self) -> u32 {
+        let id = self.next_trade_route_id;
+        self.next_trade_route_id += 1;
         id
     }
 }

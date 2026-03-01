@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use rb_core::{AppMode, ModeTransitionEvent, handle_mode_shortcuts};
 use rb_editor::RegenerationRequest;
 use rb_noise::BiomeMap;
-use rb_world::WorldDefinition;
+use rb_world::{CivilizationConfig, CivilizationGenerator, CivilizationResult, WorldDefinition};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -91,6 +91,7 @@ pub enum CurrentLayer {
     Biome,
     Temperature,
     Continentalness,
+    Political,
 }
 
 impl CurrentLayer {
@@ -98,7 +99,8 @@ impl CurrentLayer {
         match self {
             Self::Biome => Self::Temperature,
             Self::Temperature => Self::Continentalness,
-            Self::Continentalness => Self::Biome,
+            Self::Continentalness => Self::Political,
+            Self::Political => Self::Biome,
         }
     }
 
@@ -107,6 +109,7 @@ impl CurrentLayer {
             Self::Biome => "Biome",
             Self::Temperature => "Temperature",
             Self::Continentalness => "Continentalness",
+            Self::Political => "Political",
         }
     }
 }
@@ -133,6 +136,7 @@ struct WorldMapTextures {
     biome: Handle<Image>,
     temperature: Handle<Image>,
     continentalness: Handle<Image>,
+    political: Handle<Image>,
 }
 
 /// Marker component for the world map sprite.
@@ -203,6 +207,10 @@ struct GenerationTask {
     progress: Option<Arc<AtomicUsize>>,
     /// Macro map data (generated first)
     macro_data: Option<(Vec<u8>, Vec<u8>, Vec<u8>)>, // biome, temp, cont
+    /// Civilization generation result
+    civ_result: Option<CivilizationResult>,
+    /// Territory overlay image data
+    territory_image: Option<Vec<u8>>,
 }
 
 /// Size of macro chunks in pixels (for highlighting grid).
@@ -260,7 +268,7 @@ fn config_ui(
 fn start_generation(
     mut commands: Commands,
     mut task_res: ResMut<GenerationTask>,
-    world_def: Res<WorldDefinition>,
+    mut world_def: ResMut<WorldDefinition>,
 ) {
     commands.remove_resource::<GenerationStarted>();
 
@@ -277,6 +285,36 @@ fn start_generation(
     let macro_temp = biome_map.to_temperature_image();
     let macro_cont = biome_map.to_continentalness_image();
     task_res.macro_data = Some((macro_biome, macro_temp, macro_cont));
+
+    // Generate civilization
+    println!("Generating civilization...");
+    let civ_config = CivilizationConfig {
+        max_settlements: 40,
+        generate_roads: true,
+        generate_trade_routes: true,
+        generate_territories: true,
+        territory_threshold: 0.1,
+    };
+    let civ_generator = CivilizationGenerator::new(seed, civ_config);
+    let civ_result = civ_generator.generate(&biome_map, &mut world_def);
+    println!(
+        "Civilization: {} settlements, {} factions, {} roads",
+        civ_result.settlements_placed,
+        civ_result.factions_created,
+        civ_result.roads_built
+    );
+
+    // Generate territory overlay image
+    let territory_image = if let Some(ref territory) = world_def.territory_cache {
+        let faction_colors: Vec<_> = world_def.factions.iter()
+            .map(|f| (f.id, f.color))
+            .collect();
+        Some(territory.to_image(&faction_colors))
+    } else {
+        None
+    };
+    task_res.territory_image = territory_image;
+    task_res.civ_result = Some(civ_result);
 
     // Spawn async task for meso tiles
     println!("Generating {} meso tiles in background...", TOTAL_CHUNKS);
@@ -306,6 +344,18 @@ fn start_generation(
 
     task_res.task = Some(task);
     task_res.progress = Some(progress);
+}
+
+/// Marker for settlement sprites.
+#[derive(Component)]
+struct SettlementMarker {
+    city_id: u32,
+}
+
+/// Marker for road line sprites.
+#[derive(Component)]
+struct RoadMarker {
+    road_id: u32,
 }
 
 /// Poll generation task and transition when complete.
@@ -338,10 +388,20 @@ fn poll_generation(
             let cont_image = create_image(world_def.width, world_def.height, cont_data);
             let cont_handle = images.add(cont_image);
 
+            // Create political/territory texture
+            let political_handle = if let Some(territory_data) = task_res.territory_image.take() {
+                let political_image = create_image(world_def.width, world_def.height, territory_data);
+                images.add(political_image)
+            } else {
+                // Fallback to biome if no territory
+                biome_handle.clone()
+            };
+
             commands.insert_resource(WorldMapTextures {
                 biome: biome_handle.clone(),
                 temperature: temp_handle,
                 continentalness: cont_handle,
+                political: political_handle,
             });
 
             commands.spawn((
@@ -358,11 +418,67 @@ fn poll_generation(
                 Transform::from_xyz(-10000.0, -10000.0, 0.5),
                 ChunkHighlight,
             ));
+
+            // Spawn settlement markers
+            let half_width = world_def.width as f32 / 2.0;
+            let half_height = world_def.height as f32 / 2.0;
+
+            for city in &world_def.cities {
+                let world_x = city.position.x as f32 - half_width;
+                let world_y = half_height - city.position.y as f32;
+
+                let (size, color) = match city.tier {
+                    rb_world::CityTier::Capital => (12.0, Color::srgb(1.0, 0.8, 0.2)), // Gold
+                    rb_world::CityTier::Town => (8.0, Color::srgb(0.8, 0.8, 0.8)),     // Silver
+                    rb_world::CityTier::Village => (5.0, Color::srgb(0.6, 0.5, 0.4)),  // Brown
+                };
+
+                commands.spawn((
+                    Sprite {
+                        color,
+                        custom_size: Some(Vec2::splat(size)),
+                        ..default()
+                    },
+                    Transform::from_xyz(world_x, world_y, 0.3),
+                    SettlementMarker { city_id: city.id },
+                ));
+            }
+
+            // Spawn road markers (simplified - just spawn dots along waypoints)
+            for road in &world_def.roads {
+                let color = match road.road_type {
+                    rb_world::RoadType::Imperial => Color::srgba(0.9, 0.7, 0.2, 0.8),
+                    rb_world::RoadType::Provincial => Color::srgba(0.7, 0.7, 0.7, 0.6),
+                    rb_world::RoadType::Trail => Color::srgba(0.5, 0.4, 0.3, 0.4),
+                };
+                let width = match road.road_type {
+                    rb_world::RoadType::Imperial => 3.0,
+                    rb_world::RoadType::Provincial => 2.0,
+                    rb_world::RoadType::Trail => 1.5,
+                };
+
+                // Draw dots along the road path
+                for waypoint in &road.waypoints {
+                    let world_x = waypoint.x as f32 - half_width;
+                    let world_y = half_height - waypoint.y as f32;
+
+                    commands.spawn((
+                        Sprite {
+                            color,
+                            custom_size: Some(Vec2::splat(width)),
+                            ..default()
+                        },
+                        Transform::from_xyz(world_x, world_y, 0.2),
+                        RoadMarker { road_id: road.id },
+                    ));
+                }
+            }
         }
 
         // Clean up and transition
         task_res.task = None;
         task_res.progress = None;
+        task_res.civ_result = None;
         next_phase.set(AppPhase::Ready);
         println!("World ready! {} meso tiles cached.", cache.textures.len());
     }
@@ -451,6 +567,7 @@ fn toggle_layer(
             CurrentLayer::Biome => textures.biome.clone(),
             CurrentLayer::Temperature => textures.temperature.clone(),
             CurrentLayer::Continentalness => textures.continentalness.clone(),
+            CurrentLayer::Political => textures.political.clone(),
         };
     }
 
@@ -505,6 +622,7 @@ fn regenerate_world(
             CurrentLayer::Biome => textures.biome.clone(),
             CurrentLayer::Temperature => textures.temperature.clone(),
             CurrentLayer::Continentalness => textures.continentalness.clone(),
+            CurrentLayer::Political => textures.political.clone(),
         };
     }
 

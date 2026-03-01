@@ -9,3 +9,6 @@ rb_noise.workspace = true
 bevy.workspace = true
 serde.workspace = true
 ron.workspace = true
+pathfinding = "4.4"
+rand = "0.8"
+rand_chacha = "0.3"
