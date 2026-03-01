@@ -11,7 +11,7 @@ pub struct CurrentLayer(pub NoiseLayer);
 
 impl Default for CurrentLayer {
     fn default() -> Self {
-        Self(NoiseLayer::Biome)
+        Self(NoiseLayer::Aggregate)
     }
 }
 
@@ -191,7 +191,7 @@ pub fn generator_ui_system(
                 ui.heading("View Layer");
 
                 let terrain_layers = [
-                    NoiseLayer::Biome,
+                    NoiseLayer::Aggregate,
                     NoiseLayer::Continentalness,
                     NoiseLayer::Temperature,
                     NoiseLayer::Tectonic,

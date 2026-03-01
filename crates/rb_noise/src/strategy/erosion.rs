@@ -40,6 +40,7 @@ impl ErosionStrategy {
         }
     }
 
+    /// Standard fBm for base erosion patterns.
     fn fbm(&self, x: f64, y: f64, detail_level: u32) -> f64 {
         let mut value = 0.0;
         let mut amplitude = 1.0;
@@ -58,6 +59,38 @@ impl ErosionStrategy {
         }
 
         value / max_amplitude
+    }
+
+    /// Ridged noise creates sharp valleys/channels for erosion patterns.
+    /// Different from smooth fBm - produces distinct erosion features.
+    fn ridged_fbm(&self, x: f64, y: f64, detail_level: u32) -> f64 {
+        let mut value = 0.0;
+        let mut amplitude = 1.0;
+        let mut freq = self.frequency;
+        let mut weight = 1.0;
+
+        let total_octaves = self.octaves + detail_level;
+
+        for _ in 0..total_octaves {
+            // Use different scale than humidity (0.015 vs 0.008)
+            let nx = x * freq * 0.015;
+            let ny = y * freq * 0.015;
+
+            // Ridged noise: 1 - |noise| creates sharp valleys
+            let signal = 1.0 - self.noise.get([nx, ny]).abs();
+            // Square for sharper ridges
+            let signal = signal * signal;
+            // Weight by previous value for more natural look
+            let weighted = signal * weight;
+            weight = signal.clamp(0.0, 1.0);
+
+            value += weighted * amplitude;
+            amplitude *= self.persistence;
+            freq *= self.lacunarity;
+        }
+
+        // Normalize to 0-1 range
+        (value * 0.5).clamp(0.0, 1.0)
     }
 
     /// Generate erosion value that depends on continentalness.
@@ -92,8 +125,8 @@ impl ErosionStrategy {
 
 impl NoiseStrategy for ErosionStrategy {
     fn generate(&self, x: f64, y: f64, detail_level: u32) -> f64 {
-        // Without continentalness context, just return base erosion
-        (self.fbm(x, y, detail_level) + 1.0) * 0.5
+        // Use ridged noise for sharp erosion valleys (distinct from humidity)
+        self.ridged_fbm(x, y, detail_level)
     }
 
     fn name(&self) -> &'static str {

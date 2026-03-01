@@ -223,7 +223,7 @@ impl BiomeMap {
             for x in 0..self.width {
                 let idx = y * self.width + x;
                 let color = match layer {
-                    NoiseLayer::Biome => self.biomes[idx].color(),
+                    NoiseLayer::Aggregate => self.biomes[idx].color(),
                     NoiseLayer::Continentalness => {
                         grayscale_to_rgba(self.continentalness[idx], -1.0, 1.0)
                     }
@@ -250,7 +250,7 @@ impl BiomeMap {
 
     /// Convert biome data to RGBA image bytes.
     pub fn to_biome_image(&self) -> Vec<u8> {
-        self.to_layer_image(NoiseLayer::Biome)
+        self.to_layer_image(NoiseLayer::Aggregate)
     }
 
     /// Convert temperature data to RGBA image bytes (blue-to-red gradient).

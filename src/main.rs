@@ -573,7 +573,7 @@ fn handle_layer_change(
     current_layer.0 = new_layer;
 
     // Only show settlements/roads on the Biome (game) layer
-    let show_overlays = new_layer == NoiseLayer::Biome;
+    let show_overlays = new_layer == NoiseLayer::Aggregate;
     let overlay_visibility = if show_overlays { Visibility::Inherited } else { Visibility::Hidden };
 
     for mut vis in settlement_query.iter_mut() {

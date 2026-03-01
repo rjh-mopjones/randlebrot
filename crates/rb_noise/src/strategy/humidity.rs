@@ -48,8 +48,9 @@ impl HumidityStrategy {
         let total_octaves = self.octaves + detail_level;
 
         for _ in 0..total_octaves {
-            let nx = x * freq * 0.008;
-            let ny = y * freq * 0.008;
+            // Use much larger scale than erosion (0.003 vs 0.015) for broad humidity zones
+            let nx = x * freq * 0.003;
+            let ny = y * freq * 0.003;
             value += self.noise.get([nx, ny]) * amplitude;
             max_amplitude += amplitude;
             amplitude *= self.persistence;

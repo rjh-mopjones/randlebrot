@@ -4,7 +4,7 @@ use rb_core::ResourceType;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum NoiseLayer {
     #[default]
-    Biome,
+    Aggregate,
     Continentalness,
     Temperature,
     Tectonic,
@@ -32,7 +32,7 @@ impl NoiseLayer {
     /// Returns all noise layers.
     pub fn all() -> &'static [NoiseLayer] {
         &[
-            Self::Biome,
+            Self::Aggregate,
             Self::Continentalness,
             Self::Temperature,
             Self::Tectonic,
@@ -59,7 +59,7 @@ impl NoiseLayer {
     /// Returns the display name for this layer.
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Biome => "Biome",
+            Self::Aggregate => "Aggregate",
             Self::Continentalness => "Continentalness",
             Self::Temperature => "Temperature",
             Self::Tectonic => "Tectonic Plates",
