@@ -1,16 +1,24 @@
 use bevy::image::{ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
-use bevy_egui::EguiContexts;
+use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
+use bevy_egui::{egui, EguiContexts};
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use rayon::prelude::*;
 use rb_core::{AppMode, ModeTransitionEvent, handle_mode_shortcuts};
 use rb_editor::RegenerationRequest;
 use rb_noise::BiomeMap;
 use rb_world::WorldDefinition;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const MAP_WIDTH: usize = 1024;
 const MAP_HEIGHT: usize = 512;
+const CHUNK_SIZE_I: usize = 64;
+const CHUNKS_X: usize = MAP_WIDTH / CHUNK_SIZE_I;   // 16
+const CHUNKS_Y: usize = MAP_HEIGHT / CHUNK_SIZE_I;  // 8
+const TOTAL_CHUNKS: usize = CHUNKS_X * CHUNKS_Y;    // 128
 
 fn main() {
     App::new()
@@ -24,6 +32,7 @@ fn main() {
         }))
         // State and events
         .init_state::<AppMode>()
+        .init_state::<AppPhase>()
         .add_event::<ModeTransitionEvent>()
         .init_resource::<CurrentLayer>()
         .init_resource::<GeneratorParams>()
@@ -31,6 +40,8 @@ fn main() {
         .init_resource::<ViewLevel>()
         .init_resource::<LoadedMesoTiles>()
         .init_resource::<VisibleChunkRange>()
+        .init_resource::<MesoTileCache>()
+        .init_resource::<GenerationTask>()
         // Plugins
         .add_plugins((
             rb_core::RbCorePlugin,
@@ -42,9 +53,17 @@ fn main() {
             rb_player::RbPlayerPlugin,
             rb_persistence::RbPersistencePlugin,
         ))
-        // Startup
-        .add_systems(Startup, setup_world_map)
-        // Update systems
+        // Startup - just spawn camera
+        .add_systems(Startup, setup_camera)
+        // Config phase - show config UI
+        .add_systems(Update, config_ui.run_if(in_state(AppPhase::Config)))
+        // Generating phase - poll task, show progress
+        .add_systems(Update, (
+            start_generation.run_if(resource_added::<GenerationStarted>),
+            poll_generation,
+            generation_progress_ui,
+        ).run_if(in_state(AppPhase::Generating)))
+        // Ready phase - main game systems
         .add_systems(Update, (
             handle_mode_shortcuts,
             toggle_layer.run_if(in_state(AppMode::WorldGenerator)),
@@ -57,9 +76,13 @@ fn main() {
             update_cursor_world_pos,
             update_chunk_highlight,
             log_mode_transition,
-        ))
+        ).run_if(in_state(AppPhase::Ready)))
         .run();
 }
+
+/// Marker resource to trigger generation start.
+#[derive(Resource)]
+struct GenerationStarted;
 
 /// Current visualization layer for World Generator mode.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
@@ -140,15 +163,11 @@ struct MesoTile {
     chunk_y: i32,
 }
 
-/// Tracks all loaded meso tiles.
+/// Tracks spawned meso tile sprite entities.
 #[derive(Resource, Default)]
 struct LoadedMesoTiles {
-    /// Map from (chunk_x, chunk_y) to entity
+    /// Map from (chunk_x, chunk_y) to spawned sprite entity
     tiles: HashMap<(i32, i32), Entity>,
-    /// Texture handles to prevent garbage collection
-    textures: HashMap<(i32, i32), Handle<Image>>,
-    /// Tiles queued for generation (processed 1 per frame)
-    pending: Vec<(i32, i32)>,
 }
 
 /// Camera viewport in chunk coordinates.
@@ -160,6 +179,32 @@ struct VisibleChunkRange {
     max_y: i32,
 }
 
+/// Cache of pre-generated meso tile textures.
+#[derive(Resource, Default)]
+struct MesoTileCache {
+    textures: HashMap<(i32, i32), Handle<Image>>,
+}
+
+/// Application phase - config, generating, or ready.
+#[derive(States, Default, Clone, Eq, PartialEq, Hash, Debug)]
+enum AppPhase {
+    #[default]
+    Config,      // Show config UI, no map yet
+    Generating,  // Generating world in background
+    Ready,       // Map ready, can interact
+}
+
+/// Background generation task and progress tracking.
+#[derive(Resource, Default)]
+struct GenerationTask {
+    /// The async task generating tile data
+    task: Option<Task<Vec<((i32, i32), Vec<u8>)>>>,
+    /// Shared progress counter (updated by background thread)
+    progress: Option<Arc<AtomicUsize>>,
+    /// Macro map data (generated first)
+    macro_data: Option<(Vec<u8>, Vec<u8>, Vec<u8>)>, // biome, temp, cont
+}
+
 /// Size of macro chunks in pixels (for highlighting grid).
 const CHUNK_SIZE: f32 = 64.0;
 
@@ -167,65 +212,196 @@ const CHUNK_SIZE: f32 = 64.0;
 const MESO_ZOOM_THRESHOLD: f32 = 0.5;
 
 /// Size of meso map in pixels (per tile).
-const MESO_MAP_SIZE: usize = 128;
+const MESO_MAP_SIZE: usize = 512;
 
-fn setup_world_map(
+fn setup_camera(mut commands: Commands) {
+    commands.spawn(Camera2d);
+}
+
+/// Config UI - seed input and Generate button.
+fn config_ui(
+    mut contexts: EguiContexts,
+    mut params: ResMut<GeneratorParams>,
+    mut next_phase: ResMut<NextState<AppPhase>>,
     mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
+) {
+    let ctx = contexts.ctx_mut();
+
+    egui::CentralPanel::default()
+        .frame(egui::Frame::default().fill(egui::Color32::from_rgb(30, 30, 30)))
+        .show(ctx, |_| {});
+
+    egui::Window::new("World Generator")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .fixed_size([300.0, 150.0])
+        .show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.heading("Randlebrot");
+                ui.add_space(20.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Seed:");
+                    ui.add(egui::DragValue::new(&mut params.seed));
+                });
+
+                ui.add_space(20.0);
+
+                if ui.button("Generate World").clicked() {
+                    commands.insert_resource(GenerationStarted);
+                    next_phase.set(AppPhase::Generating);
+                }
+            });
+        });
+}
+
+/// Start background generation task.
+fn start_generation(
+    mut commands: Commands,
+    mut task_res: ResMut<GenerationTask>,
     world_def: Res<WorldDefinition>,
 ) {
-    // Spawn 2D camera
-    commands.spawn(Camera2d);
+    commands.remove_resource::<GenerationStarted>();
 
-    println!("Generating world map {}x{}...", world_def.width, world_def.height);
+    let seed = world_def.seed;
+    let width = world_def.width;
+    let height = world_def.height;
+    let progress = Arc::new(AtomicUsize::new(0));
+    let progress_clone = progress.clone();
 
-    // Generate the biome map
-    let biome_map = BiomeMap::generate(world_def.seed, world_def.width, world_def.height);
+    // First generate macro map synchronously (fast)
+    println!("Generating macro map {}x{}...", width, height);
+    let biome_map = BiomeMap::generate(seed, width, height);
+    let macro_biome = biome_map.to_biome_image();
+    let macro_temp = biome_map.to_temperature_image();
+    let macro_cont = biome_map.to_continentalness_image();
+    task_res.macro_data = Some((macro_biome, macro_temp, macro_cont));
 
-    println!("World map generated. Creating textures...");
+    // Spawn async task for meso tiles
+    println!("Generating {} meso tiles in background...", TOTAL_CHUNKS);
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        (0..TOTAL_CHUNKS).into_par_iter().map(|chunk_idx| {
+            let cx = (chunk_idx % CHUNKS_X) as i32;
+            let cy = (chunk_idx / CHUNKS_X) as i32;
 
-    // Create biome texture
-    let biome_image = create_image(world_def.width, world_def.height, biome_map.to_biome_image());
-    let biome_handle = images.add(biome_image);
+            let world_x = cx as f64 * CHUNK_SIZE as f64;
+            let world_y = cy as f64 * CHUNK_SIZE as f64;
 
-    // Create temperature texture
-    let temp_image = create_image(world_def.width, world_def.height, biome_map.to_temperature_image());
-    let temperature_handle = images.add(temp_image);
+            let meso_map = BiomeMap::generate_region(
+                seed,
+                world_x,
+                world_y,
+                CHUNK_SIZE as f64,
+                MESO_MAP_SIZE,
+                height as f64,
+                1,
+            );
 
-    // Create continentalness texture
-    let cont_image = create_image(world_def.width, world_def.height, biome_map.to_continentalness_image());
-    let continentalness_handle = images.add(cont_image);
-
-    // Store texture handles
-    commands.insert_resource(WorldMapTextures {
-        biome: biome_handle.clone(),
-        temperature: temperature_handle,
-        continentalness: continentalness_handle,
+            let image_data = meso_map.to_biome_image();
+            progress_clone.fetch_add(1, Ordering::Relaxed);
+            ((cx, cy), image_data)
+        }).collect()
     });
 
-    // Spawn sprite with biome texture (default view)
-    commands.spawn((
-        Sprite {
-            image: biome_handle,
-            ..default()
-        },
-        WorldMapSprite,
-    ));
+    task_res.task = Some(task);
+    task_res.progress = Some(progress);
+}
 
-    // Spawn chunk highlight overlay (semi-transparent rectangle)
-    commands.spawn((
-        Sprite {
-            color: Color::srgba(1.0, 1.0, 0.8, 0.3),
-            custom_size: Some(Vec2::splat(CHUNK_SIZE)),
-            ..default()
-        },
-        Transform::from_xyz(-10000.0, -10000.0, 0.5), // Start off-screen
-        ChunkHighlight,
-    ));
+/// Poll generation task and transition when complete.
+fn poll_generation(
+    mut commands: Commands,
+    mut task_res: ResMut<GenerationTask>,
+    mut images: ResMut<Assets<Image>>,
+    mut cache: ResMut<MesoTileCache>,
+    mut next_phase: ResMut<NextState<AppPhase>>,
+    world_def: Res<WorldDefinition>,
+) {
+    let Some(ref mut task) = task_res.task else { return };
 
-    println!("World map ready.");
-    println!("  F1: World Generator | F2: Map Editor | F3: Chunk Editor | F4: Launcher");
-    println!("  Space: Toggle layer view (in Generator mode)");
+    if let Some(result) = block_on(poll_once(task)) {
+        // Meso tiles complete - create textures
+        for ((cx, cy), image_data) in result {
+            let meso_image = create_image(MESO_MAP_SIZE, MESO_MAP_SIZE, image_data);
+            let handle = images.add(meso_image);
+            cache.textures.insert((cx, cy), handle);
+        }
+
+        // Create macro map textures and sprites
+        if let Some((biome_data, temp_data, cont_data)) = task_res.macro_data.take() {
+            let biome_image = create_image(world_def.width, world_def.height, biome_data);
+            let biome_handle = images.add(biome_image);
+
+            let temp_image = create_image(world_def.width, world_def.height, temp_data);
+            let temp_handle = images.add(temp_image);
+
+            let cont_image = create_image(world_def.width, world_def.height, cont_data);
+            let cont_handle = images.add(cont_image);
+
+            commands.insert_resource(WorldMapTextures {
+                biome: biome_handle.clone(),
+                temperature: temp_handle,
+                continentalness: cont_handle,
+            });
+
+            commands.spawn((
+                Sprite { image: biome_handle, ..default() },
+                WorldMapSprite,
+            ));
+
+            commands.spawn((
+                Sprite {
+                    color: Color::srgba(1.0, 1.0, 0.8, 0.3),
+                    custom_size: Some(Vec2::splat(CHUNK_SIZE)),
+                    ..default()
+                },
+                Transform::from_xyz(-10000.0, -10000.0, 0.5),
+                ChunkHighlight,
+            ));
+        }
+
+        // Clean up and transition
+        task_res.task = None;
+        task_res.progress = None;
+        next_phase.set(AppPhase::Ready);
+        println!("World ready! {} meso tiles cached.", cache.textures.len());
+    }
+}
+
+/// Show progress during generation.
+fn generation_progress_ui(
+    mut contexts: EguiContexts,
+    task_res: Res<GenerationTask>,
+) {
+    let ctx = contexts.ctx_mut();
+
+    egui::CentralPanel::default()
+        .frame(egui::Frame::default().fill(egui::Color32::from_rgb(30, 30, 30)))
+        .show(ctx, |_| {});
+
+    let progress = task_res.progress.as_ref()
+        .map(|p| p.load(Ordering::Relaxed))
+        .unwrap_or(0);
+
+    egui::Window::new("Generating")
+        .collapsible(false)
+        .resizable(false)
+        .title_bar(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .fixed_size([300.0, 100.0])
+        .show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.heading("Generating World...");
+                ui.add_space(15.0);
+
+                let fraction = progress as f32 / TOTAL_CHUNKS as f32;
+                ui.add_sized(
+                    [280.0, 20.0],
+                    egui::ProgressBar::new(fraction)
+                        .text(format!("{}/{} tiles", progress, TOTAL_CHUNKS))
+                );
+            });
+        });
 }
 
 fn create_image(width: usize, height: usize, data: Vec<u8>) -> Image {
@@ -529,31 +705,25 @@ fn handle_view_level_transition(
 }
 
 /// Manage meso tile sprites - spawn/despawn based on viewport.
-/// Generates at most 1 tile per frame for smooth loading.
+/// Uses pre-cached textures for instant display.
 fn manage_meso_tiles(
     mut commands: Commands,
     view_level: Res<ViewLevel>,
     visible_range: Res<VisibleChunkRange>,
     mut loaded_tiles: ResMut<LoadedMesoTiles>,
-    mut images: ResMut<Assets<Image>>,
+    cache: Res<MesoTileCache>,
     world_def: Res<WorldDefinition>,
-    current_layer: Res<CurrentLayer>,
     tiles_query: Query<(Entity, &MesoTile)>,
 ) {
     let half_map_width = world_def.width as f32 / 2.0;
     let half_map_height = world_def.height as f32 / 2.0;
 
     if *view_level != ViewLevel::Meso {
-        // Despawn all meso tiles when at macro level
+        // Despawn all meso tile sprites when at macro level
         for (entity, _) in &tiles_query {
             commands.entity(entity).despawn();
         }
-        // Clean up resources
-        for (_, handle) in loaded_tiles.textures.drain() {
-            images.remove(&handle);
-        }
         loaded_tiles.tiles.clear();
-        loaded_tiles.pending.clear();
         return;
     }
 
@@ -565,7 +735,7 @@ fn manage_meso_tiles(
         }
     }
 
-    // Despawn tiles that are no longer needed
+    // Despawn tile sprites that are no longer visible
     let mut to_remove = Vec::new();
     for (&coord, &entity) in &loaded_tiles.tiles {
         if !needed_tiles.contains_key(&coord) {
@@ -575,52 +745,24 @@ fn manage_meso_tiles(
     }
     for coord in to_remove {
         loaded_tiles.tiles.remove(&coord);
-        if let Some(handle) = loaded_tiles.textures.remove(&coord) {
-            images.remove(&handle);
-        }
     }
 
-    // Remove stale pending tiles that are no longer needed
-    loaded_tiles.pending.retain(|coord| needed_tiles.contains_key(coord));
-
-    // Queue missing tiles (don't generate yet)
+    // Spawn sprites for visible tiles (instant from cache)
     for &coord in needed_tiles.keys() {
-        if !loaded_tiles.tiles.contains_key(&coord)
-            && !loaded_tiles.pending.contains(&coord)
-        {
-            loaded_tiles.pending.push(coord);
+        if loaded_tiles.tiles.contains_key(&coord) {
+            continue; // Already spawned
         }
-    }
 
-    // Generate only 1 tile this frame for smooth loading
-    if let Some(coord) = loaded_tiles.pending.pop() {
         let (cx, cy) = coord;
 
-        // Generate meso map for this chunk
-        let world_x = cx as f64 * CHUNK_SIZE as f64;
-        let world_y = cy as f64 * CHUNK_SIZE as f64;
-
-        let meso_map = BiomeMap::generate_region(
-            world_def.seed,
-            world_x,
-            world_y,
-            CHUNK_SIZE as f64,
-            MESO_MAP_SIZE,
-            world_def.height as f64,
-            1, // detail_level 1 for meso
-        );
-
-        // Create texture based on current layer
-        let image_data = match *current_layer {
-            CurrentLayer::Biome => meso_map.to_biome_image(),
-            CurrentLayer::Temperature => meso_map.to_temperature_image(),
-            CurrentLayer::Continentalness => meso_map.to_continentalness_image(),
+        // Get from cache (all tiles should be pre-generated)
+        let Some(handle) = cache.textures.get(&coord) else {
+            continue;
         };
 
-        let meso_image = create_image(MESO_MAP_SIZE, MESO_MAP_SIZE, image_data);
-        let handle = images.add(meso_image);
-
         // Calculate sprite position (center of chunk in world coords)
+        let world_x = cx as f64 * CHUNK_SIZE as f64;
+        let world_y = cy as f64 * CHUNK_SIZE as f64;
         let sprite_x = world_x as f32 + CHUNK_SIZE / 2.0 - half_map_width;
         let sprite_y = half_map_height - world_y as f32 - CHUNK_SIZE / 2.0;
 
@@ -636,6 +778,5 @@ fn manage_meso_tiles(
         )).id();
 
         loaded_tiles.tiles.insert(coord, entity);
-        loaded_tiles.textures.insert(coord, handle);
     }
 }
