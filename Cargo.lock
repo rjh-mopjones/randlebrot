@@ -4020,7 +4020,9 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "noise",
+ "rayon",
  "rb_core",
+ "smallvec",
 ]
 
 [[package]]

@@ -6,8 +6,8 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use rayon::prelude::*;
 use rb_core::{AppMode, ModeTransitionEvent, handle_mode_shortcuts};
-use rb_editor::RegenerationRequest;
-use rb_noise::BiomeMap;
+use rb_editor::{CurrentLayer, GeneratorUiState, RegenerationRequest};
+use rb_noise::{BiomeMap, LayerId, LayerProgress, NoiseLayer};
 use rb_world::{CivilizationConfig, CivilizationGenerator, CivilizationResult, WorldDefinition};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -66,7 +66,7 @@ fn main() {
         // Ready phase - main game systems
         .add_systems(Update, (
             handle_mode_shortcuts,
-            toggle_layer.run_if(in_state(AppMode::WorldGenerator)),
+            handle_layer_change.run_if(in_state(AppMode::WorldGenerator)),
             regenerate_world.run_if(in_state(AppMode::WorldGenerator)),
             camera_zoom,
             camera_pan,
@@ -84,36 +84,6 @@ fn main() {
 #[derive(Resource)]
 struct GenerationStarted;
 
-/// Current visualization layer for World Generator mode.
-#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum CurrentLayer {
-    #[default]
-    Biome,
-    Temperature,
-    Continentalness,
-    Political,
-}
-
-impl CurrentLayer {
-    fn next(&self) -> Self {
-        match self {
-            Self::Biome => Self::Temperature,
-            Self::Temperature => Self::Continentalness,
-            Self::Continentalness => Self::Political,
-            Self::Political => Self::Biome,
-        }
-    }
-
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Biome => "Biome",
-            Self::Temperature => "Temperature",
-            Self::Continentalness => "Continentalness",
-            Self::Political => "Political",
-        }
-    }
-}
-
 /// Parameters for world generation (editable in UI).
 #[derive(Resource, Debug, Clone)]
 pub struct GeneratorParams {
@@ -130,13 +100,15 @@ impl Default for GeneratorParams {
     }
 }
 
-/// Stores handles to all layer textures.
+/// Stores the BiomeMap and current texture handle.
 #[derive(Resource)]
 struct WorldMapTextures {
-    biome: Handle<Image>,
-    temperature: Handle<Image>,
-    continentalness: Handle<Image>,
-    political: Handle<Image>,
+    /// The generated biome map with all noise layers
+    biome_map: Arc<BiomeMap>,
+    /// Current layer texture handle
+    current_handle: Handle<Image>,
+    /// Territory overlay from civilization generation
+    territory_overlay: Option<Vec<u8>>,
 }
 
 /// Marker component for the world map sprite.
@@ -183,9 +155,13 @@ struct VisibleChunkRange {
     max_y: i32,
 }
 
-/// Cache of pre-generated meso tile textures.
+/// Cache of pre-generated meso tiles with full BiomeMap data.
+/// Stores both the full noise data (for layer switching) and pre-rendered textures.
 #[derive(Resource, Default)]
 struct MesoTileCache {
+    /// Full BiomeMap for each tile - enables instant layer switching
+    maps: HashMap<(i32, i32), Arc<BiomeMap>>,
+    /// Pre-rendered texture handles for current layer view
     textures: HashMap<(i32, i32), Handle<Image>>,
 }
 
@@ -201,12 +177,14 @@ enum AppPhase {
 /// Background generation task and progress tracking.
 #[derive(Resource, Default)]
 struct GenerationTask {
-    /// The async task generating tile data
-    task: Option<Task<Vec<((i32, i32), Vec<u8>)>>>,
-    /// Shared progress counter (updated by background thread)
-    progress: Option<Arc<AtomicUsize>>,
-    /// Macro map data (generated first)
-    macro_data: Option<(Vec<u8>, Vec<u8>, Vec<u8>)>, // biome, temp, cont
+    /// The async task generating full BiomeMap tiles
+    task: Option<Task<Vec<((i32, i32), Arc<BiomeMap>)>>>,
+    /// Per-layer progress tracking (7 progress bars)
+    layer_progress: Option<Arc<LayerProgress>>,
+    /// Tile completion counter
+    tile_progress: Option<Arc<AtomicUsize>>,
+    /// Generated macro biome map with all layers
+    biome_map: Option<Arc<BiomeMap>>,
     /// Civilization generation result
     civ_result: Option<CivilizationResult>,
     /// Territory overlay image data
@@ -275,16 +253,12 @@ fn start_generation(
     let seed = world_def.seed;
     let width = world_def.width;
     let height = world_def.height;
-    let progress = Arc::new(AtomicUsize::new(0));
-    let progress_clone = progress.clone();
 
     // First generate macro map synchronously (fast)
     println!("Generating macro map {}x{}...", width, height);
-    let biome_map = BiomeMap::generate(seed, width, height);
-    let macro_biome = biome_map.to_biome_image();
-    let macro_temp = biome_map.to_temperature_image();
-    let macro_cont = biome_map.to_continentalness_image();
-    task_res.macro_data = Some((macro_biome, macro_temp, macro_cont));
+    let biome_map = Arc::new(BiomeMap::generate(seed, width, height));
+    task_res.biome_map = Some(biome_map.clone());
+    println!("  Resources: {} cells with deposits", biome_map.resources.cells_with_resources());
 
     // Generate civilization
     println!("Generating civilization...");
@@ -316,8 +290,18 @@ fn start_generation(
     task_res.territory_image = territory_image;
     task_res.civ_result = Some(civ_result);
 
-    // Spawn async task for meso tiles
-    println!("Generating {} meso tiles in background...", TOTAL_CHUNKS);
+    // Per-layer progress tracking for all meso tiles
+    let total_pixels_per_tile = MESO_MAP_SIZE * MESO_MAP_SIZE;
+    let total_pixels = total_pixels_per_tile * TOTAL_CHUNKS;
+    let layer_progress = Arc::new(LayerProgress::new(total_pixels));
+    let layer_progress_clone = layer_progress.clone();
+
+    // Tile completion counter
+    let tile_progress = Arc::new(AtomicUsize::new(0));
+    let tile_progress_clone = tile_progress.clone();
+
+    // Spawn async task for meso tiles with full 7-layer generation
+    println!("Generating {} meso tiles with 7-layer parallel generation...", TOTAL_CHUNKS);
     let task = AsyncComputeTaskPool::get().spawn(async move {
         (0..TOTAL_CHUNKS).into_par_iter().map(|chunk_idx| {
             let cx = (chunk_idx % CHUNKS_X) as i32;
@@ -326,24 +310,26 @@ fn start_generation(
             let world_x = cx as f64 * CHUNK_SIZE as f64;
             let world_y = cy as f64 * CHUNK_SIZE as f64;
 
-            let meso_map = BiomeMap::generate_region(
+            // Generate full BiomeMap with all 7 layers + derived
+            let meso_map = BiomeMap::generate_meso_full(
                 seed,
                 world_x,
                 world_y,
                 CHUNK_SIZE as f64,
                 MESO_MAP_SIZE,
                 height as f64,
-                1,
+                1, // detail_level = meso
+                &layer_progress_clone,
             );
 
-            let image_data = meso_map.to_biome_image();
-            progress_clone.fetch_add(1, Ordering::Relaxed);
-            ((cx, cy), image_data)
+            tile_progress_clone.fetch_add(1, Ordering::Relaxed);
+            ((cx, cy), Arc::new(meso_map))
         }).collect()
     });
 
     task_res.task = Some(task);
-    task_res.progress = Some(progress);
+    task_res.layer_progress = Some(layer_progress);
+    task_res.tile_progress = Some(tile_progress);
 }
 
 /// Marker for settlement sprites.
@@ -366,42 +352,37 @@ fn poll_generation(
     mut cache: ResMut<MesoTileCache>,
     mut next_phase: ResMut<NextState<AppPhase>>,
     world_def: Res<WorldDefinition>,
+    current_layer: Res<CurrentLayer>,
 ) {
     let Some(ref mut task) = task_res.task else { return };
 
     if let Some(result) = block_on(poll_once(task)) {
-        // Meso tiles complete - create textures
-        for ((cx, cy), image_data) in result {
+        // Meso tiles complete - store BiomeMap and create textures
+        for ((cx, cy), meso_map) in result {
+            // Generate texture for current layer view
+            let image_data = meso_map.to_layer_image(current_layer.0);
             let meso_image = create_image(MESO_MAP_SIZE, MESO_MAP_SIZE, image_data);
             let handle = images.add(meso_image);
+
+            // Store both the full BiomeMap and the texture
+            cache.maps.insert((cx, cy), meso_map);
             cache.textures.insert((cx, cy), handle);
         }
 
         // Create macro map textures and sprites
-        if let Some((biome_data, temp_data, cont_data)) = task_res.macro_data.take() {
+        if let Some(biome_map) = task_res.biome_map.take() {
+            // Create initial texture from biome layer
+            let biome_data = biome_map.to_biome_image();
             let biome_image = create_image(world_def.width, world_def.height, biome_data);
             let biome_handle = images.add(biome_image);
 
-            let temp_image = create_image(world_def.width, world_def.height, temp_data);
-            let temp_handle = images.add(temp_image);
-
-            let cont_image = create_image(world_def.width, world_def.height, cont_data);
-            let cont_handle = images.add(cont_image);
-
-            // Create political/territory texture
-            let political_handle = if let Some(territory_data) = task_res.territory_image.take() {
-                let political_image = create_image(world_def.width, world_def.height, territory_data);
-                images.add(political_image)
-            } else {
-                // Fallback to biome if no territory
-                biome_handle.clone()
-            };
+            // Store territory overlay for Political layer
+            let territory_overlay = task_res.territory_image.take();
 
             commands.insert_resource(WorldMapTextures {
-                biome: biome_handle.clone(),
-                temperature: temp_handle,
-                continentalness: cont_handle,
-                political: political_handle,
+                biome_map,
+                current_handle: biome_handle.clone(),
+                territory_overlay,
             });
 
             commands.spawn((
@@ -477,14 +458,15 @@ fn poll_generation(
 
         // Clean up and transition
         task_res.task = None;
-        task_res.progress = None;
+        task_res.layer_progress = None;
+        task_res.tile_progress = None;
         task_res.civ_result = None;
         next_phase.set(AppPhase::Ready);
-        println!("World ready! {} meso tiles cached.", cache.textures.len());
+        println!("World ready! {} meso tiles cached ({} BiomeMaps).", cache.textures.len(), cache.maps.len());
     }
 }
 
-/// Show progress during generation.
+/// Show progress during generation with 7 per-layer progress bars.
 fn generation_progress_ui(
     mut contexts: EguiContexts,
     task_res: Res<GenerationTask>,
@@ -495,7 +477,7 @@ fn generation_progress_ui(
         .frame(egui::Frame::default().fill(egui::Color32::from_rgb(30, 30, 30)))
         .show(ctx, |_| {});
 
-    let progress = task_res.progress.as_ref()
+    let tile_progress = task_res.tile_progress.as_ref()
         .map(|p| p.load(Ordering::Relaxed))
         .unwrap_or(0);
 
@@ -504,18 +486,41 @@ fn generation_progress_ui(
         .resizable(false)
         .title_bar(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .fixed_size([300.0, 100.0])
+        .fixed_size([350.0, 280.0])
         .show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.heading("Generating World...");
-                ui.add_space(15.0);
+                ui.add_space(10.0);
 
-                let fraction = progress as f32 / TOTAL_CHUNKS as f32;
+                // Overall tile progress
+                let tile_fraction = tile_progress as f32 / TOTAL_CHUNKS as f32;
+                ui.label("Tiles:");
                 ui.add_sized(
-                    [280.0, 20.0],
-                    egui::ProgressBar::new(fraction)
-                        .text(format!("{}/{} tiles", progress, TOTAL_CHUNKS))
+                    [320.0, 18.0],
+                    egui::ProgressBar::new(tile_fraction)
+                        .text(format!("{}/{}", tile_progress, TOTAL_CHUNKS))
                 );
+                ui.add_space(10.0);
+
+                // Per-layer progress bars
+                if let Some(ref layer_progress) = task_res.layer_progress {
+                    ui.separator();
+                    ui.label("Layer Generation:");
+                    ui.add_space(5.0);
+
+                    for layer_id in LayerId::all() {
+                        let fraction = layer_progress.fraction(*layer_id);
+
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{:14}", layer_id.name()));
+                            ui.add_sized(
+                                [200.0, 14.0],
+                                egui::ProgressBar::new(fraction)
+                                    .text(format!("{:.0}%", fraction * 100.0))
+                            );
+                        });
+                    }
+                }
             });
         });
 }
@@ -543,35 +548,80 @@ fn create_image(width: usize, height: usize, data: Vec<u8>) -> Image {
     image
 }
 
-fn toggle_layer(
-    keyboard: Res<ButtonInput<KeyCode>>,
+/// System to handle layer changes from the UI and sync CurrentLayer with GeneratorUiState.
+fn handle_layer_change(
+    mut ui_state: ResMut<GeneratorUiState>,
     mut current_layer: ResMut<CurrentLayer>,
-    textures: Option<Res<WorldMapTextures>>,
+    mut textures: Option<ResMut<WorldMapTextures>>,
+    mut images: ResMut<Assets<Image>>,
     mut query: Query<&mut Sprite, With<WorldMapSprite>>,
+    world_def: Res<WorldDefinition>,
+    mut meso_cache: Option<ResMut<MesoTileCache>>,
+    mut meso_sprites: Query<(&MesoTile, &mut Sprite), Without<WorldMapSprite>>,
+    mut settlement_query: Query<&mut Visibility, With<SettlementMarker>>,
+    mut road_query: Query<&mut Visibility, (With<RoadMarker>, Without<SettlementMarker>)>,
 ) {
-    if !keyboard.just_pressed(KeyCode::Space) {
-        return;
-    }
+    // Sync current layer to UI state so the dropdown shows the correct value
+    ui_state.current_layer = Some(current_layer.0);
 
-    let Some(textures) = textures else {
+    // Check if a layer change was requested
+    let Some(new_layer) = ui_state.layer_changed.take() else {
         return;
     };
 
-    // Cycle to next layer
-    let next_layer = current_layer.next();
-    *current_layer = next_layer;
+    // Update current layer
+    current_layer.0 = new_layer;
 
-    // Update sprite texture
-    for mut sprite in &mut query {
-        sprite.image = match next_layer {
-            CurrentLayer::Biome => textures.biome.clone(),
-            CurrentLayer::Temperature => textures.temperature.clone(),
-            CurrentLayer::Continentalness => textures.continentalness.clone(),
-            CurrentLayer::Political => textures.political.clone(),
-        };
+    // Only show settlements/roads on the Biome (game) layer
+    let show_overlays = new_layer == NoiseLayer::Biome;
+    let overlay_visibility = if show_overlays { Visibility::Inherited } else { Visibility::Hidden };
+
+    for mut vis in settlement_query.iter_mut() {
+        *vis = overlay_visibility;
+    }
+    for mut vis in road_query.iter_mut() {
+        *vis = overlay_visibility;
     }
 
-    println!("Switched to {} view", next_layer.name());
+    // Update macro map texture
+    if let Some(ref mut tex) = textures {
+        let image_data = if new_layer == NoiseLayer::Political {
+            tex.territory_overlay.clone().unwrap_or_else(|| tex.biome_map.to_layer_image(new_layer))
+        } else {
+            tex.biome_map.to_layer_image(new_layer)
+        };
+
+        let new_image = create_image(world_def.width, world_def.height, image_data);
+        let new_handle = images.add(new_image);
+        tex.current_handle = new_handle.clone();
+
+        for mut sprite in query.iter_mut() {
+            sprite.image = new_handle.clone();
+        }
+    }
+
+    // Update meso tile textures from cached BiomeMap data
+    if let Some(ref mut cache) = meso_cache {
+        let new_textures: Vec<_> = cache.maps.iter()
+            .map(|(coord, biome_map)| {
+                let image_data = biome_map.to_layer_image(new_layer);
+                let new_image = create_image(MESO_MAP_SIZE, MESO_MAP_SIZE, image_data);
+                let new_handle = images.add(new_image);
+                (*coord, new_handle)
+            })
+            .collect();
+
+        for (coord, handle) in new_textures {
+            cache.textures.insert(coord, handle);
+        }
+
+        for (meso_tile, mut sprite) in meso_sprites.iter_mut() {
+            let coord = (meso_tile.chunk_x, meso_tile.chunk_y);
+            if let Some(handle) = cache.textures.get(&coord) {
+                sprite.image = handle.clone();
+            }
+        }
+    }
 }
 
 fn log_mode_transition(
@@ -586,7 +636,7 @@ fn regenerate_world(
     mut regen_request: ResMut<RegenerationRequest>,
     world_def: Res<WorldDefinition>,
     mut images: ResMut<Assets<Image>>,
-    textures: Res<WorldMapTextures>,
+    mut textures: ResMut<WorldMapTextures>,
     mut query: Query<&mut Sprite, With<WorldMapSprite>>,
     current_layer: Res<CurrentLayer>,
 ) {
@@ -597,33 +647,23 @@ fn regenerate_world(
 
     println!("Regenerating world map with seed {}...", world_def.seed);
 
-    // Generate new biome map
-    let biome_map = BiomeMap::generate(world_def.seed, world_def.width, world_def.height);
+    // Generate new biome map with all layers
+    let biome_map = Arc::new(BiomeMap::generate(world_def.seed, world_def.width, world_def.height));
+    println!("  Resources: {} cells with deposits", biome_map.resources.cells_with_resources());
 
-    // Update textures
-    let biome_image = create_image(world_def.width, world_def.height, biome_map.to_biome_image());
-    let temp_image = create_image(world_def.width, world_def.height, biome_map.to_temperature_image());
-    let cont_image = create_image(world_def.width, world_def.height, biome_map.to_continentalness_image());
+    // Generate image for current layer
+    let image_data = biome_map.to_layer_image(current_layer.0);
+    let new_image = create_image(world_def.width, world_def.height, image_data);
+    let new_handle = images.add(new_image);
 
-    // Replace image assets
-    if let Some(img) = images.get_mut(&textures.biome) {
-        *img = biome_image;
-    }
-    if let Some(img) = images.get_mut(&textures.temperature) {
-        *img = temp_image;
-    }
-    if let Some(img) = images.get_mut(&textures.continentalness) {
-        *img = cont_image;
-    }
+    // Update textures resource
+    textures.biome_map = biome_map;
+    textures.current_handle = new_handle.clone();
+    textures.territory_overlay = None; // Clear territory overlay (would need to regenerate civilization)
 
-    // Update sprite to current layer
+    // Update sprite
     for mut sprite in &mut query {
-        sprite.image = match *current_layer {
-            CurrentLayer::Biome => textures.biome.clone(),
-            CurrentLayer::Temperature => textures.temperature.clone(),
-            CurrentLayer::Continentalness => textures.continentalness.clone(),
-            CurrentLayer::Political => textures.political.clone(),
-        };
+        sprite.image = new_handle.clone();
     }
 
     println!("World regenerated.");
@@ -649,7 +689,7 @@ fn camera_zoom(
     for mut projection in &mut query {
         // Zoom in (scroll up) decreases scale, zoom out (scroll down) increases scale
         let zoom_factor = 1.0 - scroll_delta;
-        projection.scale = (projection.scale * zoom_factor).clamp(0.1, 10.0);
+        projection.scale = (projection.scale * zoom_factor).clamp(0.05, 10.0);
     }
 }
 
@@ -679,10 +719,12 @@ fn camera_pan(
     }
 
     // Left click drag panning (when not over UI)
+    // Invert Y axis for natural "grab and drag" feel
     let over_ui = contexts.ctx_mut().is_pointer_over_area();
     if mouse.pressed(MouseButton::Left) && !over_ui {
         for event in motion_events.read() {
-            pan_delta -= event.delta;
+            pan_delta.x -= event.delta.x;
+            pan_delta.y += event.delta.y; // Inverted Y
         }
     } else {
         // Clear motion events if not panning

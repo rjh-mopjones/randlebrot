@@ -4,11 +4,13 @@ pub mod biome;
 pub mod coords;
 pub mod mode;
 pub mod noise;
+pub mod resource_type;
 
 pub use biome::{BiomeType, TileType};
 pub use coords::{ChunkCoord, DetailLevel, TileCoord, WorldPos};
 pub use mode::{AppMode, ModeTransitionEvent, handle_mode_shortcuts};
 pub use noise::NoiseStrategy;
+pub use resource_type::{ResourceType, TerrainBias};
 
 /// Core plugin providing foundational types for Randlebrot.
 pub struct RbCorePlugin;

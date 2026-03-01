@@ -9,7 +9,7 @@ pub mod map_editor_ui;
 pub mod world_overlay;
 
 pub use chunk_editor_ui::{ChunkEditorState, ChunkTool};
-pub use generator_ui::{GeneratorUiState, RegenerationRequest};
+pub use generator_ui::{CurrentLayer, GeneratorUiState, RegenerationRequest};
 pub use launcher_ui::LauncherState;
 pub use map_editor_ui::{CityPlacementState, EditorSelection, EditorTool, LandmarkPlacementState};
 pub use world_overlay::OverlaySettings;

@@ -1,8 +1,19 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 use rb_core::AppMode;
+use rb_noise::NoiseLayer;
 use rb_persistence::{list_worlds, load_world, save_world, world_path};
 use rb_world::WorldDefinition;
+
+/// Current visualization layer for World Generator mode.
+#[derive(Resource)]
+pub struct CurrentLayer(pub NoiseLayer);
+
+impl Default for CurrentLayer {
+    fn default() -> Self {
+        Self(NoiseLayer::Biome)
+    }
+}
 
 /// Resource for tracking UI state in the generator.
 #[derive(Resource, Default)]
@@ -17,6 +28,10 @@ pub struct GeneratorUiState {
     pub available_worlds: Vec<std::path::PathBuf>,
     /// Status message to display.
     pub status_message: Option<(String, f64)>,
+    /// Current layer for display (synced from CurrentLayer resource).
+    pub current_layer: Option<NoiseLayer>,
+    /// Layer change requested by UI (read by main.rs to update textures).
+    pub layer_changed: Option<NoiseLayer>,
 }
 
 /// Resource for signaling world regeneration is needed.
@@ -142,13 +157,6 @@ pub fn generator_ui_system(
 
             ui.separator();
 
-            // View layer selection
-            ui.label("View Layer:");
-            ui.label("Press SPACE to cycle");
-            ui.add_space(16.0);
-
-            ui.separator();
-
             // Save/Load buttons
             if ui.button("Save World").clicked() {
                 let path = world_path(&world_def.name);
@@ -173,6 +181,72 @@ pub fn generator_ui_system(
             if let Some((msg, _)) = &ui_state.status_message {
                 ui.add_space(8.0);
                 ui.label(msg);
+            }
+
+            ui.add_space(16.0);
+            ui.separator();
+
+            // View layer selection (only shown if CurrentLayer exists)
+            if let Some(ref mut current_layer) = ui_state.current_layer {
+                ui.heading("View Layer");
+
+                let terrain_layers = [
+                    NoiseLayer::Biome,
+                    NoiseLayer::Continentalness,
+                    NoiseLayer::Temperature,
+                    NoiseLayer::Tectonic,
+                    NoiseLayer::Erosion,
+                    NoiseLayer::PeaksValleys,
+                    NoiseLayer::Humidity,
+                ];
+
+                let derived_layers = [
+                    NoiseLayer::Political,
+                    NoiseLayer::TradeCost,
+                ];
+
+                let resource_layers = [
+                    NoiseLayer::ResourceIron,
+                    NoiseLayer::ResourceGold,
+                    NoiseLayer::ResourceCopper,
+                    NoiseLayer::ResourceSilver,
+                    NoiseLayer::ResourceGems,
+                    NoiseLayer::ResourceCoal,
+                    NoiseLayer::ResourceStone,
+                    NoiseLayer::ResourceSalt,
+                    NoiseLayer::ResourceTimber,
+                    NoiseLayer::ResourceFish,
+                    NoiseLayer::ResourceFertileSoil,
+                    NoiseLayer::ResourceWildGame,
+                ];
+
+                let current = *current_layer;
+                egui::ComboBox::from_label("Layer")
+                    .selected_text(current.name())
+                    .show_ui(ui, |ui| {
+                        ui.label("Terrain");
+                        for layer in terrain_layers {
+                            if ui.selectable_label(current == layer, layer.name()).clicked() {
+                                ui_state.layer_changed = Some(layer);
+                            }
+                        }
+
+                        ui.separator();
+                        ui.label("Derived");
+                        for layer in derived_layers {
+                            if ui.selectable_label(current == layer, layer.name()).clicked() {
+                                ui_state.layer_changed = Some(layer);
+                            }
+                        }
+
+                        ui.separator();
+                        ui.label("Resources");
+                        for layer in resource_layers {
+                            if ui.selectable_label(current == layer, layer.name()).clicked() {
+                                ui_state.layer_changed = Some(layer);
+                            }
+                        }
+                    });
             }
         });
 
