@@ -3,9 +3,9 @@ use rb_core::{NoiseStrategy, ResourceType, TileType};
 use std::sync::Arc;
 
 use crate::biome_splines::BiomeSplines;
-use crate::derived::{calculate_political_score_simple, calculate_trade_cost};
 use crate::progress::{LayerId, LayerProgress};
 use crate::resource_map::ResourceMap;
+use crate::rivers::RiverGenerator;
 use crate::strategy::resource::ResourceContext;
 use crate::strategy::{
     ContinentalnessStrategy, ErosionStrategy, HumidityStrategy, PeaksAndValleysStrategy,
@@ -13,8 +13,8 @@ use crate::strategy::{
 };
 use crate::tidally_locked::LatitudeTemperatureStrategy;
 use crate::visualization::{
-    grayscale_to_rgba, humidity_to_rgba, peaks_to_rgba, political_to_rgba, resource_to_rgba,
-    tectonic_to_rgba, temperature_to_rgba, trade_to_rgba, NoiseLayer,
+    grayscale_to_rgba, humidity_to_rgba, peaks_to_rgba, resource_to_rgba,
+    river_to_rgba, tectonic_to_rgba, temperature_to_rgba, NoiseLayer,
 };
 
 /// Sea level threshold for continentalness.
@@ -48,10 +48,8 @@ pub struct BiomeMap {
     pub humidity: Vec<f64>,
 
     // Derived maps
-    /// Settlement suitability score (0-1)
-    pub political: Vec<f64>,
-    /// Travel/trade cost (1.0 = easy, higher = harder, inf = impassable)
-    pub trade_cost: Vec<f64>,
+    /// River flow accumulation (0-1, higher = larger river)
+    pub rivers: Vec<f64>,
 
     // Sparse resource map
     pub resources: ResourceMap,
@@ -120,8 +118,6 @@ impl BiomeMap {
         let mut peaks_valleys = Vec::with_capacity(total_pixels);
         let mut erosion = Vec::with_capacity(total_pixels);
         let mut humidity = Vec::with_capacity(total_pixels);
-        let mut political = Vec::with_capacity(total_pixels);
-        let mut trade_cost = Vec::with_capacity(total_pixels);
 
         // Use spline-based biome evaluation for consistency with meso tiles
         let splines = BiomeSplines::new(SEA_LEVEL);
@@ -139,16 +135,28 @@ impl BiomeMap {
             // Determine biome using splines (same as meso tiles)
             let biome = splines.evaluate(*cont, *temp, *tect, *eros, *peaks, *humid);
             biomes.push(biome);
-
-            // Calculate derived values
-            let pol = calculate_political_score_simple(biome, *temp, *humid);
-            political.push(pol);
-
-            let trade = calculate_trade_cost(biome, *eros);
-            trade_cost.push(trade);
         }
 
-        // Phase 3: Generate resources
+        // Phase 3: Generate rivers using D8 flow accumulation
+        // Compute elevation from continentalness + peaks - erosion
+        let elevation: Vec<f64> = continentalness
+            .iter()
+            .zip(peaks_valleys.iter())
+            .zip(erosion.iter())
+            .map(|((&cont, &peaks), &eros)| cont + peaks * 0.1 - eros * 0.05)
+            .collect();
+
+        let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, width, height);
+        let rivers = river_gen.generate(&elevation, width, height);
+
+        // Override biomes where rivers flow (any value > 0 is a river)
+        for idx in 0..total_pixels {
+            if rivers[idx] > 0.0 {
+                biomes[idx] = TileType::River;
+            }
+        }
+
+        // Phase 4: Generate resources
         let resources = Self::generate_resources(
             seed,
             width,
@@ -168,8 +176,7 @@ impl BiomeMap {
             erosion,
             peaks_valleys,
             humidity,
-            political,
-            trade_cost,
+            rivers,
             resources,
         }
     }
@@ -232,8 +239,7 @@ impl BiomeMap {
                     NoiseLayer::Erosion => grayscale_to_rgba(self.erosion[idx], 0.0, 1.0),
                     NoiseLayer::PeaksValleys => peaks_to_rgba(self.peaks_valleys[idx]),
                     NoiseLayer::Humidity => humidity_to_rgba(self.humidity[idx]),
-                    NoiseLayer::Political => political_to_rgba(self.political[idx]),
-                    NoiseLayer::TradeCost => trade_to_rgba(self.trade_cost[idx]),
+                    NoiseLayer::Rivers => river_to_rgba(self.rivers[idx]),
                     _ if layer.is_resource() => {
                         let resource = layer.to_resource_type().unwrap();
                         let abundance = self.resources.get(x, y, resource) as f64;
@@ -326,19 +332,10 @@ impl BiomeMap {
         }
     }
 
-    /// Get political/settlement score at specific coordinates.
-    pub fn get_political(&self, x: usize, y: usize) -> Option<f64> {
+    /// Get river flow at specific coordinates.
+    pub fn get_river(&self, x: usize, y: usize) -> Option<f64> {
         if x < self.width && y < self.height {
-            Some(self.political[y * self.width + x])
-        } else {
-            None
-        }
-    }
-
-    /// Get trade cost at specific coordinates.
-    pub fn get_trade_cost(&self, x: usize, y: usize) -> Option<f64> {
-        if x < self.width && y < self.height {
-            Some(self.trade_cost[y * self.width + x])
+            Some(self.rivers[y * self.width + x])
         } else {
             None
         }
@@ -374,8 +371,6 @@ impl BiomeMap {
         let mut erosion = Vec::with_capacity(total_pixels);
         let mut peaks_valleys = Vec::with_capacity(total_pixels);
         let mut humidity = Vec::with_capacity(total_pixels);
-        let mut political = Vec::with_capacity(total_pixels);
-        let mut trade_cost_vec = Vec::with_capacity(total_pixels);
 
         for py in 0..output_size {
             for px in 0..output_size {
@@ -399,9 +394,24 @@ impl BiomeMap {
                 erosion.push(eros);
                 humidity.push(humid);
                 biomes.push(biome);
+            }
+        }
 
-                political.push(calculate_political_score_simple(biome, temp, humid));
-                trade_cost_vec.push(calculate_trade_cost(biome, eros));
+        // Generate rivers using D8 flow accumulation
+        let elevation: Vec<f64> = continentalness
+            .iter()
+            .zip(peaks_valleys.iter())
+            .zip(erosion.iter())
+            .map(|((&cont, &peaks), &eros)| cont + peaks * 0.1 - eros * 0.05)
+            .collect();
+
+        let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, output_size, output_size);
+        let rivers = river_gen.generate(&elevation, output_size, output_size);
+
+        // Override biomes where rivers flow (any value > 0 is a river)
+        for idx in 0..total_pixels {
+            if rivers[idx] > 0.0 {
+                biomes[idx] = TileType::River;
             }
         }
 
@@ -415,8 +425,7 @@ impl BiomeMap {
             erosion,
             peaks_valleys,
             humidity,
-            political,
-            trade_cost: trade_cost_vec,
+            rivers,
             resources: ResourceMap::new(output_size, output_size),
         }
     }
@@ -523,11 +532,7 @@ impl BiomeMap {
                     // Compute biome using splines
                     let biome = splines.evaluate(cont, temp, tect, eros, peaks, humid);
 
-                    // Compute derived values
-                    let political = calculate_political_score_simple(biome, temp, humid);
-                    let trade = calculate_trade_cost(biome, eros);
-
-                    results.push((cont, temp, tect, peaks, eros, humid, biome, political, trade));
+                    results.push((cont, temp, tect, peaks, eros, humid, biome));
                 }
 
                 // Update progress for all layers
@@ -552,10 +557,8 @@ impl BiomeMap {
         let mut peaks_valleys = Vec::with_capacity(total_pixels);
         let mut erosion = Vec::with_capacity(total_pixels);
         let mut humidity = Vec::with_capacity(total_pixels);
-        let mut political = Vec::with_capacity(total_pixels);
-        let mut trade_cost = Vec::with_capacity(total_pixels);
 
-        for (cont, temp, tect, peaks, eros, humid, biome, pol, trade) in all_data {
+        for (cont, temp, tect, peaks, eros, humid, biome) in all_data {
             continentalness.push(cont);
             temperature.push(temp);
             tectonic.push(tect);
@@ -563,8 +566,24 @@ impl BiomeMap {
             erosion.push(eros);
             humidity.push(humid);
             biomes.push(biome);
-            political.push(pol);
-            trade_cost.push(trade);
+        }
+
+        // Generate rivers using D8 flow accumulation
+        let elevation: Vec<f64> = continentalness
+            .iter()
+            .zip(peaks_valleys.iter())
+            .zip(erosion.iter())
+            .map(|((&cont, &peaks), &eros)| cont + peaks * 0.1 - eros * 0.05)
+            .collect();
+
+        let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, output_size, output_size);
+        let rivers = river_gen.generate(&elevation, output_size, output_size);
+
+        // Override biomes where rivers flow (any value > 0 is a river)
+        for idx in 0..total_pixels {
+            if rivers[idx] > 0.0 {
+                biomes[idx] = TileType::River;
+            }
         }
 
         // Skip resource generation for meso tiles (too expensive, sparse anyway)
@@ -580,8 +599,7 @@ impl BiomeMap {
             erosion,
             peaks_valleys,
             humidity,
-            political,
-            trade_cost,
+            rivers,
             resources,
         }
     }
@@ -603,8 +621,7 @@ mod tests {
         assert_eq!(map.erosion.len(), 64 * 32);
         assert_eq!(map.peaks_valleys.len(), 64 * 32);
         assert_eq!(map.humidity.len(), 64 * 32);
-        assert_eq!(map.political.len(), 64 * 32);
-        assert_eq!(map.trade_cost.len(), 64 * 32);
+        assert_eq!(map.rivers.len(), 64 * 32);
     }
 
     #[test]
@@ -653,20 +670,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn trade_cost_is_valid() {
-        let map = BiomeMap::generate(42, 64, 32);
-        for y in 0..32 {
-            for x in 0..64 {
-                let cost = map.get_trade_cost(x, y).unwrap();
-                let biome = map.get_biome(x, y).unwrap();
-
-                if matches!(biome, TileType::Sea | TileType::White) {
-                    assert!(cost.is_infinite(), "Water should be impassable");
-                } else {
-                    assert!(cost >= 0.8 && cost <= 10.0, "Land cost {} out of range", cost);
-                }
-            }
-        }
-    }
 }

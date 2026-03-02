@@ -13,6 +13,7 @@ pub enum TileType {
     Plateau,
     Snow,
     White, // Frozen ocean/ice
+    River, // Flowing water
 }
 
 impl TileType {
@@ -30,6 +31,7 @@ impl TileType {
             Self::Plateau => [139, 69, 19],   // Saddle brown
             Self::Snow => [211, 211, 211],    // Light gray
             Self::White => [255, 255, 255],   // Pure white (frozen ocean)
+            Self::River => [64, 164, 223],    // Light blue
         }
     }
 

@@ -7,6 +7,7 @@ pub mod derived;
 pub mod progress;
 pub mod resource;
 pub mod resource_map;
+pub mod rivers;
 pub mod strategy;
 pub mod tidally_locked;
 pub mod visualization;
@@ -16,10 +17,10 @@ pub use biome_splines::BiomeSplines;
 pub use chunk_hierarchy::{
     CacheConfig, CacheStats, ChunkHierarchy, MacroChunk, MesoChunk, MicroChunk,
 };
-pub use derived::{calculate_political_score, calculate_trade_cost};
 pub use progress::{LayerId, LayerProgress};
 pub use resource::WorldChunks;
 pub use resource_map::ResourceMap;
+pub use rivers::RiverGenerator;
 pub use strategy::{
     ContinentalnessStrategy, ErosionStrategy, HumidityStrategy, PeaksAndValleysStrategy,
     ResourceContext, ResourceNoiseStrategy, TectonicPlatesStrategy, TemperatureStrategy,

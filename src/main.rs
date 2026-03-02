@@ -481,11 +481,12 @@ fn generation_progress_ui(
         .map(|p| p.load(Ordering::Relaxed))
         .unwrap_or(0);
 
+    // Position to the right of the left panel (approximately 200px) and centered vertically
     egui::Window::new("Generating")
         .collapsible(false)
         .resizable(false)
         .title_bar(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .anchor(egui::Align2::LEFT_CENTER, [220.0, 0.0])
         .fixed_size([350.0, 280.0])
         .show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -502,24 +503,29 @@ fn generation_progress_ui(
                 );
                 ui.add_space(10.0);
 
-                // Per-layer progress bars
+                // Per-layer progress bars using Grid for alignment
                 if let Some(ref layer_progress) = task_res.layer_progress {
                     ui.separator();
                     ui.label("Layer Generation:");
                     ui.add_space(5.0);
 
-                    for layer_id in LayerId::all() {
-                        let fraction = layer_progress.fraction(*layer_id);
+                    egui::Grid::new("layer_progress_grid")
+                        .num_columns(2)
+                        .spacing([10.0, 4.0])
+                        .min_col_width(100.0)
+                        .show(ui, |ui| {
+                            for layer_id in LayerId::all() {
+                                let fraction = layer_progress.fraction(*layer_id);
 
-                        ui.horizontal(|ui| {
-                            ui.label(format!("{:14}", layer_id.name()));
-                            ui.add_sized(
-                                [200.0, 14.0],
-                                egui::ProgressBar::new(fraction)
-                                    .text(format!("{:.0}%", fraction * 100.0))
-                            );
+                                ui.label(layer_id.name());
+                                ui.add_sized(
+                                    [200.0, 14.0],
+                                    egui::ProgressBar::new(fraction)
+                                        .text(format!("{:.0}%", fraction * 100.0))
+                                );
+                                ui.end_row();
+                            }
                         });
-                    }
                 }
             });
         });
@@ -585,11 +591,7 @@ fn handle_layer_change(
 
     // Update macro map texture
     if let Some(ref mut tex) = textures {
-        let image_data = if new_layer == NoiseLayer::Political {
-            tex.territory_overlay.clone().unwrap_or_else(|| tex.biome_map.to_layer_image(new_layer))
-        } else {
-            tex.biome_map.to_layer_image(new_layer)
-        };
+        let image_data = tex.biome_map.to_layer_image(new_layer);
 
         let new_image = create_image(world_def.width, world_def.height, image_data);
         let new_handle = images.add(new_image);

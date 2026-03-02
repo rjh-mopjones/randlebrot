@@ -12,6 +12,7 @@ pub fn terrain_influence_decay(biome: TileType) -> f64 {
     match biome {
         TileType::Sea | TileType::White => 0.0, // Complete barrier
         TileType::Mountain => 0.3,               // Strong barrier
+        TileType::River => 0.5,                  // Natural boundary but crossable
         TileType::Plateau => 0.5,
         TileType::Snow => 0.6,
         TileType::Desert | TileType::Sahara => 0.7,

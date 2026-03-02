@@ -11,8 +11,7 @@ pub enum NoiseLayer {
     Erosion,
     PeaksValleys,
     Humidity,
-    Political,
-    TradeCost,
+    Rivers,
     // Resource layers
     ResourceIron,
     ResourceGold,
@@ -39,8 +38,7 @@ impl NoiseLayer {
             Self::Erosion,
             Self::PeaksValleys,
             Self::Humidity,
-            Self::Political,
-            Self::TradeCost,
+            Self::Rivers,
             Self::ResourceIron,
             Self::ResourceGold,
             Self::ResourceCopper,
@@ -66,8 +64,7 @@ impl NoiseLayer {
             Self::Erosion => "Erosion",
             Self::PeaksValleys => "Peaks & Valleys",
             Self::Humidity => "Humidity",
-            Self::Political => "Settlement Suitability",
-            Self::TradeCost => "Travel Cost",
+            Self::Rivers => "Rivers",
             Self::ResourceIron => "Iron Deposits",
             Self::ResourceGold => "Gold Deposits",
             Self::ResourceCopper => "Copper Deposits",
@@ -209,33 +206,16 @@ pub fn humidity_to_rgba(humidity: f64) -> [u8; 4] {
     }
 }
 
-/// Convert political/settlement score to RGBA.
-/// Dark (unsuitable) to green (ideal).
-pub fn political_to_rgba(score: f64) -> [u8; 4] {
-    // score in [0, 1]
-    if score < 0.01 {
-        return [20, 20, 30, 255]; // Water/impassable
+/// Convert river flow to RGBA.
+/// Higher flow = brighter blue rivers.
+pub fn river_to_rgba(flow: f64) -> [u8; 4] {
+    if flow < 0.05 {
+        [30, 30, 30, 255] // No river - dark background
+    } else {
+        // Blue intensity scales with flow
+        let intensity = (flow.min(1.0) * 200.0) as u8;
+        [40, 80 + intensity / 2, 180 + intensity / 3, 255]
     }
-
-    let r = (50.0 - score * 30.0) as u8;
-    let g = (50.0 + score * 200.0) as u8;
-    let b = (50.0 - score * 30.0) as u8;
-    [r, g, b, 255]
-}
-
-/// Convert trade cost to RGBA.
-/// Light (cheap) to dark (expensive).
-pub fn trade_to_rgba(cost: f64) -> [u8; 4] {
-    if cost.is_infinite() {
-        return [10, 10, 30, 255]; // Impassable - dark blue
-    }
-
-    // Normalize cost (1.0 = cheap, 10.0 = expensive)
-    let normalized = ((cost - 1.0) / 9.0).clamp(0.0, 1.0);
-
-    // Light to dark gradient
-    let intensity = ((1.0 - normalized) * 200.0 + 30.0) as u8;
-    [intensity, intensity, (intensity as f64 * 0.9) as u8, 255]
 }
 
 /// Convert resource abundance to RGBA.

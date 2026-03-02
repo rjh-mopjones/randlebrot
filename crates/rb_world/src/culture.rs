@@ -81,6 +81,7 @@ pub struct BiomePreferences {
     pub plateau: f64,
     pub snow: f64,
     pub white: f64, // Frozen ocean/ice
+    pub river: f64, // Flowing water
 }
 
 impl Default for BiomePreferences {
@@ -96,6 +97,7 @@ impl Default for BiomePreferences {
             plateau: 0.1,
             snow: -0.2,
             white: -1.0,
+            river: 0.6, // Rivers are attractive for settlements
         }
     }
 }
@@ -114,6 +116,7 @@ impl BiomePreferences {
             TileType::Plateau => self.plateau,
             TileType::Snow => self.snow,
             TileType::White => self.white,
+            TileType::River => self.river,
         }
     }
 }
@@ -177,6 +180,7 @@ impl Culture {
                 snow: 0.1,
                 sea: -1.0,
                 white: -1.0,
+                river: 0.9, // Rivers are highly valued
             },
             temperature_range: (10.0, 40.0),
             continentalness_range: (0.0, 0.25),
@@ -206,6 +210,7 @@ impl Culture {
                 sahara: -1.0,
                 sea: -1.0,
                 white: 0.2, // Can settle on ice edges
+                river: 0.7, // Frozen rivers useful
             },
             temperature_range: (-40.0, 10.0),
             continentalness_range: (0.05, 0.35),
@@ -235,6 +240,7 @@ impl Culture {
                 snow: -1.0,
                 sea: -1.0,
                 white: -1.0,
+                river: 1.0, // Oases/rivers vital in desert
             },
             temperature_range: (40.0, 100.0),
             continentalness_range: (0.0, 0.3),
@@ -264,6 +270,7 @@ impl Culture {
                 plateau: 0.0,
                 snow: 0.1,
                 white: -0.5,
+                river: 0.9, // Rivers are trade routes
             },
             temperature_range: (5.0, 50.0),
             continentalness_range: (-0.02, 0.1), // Very coastal
@@ -293,6 +300,7 @@ impl Culture {
                 sahara: -0.2,
                 sea: -1.0,
                 white: -0.5,
+                river: 0.5, // Mountain streams useful
             },
             temperature_range: (-20.0, 50.0),
             continentalness_range: (0.2, 0.5), // High elevation

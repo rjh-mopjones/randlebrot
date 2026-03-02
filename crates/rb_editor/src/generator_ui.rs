@@ -201,8 +201,7 @@ pub fn generator_ui_system(
                 ];
 
                 let derived_layers = [
-                    NoiseLayer::Political,
-                    NoiseLayer::TradeCost,
+                    NoiseLayer::Rivers,
                 ];
 
                 let resource_layers = [

@@ -131,6 +131,7 @@ impl TradeGood {
             TileType::Plateau => vec![TradeGood::Ore, TradeGood::Food],
             TileType::Beach => vec![TradeGood::Fish, TradeGood::Salt],
             TileType::Sea => vec![TradeGood::Fish],
+            TileType::River => vec![TradeGood::Fish, TradeGood::Food], // Rivers support agriculture and fishing
             TileType::Desert => vec![TradeGood::Salt, TradeGood::Luxury],
             TileType::Sahara => vec![TradeGood::Luxury],
             TileType::Snow => vec![TradeGood::Furs],
@@ -189,6 +190,7 @@ pub fn terrain_movement_cost(biome: TileType) -> f64 {
         TileType::Snow => 6.0,
         TileType::Desert | TileType::Sahara => 4.0,
         TileType::Forest => 3.0,
+        TileType::River => 2.0, // Need to ford or build bridges
         TileType::Beach => 1.5,
         TileType::Plains => 1.0, // Ideal for roads
     }
