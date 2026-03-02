@@ -1,37 +1,74 @@
 /// Biome/tile types for world map generation.
-/// Matches the fungal-jungle tiling strategy.
+/// Uses multi-axis climate classification for realistic biome placement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum TileType {
+    // Water types
     #[default]
     Sea,
+    OceanTrench, // Deep navy - plate boundary depths
+    River,       // Flowing water
+
+    // Coastal
     Beach,
+
+    // Frozen biomes (dark side of tidally locked planet)
+    White,   // Frozen ocean/ice
+    Glacier, // Ice blue - glacial ice on dark side
+    Snow,    // Snow-covered land
+    Tundra,  // Grayish green - permafrost
+    Taiga,   // Dark teal - cold coniferous forest
+
+    // Temperate biomes (terminator zone)
     Plains,
     Forest,
-    Desert,
-    Sahara,
+    Marsh,   // Olive drab - wetland
+    Steppe,  // Pale yellow-green - dry grassland
     Mountain,
     Plateau,
-    Snow,
-    White, // Frozen ocean/ice
-    River, // Flowing water
+
+    // Hot biomes (sun side)
+    Savanna,  // Khaki - hot grassland
+    Jungle,   // Very dark green - hot humid forest
+    Desert,
+    Sahara,
+    Badlands, // Rust brown - eroded arid terrain
+    Volcanic, // Dark red-brown - active volcanic
 }
 
 impl TileType {
     /// Returns the RGB color for this tile type.
-    /// Exact colors from fungal-jungle.
     pub fn rgb(&self) -> [u8; 3] {
         match self {
-            Self::Sea => [0, 191, 255],        // Cyan blue
-            Self::Beach => [222, 184, 135],   // Tan/burlywood
-            Self::Plains => [50, 205, 50],    // Lime green
-            Self::Forest => [0, 100, 0],      // Dark green
-            Self::Desert => [255, 215, 0],    // Gold
-            Self::Sahara => [255, 165, 0],    // Orange
-            Self::Mountain => [105, 105, 105], // Dark gray
-            Self::Plateau => [139, 69, 19],   // Saddle brown
-            Self::Snow => [211, 211, 211],    // Light gray
-            Self::White => [255, 255, 255],   // Pure white (frozen ocean)
-            Self::River => [64, 164, 223],    // Light blue
+            // Water types
+            Self::Sea => [0, 191, 255],         // Cyan blue
+            Self::OceanTrench => [0, 51, 102],  // Deep navy - plate boundary depths
+            Self::River => [64, 164, 223],      // Light blue
+
+            // Coastal
+            Self::Beach => [222, 184, 135],     // Tan/burlywood
+
+            // Frozen biomes
+            Self::White => [255, 255, 255],     // Pure white (frozen ocean)
+            Self::Glacier => [200, 220, 255],   // Ice blue - glacial ice
+            Self::Snow => [211, 211, 211],      // Light gray
+            Self::Tundra => [176, 196, 176],    // Grayish green - permafrost
+            Self::Taiga => [34, 85, 68],        // Dark teal - cold coniferous forest
+
+            // Temperate biomes
+            Self::Plains => [50, 205, 50],      // Lime green
+            Self::Forest => [0, 100, 0],        // Dark green
+            Self::Marsh => [85, 107, 47],       // Olive drab - wetland
+            Self::Steppe => [160, 170, 110],    // Pale yellow-green - dry grassland
+            Self::Mountain => [105, 105, 105],  // Dark gray
+            Self::Plateau => [139, 69, 19],     // Saddle brown
+
+            // Hot biomes
+            Self::Savanna => [189, 183, 107],   // Khaki - hot grassland
+            Self::Jungle => [0, 80, 32],        // Very dark green - hot humid forest
+            Self::Desert => [255, 215, 0],      // Gold
+            Self::Sahara => [255, 165, 0],      // Orange
+            Self::Badlands => [178, 102, 68],   // Rust brown - eroded arid terrain
+            Self::Volcanic => [64, 32, 32],     // Dark red-brown - active volcanic
         }
     }
 

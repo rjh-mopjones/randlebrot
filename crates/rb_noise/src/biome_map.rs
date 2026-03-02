@@ -138,12 +138,36 @@ impl BiomeMap {
         }
 
         // Phase 3: Generate rivers using D8 flow accumulation
-        // Compute elevation from continentalness + peaks - erosion
+        // Compute elevation with tectonic amplification for mountain chains
         let elevation: Vec<f64> = continentalness
             .iter()
             .zip(peaks_valleys.iter())
             .zip(erosion.iter())
-            .map(|((&cont, &peaks), &eros)| cont + peaks * 0.1 - eros * 0.05)
+            .zip(tectonic.iter())
+            .map(|(((&cont, &peaks), &eros), &tect)| {
+                let is_land = cont >= SEA_LEVEL;
+                let boundary = 1.0 - tect; // 1 at boundary, 0 at center
+
+                // Mountains amplified at plate boundaries
+                let tectonic_amp = 1.0 + boundary * boundary * 2.0;
+                let erosion_damp = 1.0 - eros * 0.7;
+
+                let peak_height = if is_land {
+                    peaks.max(0.0) * 0.15 * tectonic_amp * erosion_damp
+                } else {
+                    0.0
+                };
+                let valley_depth = if is_land { peaks.min(0.0).abs() * 0.08 } else { 0.0 };
+
+                // Ocean trenches at convergent boundaries
+                let trench = if !is_land && boundary > 0.7 {
+                    (boundary - 0.7) * 0.5
+                } else {
+                    0.0
+                };
+
+                cont + peak_height - valley_depth - trench
+            })
             .collect();
 
         let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, width, height);
@@ -402,12 +426,34 @@ impl BiomeMap {
             }
         }
 
-        // Generate rivers using D8 flow accumulation
+        // Generate rivers using D8 flow accumulation with tectonic elevation
         let elevation: Vec<f64> = continentalness
             .iter()
             .zip(peaks_valleys.iter())
             .zip(erosion.iter())
-            .map(|((&cont, &peaks), &eros)| cont + peaks * 0.1 - eros * 0.05)
+            .zip(tectonic.iter())
+            .map(|(((&cont, &peaks), &eros), &tect)| {
+                let is_land = cont >= SEA_LEVEL;
+                let boundary = 1.0 - tect;
+
+                let tectonic_amp = 1.0 + boundary * boundary * 2.0;
+                let erosion_damp = 1.0 - eros * 0.7;
+
+                let peak_height = if is_land {
+                    peaks.max(0.0) * 0.15 * tectonic_amp * erosion_damp
+                } else {
+                    0.0
+                };
+                let valley_depth = if is_land { peaks.min(0.0).abs() * 0.08 } else { 0.0 };
+
+                let trench = if !is_land && boundary > 0.7 {
+                    (boundary - 0.7) * 0.5
+                } else {
+                    0.0
+                };
+
+                cont + peak_height - valley_depth - trench
+            })
             .collect();
 
         let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, output_size, output_size);
@@ -578,12 +624,34 @@ impl BiomeMap {
             biomes.push(biome);
         }
 
-        // Generate rivers using D8 flow accumulation
+        // Generate rivers using D8 flow accumulation with tectonic elevation
         let elevation: Vec<f64> = continentalness
             .iter()
             .zip(peaks_valleys.iter())
             .zip(erosion.iter())
-            .map(|((&cont, &peaks), &eros)| cont + peaks * 0.1 - eros * 0.05)
+            .zip(tectonic.iter())
+            .map(|(((&cont, &peaks), &eros), &tect)| {
+                let is_land = cont >= SEA_LEVEL;
+                let boundary = 1.0 - tect;
+
+                let tectonic_amp = 1.0 + boundary * boundary * 2.0;
+                let erosion_damp = 1.0 - eros * 0.7;
+
+                let peak_height = if is_land {
+                    peaks.max(0.0) * 0.15 * tectonic_amp * erosion_damp
+                } else {
+                    0.0
+                };
+                let valley_depth = if is_land { peaks.min(0.0).abs() * 0.08 } else { 0.0 };
+
+                let trench = if !is_land && boundary > 0.7 {
+                    (boundary - 0.7) * 0.5
+                } else {
+                    0.0
+                };
+
+                cont + peak_height - valley_depth - trench
+            })
             .collect();
 
         let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, output_size, output_size);

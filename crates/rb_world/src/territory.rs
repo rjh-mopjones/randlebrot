@@ -10,15 +10,31 @@ use serde::{Deserialize, Serialize};
 /// Lower values mean terrain acts as a stronger boundary.
 pub fn terrain_influence_decay(biome: TileType) -> f64 {
     match biome {
-        TileType::Sea | TileType::White => 0.0, // Complete barrier
-        TileType::Mountain => 0.3,               // Strong barrier
-        TileType::River => 0.5,                  // Natural boundary but crossable
+        // Complete barriers
+        TileType::Sea | TileType::OceanTrench | TileType::White | TileType::Glacier => 0.0,
+
+        // Strong barriers
+        TileType::Mountain => 0.3,
+        TileType::Volcanic => 0.2, // Very dangerous
+
+        // Moderate barriers
+        TileType::River => 0.5, // Natural boundary but crossable
         TileType::Plateau => 0.5,
-        TileType::Snow => 0.6,
+        TileType::Badlands => 0.5,
+        TileType::Jungle => 0.55,
+        TileType::Marsh => 0.55,
+
+        // Weak barriers
+        TileType::Snow | TileType::Tundra => 0.6,
+        TileType::Taiga => 0.7,
         TileType::Desert | TileType::Sahara => 0.7,
         TileType::Forest => 0.8,
+        TileType::Steppe => 0.85,
+        TileType::Savanna => 0.85,
+
+        // Easy expansion
         TileType::Beach => 0.9,
-        TileType::Plains => 0.95, // Easy expansion
+        TileType::Plains => 0.95,
     }
 }
 

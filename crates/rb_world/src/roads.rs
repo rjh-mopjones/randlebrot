@@ -125,17 +125,36 @@ impl TradeGood {
     /// Get typical goods produced by a biome.
     pub fn from_biome(biome: TileType) -> Vec<TradeGood> {
         match biome {
+            // Water
+            TileType::Sea => vec![TradeGood::Fish],
+            TileType::OceanTrench => vec![TradeGood::Fish],
+            TileType::River => vec![TradeGood::Fish, TradeGood::Food],
+
+            // Coastal
+            TileType::Beach => vec![TradeGood::Fish, TradeGood::Salt],
+
+            // Frozen
+            TileType::White => vec![TradeGood::Fish, TradeGood::Furs],
+            TileType::Glacier => vec![TradeGood::Furs],
+            TileType::Snow => vec![TradeGood::Furs],
+            TileType::Tundra => vec![TradeGood::Furs],
+            TileType::Taiga => vec![TradeGood::Timber, TradeGood::Furs],
+
+            // Temperate
             TileType::Plains => vec![TradeGood::Food, TradeGood::Textiles],
             TileType::Forest => vec![TradeGood::Timber, TradeGood::Furs],
+            TileType::Marsh => vec![TradeGood::Fish, TradeGood::Food],
+            TileType::Steppe => vec![TradeGood::Food, TradeGood::Furs],
             TileType::Mountain => vec![TradeGood::Ore, TradeGood::Weapons],
             TileType::Plateau => vec![TradeGood::Ore, TradeGood::Food],
-            TileType::Beach => vec![TradeGood::Fish, TradeGood::Salt],
-            TileType::Sea => vec![TradeGood::Fish],
-            TileType::River => vec![TradeGood::Fish, TradeGood::Food], // Rivers support agriculture and fishing
+
+            // Hot
+            TileType::Savanna => vec![TradeGood::Food, TradeGood::Furs],
+            TileType::Jungle => vec![TradeGood::Timber, TradeGood::Luxury],
             TileType::Desert => vec![TradeGood::Salt, TradeGood::Luxury],
             TileType::Sahara => vec![TradeGood::Luxury],
-            TileType::Snow => vec![TradeGood::Furs],
-            TileType::White => vec![TradeGood::Fish, TradeGood::Furs],
+            TileType::Badlands => vec![TradeGood::Ore],
+            TileType::Volcanic => vec![TradeGood::Ore, TradeGood::Luxury],
         }
     }
 }
@@ -184,21 +203,38 @@ impl TradeRoute {
 /// Movement cost for pathfinding through different terrain.
 pub fn terrain_movement_cost(biome: TileType) -> f64 {
     match biome {
-        TileType::Sea | TileType::White => f64::INFINITY, // Impassable by land
+        // Impassable by land
+        TileType::Sea | TileType::OceanTrench | TileType::White | TileType::Glacier => {
+            f64::INFINITY
+        }
+        TileType::Volcanic => 10.0, // Dangerous
+
+        // Difficult terrain
         TileType::Mountain => 8.0,
+        TileType::Snow | TileType::Tundra => 6.0,
+        TileType::Badlands => 5.5,
         TileType::Plateau => 5.0,
-        TileType::Snow => 6.0,
+        TileType::Jungle | TileType::Marsh => 4.5,
         TileType::Desert | TileType::Sahara => 4.0,
+        TileType::Taiga => 3.5,
+
+        // Moderate terrain
         TileType::Forest => 3.0,
-        TileType::River => 2.0, // Need to ford or build bridges
+        TileType::Steppe | TileType::Savanna => 1.5,
         TileType::Beach => 1.5,
+        TileType::River => 2.0, // Need to ford or build bridges
+
+        // Easy terrain
         TileType::Plains => 1.0, // Ideal for roads
     }
 }
 
 /// Check if terrain is passable for road building.
 pub fn is_passable(biome: TileType) -> bool {
-    !matches!(biome, TileType::Sea | TileType::White)
+    !matches!(
+        biome,
+        TileType::Sea | TileType::OceanTrench | TileType::White | TileType::Glacier
+    )
 }
 
 #[cfg(test)]

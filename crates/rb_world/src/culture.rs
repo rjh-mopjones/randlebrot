@@ -71,33 +71,71 @@ impl CultureType {
 /// Values range from -1.0 (hostile) to 1.0 (ideal).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BiomePreferences {
+    // Water types
     pub sea: f64,
+    pub ocean_trench: f64,
+    pub river: f64,
+
+    // Coastal
     pub beach: f64,
+
+    // Frozen biomes
+    pub white: f64,   // Frozen ocean/ice
+    pub glacier: f64, // Glacial ice
+    pub snow: f64,
+    pub tundra: f64,
+    pub taiga: f64,
+
+    // Temperate biomes
     pub plains: f64,
     pub forest: f64,
-    pub desert: f64,
-    pub sahara: f64,
+    pub marsh: f64,
+    pub steppe: f64,
     pub mountain: f64,
     pub plateau: f64,
-    pub snow: f64,
-    pub white: f64, // Frozen ocean/ice
-    pub river: f64, // Flowing water
+
+    // Hot biomes
+    pub savanna: f64,
+    pub jungle: f64,
+    pub desert: f64,
+    pub sahara: f64,
+    pub badlands: f64,
+    pub volcanic: f64,
 }
 
 impl Default for BiomePreferences {
     fn default() -> Self {
         Self {
+            // Water
             sea: -1.0,
+            ocean_trench: -1.0,
+            river: 0.6, // Rivers are attractive for settlements
+
+            // Coastal
             beach: 0.0,
+
+            // Frozen
+            white: -1.0,
+            glacier: -1.0,
+            snow: -0.2,
+            tundra: -0.3,
+            taiga: 0.1,
+
+            // Temperate
             plains: 0.5,
             forest: 0.3,
-            desert: -0.3,
-            sahara: -0.5,
+            marsh: -0.2,
+            steppe: 0.2,
             mountain: 0.0,
             plateau: 0.1,
-            snow: -0.2,
-            white: -1.0,
-            river: 0.6, // Rivers are attractive for settlements
+
+            // Hot
+            savanna: 0.2,
+            jungle: -0.1,
+            desert: -0.3,
+            sahara: -0.5,
+            badlands: -0.4,
+            volcanic: -0.8,
         }
     }
 }
@@ -106,17 +144,36 @@ impl BiomePreferences {
     /// Get the preference score for a given tile type.
     pub fn get(&self, tile: TileType) -> f64 {
         match tile {
+            // Water
             TileType::Sea => self.sea,
+            TileType::OceanTrench => self.ocean_trench,
+            TileType::River => self.river,
+
+            // Coastal
             TileType::Beach => self.beach,
+
+            // Frozen
+            TileType::White => self.white,
+            TileType::Glacier => self.glacier,
+            TileType::Snow => self.snow,
+            TileType::Tundra => self.tundra,
+            TileType::Taiga => self.taiga,
+
+            // Temperate
             TileType::Plains => self.plains,
             TileType::Forest => self.forest,
-            TileType::Desert => self.desert,
-            TileType::Sahara => self.sahara,
+            TileType::Marsh => self.marsh,
+            TileType::Steppe => self.steppe,
             TileType::Mountain => self.mountain,
             TileType::Plateau => self.plateau,
-            TileType::Snow => self.snow,
-            TileType::White => self.white,
-            TileType::River => self.river,
+
+            // Hot
+            TileType::Savanna => self.savanna,
+            TileType::Jungle => self.jungle,
+            TileType::Desert => self.desert,
+            TileType::Sahara => self.sahara,
+            TileType::Badlands => self.badlands,
+            TileType::Volcanic => self.volcanic,
         }
     }
 }
@@ -170,17 +227,36 @@ impl Culture {
             culture_type: CultureType::TwilightDweller,
             name: "Twilight Confederacy".into(),
             biome_preferences: BiomePreferences {
+                // Water
+                sea: -1.0,
+                ocean_trench: -1.0,
+                river: 0.9, // Rivers are highly valued
+
+                // Coastal
+                beach: 0.5,
+
+                // Frozen
+                white: -1.0,
+                glacier: -1.0,
+                snow: 0.1,
+                tundra: -0.1,
+                taiga: 0.5,
+
+                // Temperate
                 plains: 1.0,
                 forest: 0.8,
-                beach: 0.5,
+                marsh: 0.2,
+                steppe: 0.6,
                 mountain: 0.3,
                 plateau: 0.4,
+
+                // Hot
+                savanna: 0.3,
+                jungle: 0.1,
                 desert: -0.2,
                 sahara: -0.5,
-                snow: 0.1,
-                sea: -1.0,
-                white: -1.0,
-                river: 0.9, // Rivers are highly valued
+                badlands: -0.3,
+                volcanic: -0.7,
             },
             temperature_range: (10.0, 40.0),
             continentalness_range: (0.0, 0.25),
@@ -200,17 +276,36 @@ impl Culture {
             culture_type: CultureType::FrostKin,
             name: "Northern Holds".into(),
             biome_preferences: BiomePreferences {
-                snow: 1.0,
-                forest: 0.6,
-                mountain: 0.5,
-                plains: 0.3,
-                plateau: 0.4,
+                // Water
+                sea: -1.0,
+                ocean_trench: -1.0,
+                river: 0.7, // Frozen rivers useful
+
+                // Coastal
                 beach: 0.1,
+
+                // Frozen - preferred
+                white: 0.2, // Can settle on ice edges
+                glacier: 0.3,
+                snow: 1.0,
+                tundra: 0.9,
+                taiga: 0.8,
+
+                // Temperate
+                plains: 0.3,
+                forest: 0.6,
+                marsh: 0.1,
+                steppe: 0.2,
+                mountain: 0.5,
+                plateau: 0.4,
+
+                // Hot - hostile
+                savanna: -0.5,
+                jungle: -0.7,
                 desert: -0.8,
                 sahara: -1.0,
-                sea: -1.0,
-                white: 0.2, // Can settle on ice edges
-                river: 0.7, // Frozen rivers useful
+                badlands: -0.6,
+                volcanic: -0.4, // Geothermal heat useful
             },
             temperature_range: (-40.0, 10.0),
             continentalness_range: (0.05, 0.35),
@@ -230,17 +325,36 @@ impl Culture {
             culture_type: CultureType::SunForged,
             name: "Sunward Tribes".into(),
             biome_preferences: BiomePreferences {
+                // Water
+                sea: -1.0,
+                ocean_trench: -1.0,
+                river: 1.0, // Oases/rivers vital in desert
+
+                // Coastal
+                beach: 0.3,
+
+                // Frozen - hostile
+                white: -1.0,
+                glacier: -1.0,
+                snow: -1.0,
+                tundra: -0.8,
+                taiga: -0.6,
+
+                // Temperate
+                plains: 0.4,
+                forest: -0.2,
+                marsh: -0.3,
+                steppe: 0.5,
+                mountain: 0.2,
+                plateau: 0.7,
+
+                // Hot - preferred
+                savanna: 0.9,
+                jungle: 0.3,
                 desert: 0.8,
                 sahara: 1.0,
-                plateau: 0.7,
-                plains: 0.4,
-                beach: 0.3,
-                mountain: 0.2,
-                forest: -0.2,
-                snow: -1.0,
-                sea: -1.0,
-                white: -1.0,
-                river: 1.0, // Oases/rivers vital in desert
+                badlands: 0.7,
+                volcanic: 0.5, // Familiar with heat
             },
             temperature_range: (40.0, 100.0),
             continentalness_range: (0.0, 0.3),
@@ -260,17 +374,36 @@ impl Culture {
             culture_type: CultureType::TideWalker,
             name: "Coastal League".into(),
             biome_preferences: BiomePreferences {
-                beach: 1.0,
+                // Water
                 sea: 0.3, // Can settle near water
+                ocean_trench: -0.5,
+                river: 0.9, // Rivers are trade routes
+
+                // Coastal - preferred
+                beach: 1.0,
+
+                // Frozen
+                white: -0.5,
+                glacier: -0.6,
+                snow: 0.1,
+                tundra: 0.0,
+                taiga: 0.2,
+
+                // Temperate
                 plains: 0.5,
                 forest: 0.3,
-                desert: 0.1,
-                sahara: -0.3,
+                marsh: 0.7, // Coastal marshes
+                steppe: 0.2,
                 mountain: -0.2,
                 plateau: 0.0,
-                snow: 0.1,
-                white: -0.5,
-                river: 0.9, // Rivers are trade routes
+
+                // Hot
+                savanna: 0.2,
+                jungle: 0.4, // Coastal jungle
+                desert: 0.1,
+                sahara: -0.3,
+                badlands: -0.2,
+                volcanic: -0.4,
             },
             temperature_range: (5.0, 50.0),
             continentalness_range: (-0.02, 0.1), // Very coastal
@@ -290,17 +423,36 @@ impl Culture {
             culture_type: CultureType::StoneBorn,
             name: "Mountain Kingdoms".into(),
             biome_preferences: BiomePreferences {
-                mountain: 1.0,
-                plateau: 0.9,
-                snow: 0.5,
-                forest: 0.3,
-                plains: 0.1,
+                // Water
+                sea: -1.0,
+                ocean_trench: -1.0,
+                river: 0.5, // Mountain streams useful
+
+                // Coastal
                 beach: -0.3,
+
+                // Frozen
+                white: -0.5,
+                glacier: 0.3, // Mountain glaciers
+                snow: 0.5,
+                tundra: 0.2,
+                taiga: 0.4,
+
+                // Temperate - mountain areas
+                plains: 0.1,
+                forest: 0.3,
+                marsh: -0.4,
+                steppe: 0.3,
+                mountain: 1.0, // Preferred
+                plateau: 0.9,
+
+                // Hot
+                savanna: 0.1,
+                jungle: -0.3,
                 desert: 0.0,
                 sahara: -0.2,
-                sea: -1.0,
-                white: -0.5,
-                river: 0.5, // Mountain streams useful
+                badlands: 0.4, // Rocky terrain
+                volcanic: 0.6, // Volcanic mountains
             },
             temperature_range: (-20.0, 50.0),
             continentalness_range: (0.2, 0.5), // High elevation
