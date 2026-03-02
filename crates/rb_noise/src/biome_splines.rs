@@ -92,10 +92,12 @@ impl BiomeSplines {
 
     /// Determine biome from adjusted elevation, temperature, and humidity.
     fn biome_from_climate(&self, elevation: f64, temp: f64, humidity: f64) -> TileType {
-        // Ocean check
+        // Ocean/basin check - depends on temperature
         if elevation < self.sea_level {
             return if temp < -15.0 {
                 TileType::White // Frozen ocean / ice
+            } else if temp > 80.0 {
+                TileType::Sahara // Evaporated ocean - scorched salt flats
             } else {
                 TileType::Sea
             };
@@ -103,9 +105,11 @@ impl BiomeSplines {
 
         let above_sea = elevation - self.sea_level;
 
-        // Coastal zone (just above sea level)
+        // Coastal/low elevation zone
         if above_sea < 0.02 {
-            return if temp > 3.0 {
+            return if temp > 80.0 {
+                TileType::Sahara // Scorched lowlands
+            } else if temp > 3.0 {
                 TileType::Beach
             } else {
                 TileType::Snow

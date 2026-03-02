@@ -57,8 +57,15 @@ impl LatitudeTemperatureStrategy {
 
 impl NoiseStrategy for LatitudeTemperatureStrategy {
     fn generate(&self, x: f64, y: f64, detail_level: u32) -> f64 {
-        // Normalized position: 0 = top (dark side), 1 = bottom (sun side)
-        let t = (y / self.map_height).clamp(0.0, 1.0);
+        // Get noise for boundary variation (use different coordinates for variety)
+        let boundary_noise = self.fbm(x * 0.5, y * 0.3, 0);
+
+        // Offset the effective latitude by noise to create wavy zone boundaries
+        // The noise shifts the boundary up/down by up to ~15% of map height
+        let latitude_offset = boundary_noise * 0.15;
+
+        // Normalized position with noise offset: 0 = top (dark side), 1 = bottom (sun side)
+        let t = ((y / self.map_height) + latitude_offset).clamp(0.0, 1.0);
 
         // Non-linear temperature curve for tidally locked planet:
         // - Top third (0-0.33): Frozen, -80°C to -20°C
@@ -66,7 +73,7 @@ impl NoiseStrategy for LatitudeTemperatureStrategy {
         // - Bottom third (0.66-1.0): Scorching, +80°C to +150°C
         let base_temp = if t < 0.33 {
             // Dark side: frozen
-            let local_t = t / 0.33; // 0 to 1 within this zone
+            let local_t = t / 0.33;
             -80.0 + local_t * 60.0  // -80 to -20
         } else if t < 0.66 {
             // Terminator: habitable band
@@ -78,20 +85,20 @@ impl NoiseStrategy for LatitudeTemperatureStrategy {
             80.0 + local_t * 70.0   // +80 to +150
         };
 
-        // Noise variation - reduced at extremes for more uniform hostile zones
-        let noise_value = self.fbm(x, y, detail_level);
+        // Local noise variation for terrain detail
+        let local_noise = self.fbm(x, y, detail_level);
         let noise_scale = if t < 0.2 || t > 0.8 {
-            // Extreme zones: less variation (uniformly hostile)
-            20.0
+            // Extreme zones: less variation
+            25.0
         } else if t < 0.33 || t > 0.66 {
             // Transition zones: moderate variation
             40.0
         } else {
-            // Habitable zone: most variation (interesting terrain)
-            60.0
+            // Habitable zone: most variation
+            50.0
         };
 
-        base_temp + noise_value * noise_scale
+        base_temp + local_noise * noise_scale
     }
 
     fn name(&self) -> &'static str {

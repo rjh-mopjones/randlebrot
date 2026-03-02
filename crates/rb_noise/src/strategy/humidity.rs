@@ -90,6 +90,7 @@ impl HumidityStrategy {
     /// Takes into account:
     /// - Continentalness (distance from water)
     /// - Latitude (y position) - sun side is extremely dry
+    /// - Noise variation for natural-looking zone boundaries
     ///
     /// # Arguments
     /// * `world_height` - Total height of the world map
@@ -103,8 +104,12 @@ impl HumidityStrategy {
     ) -> f64 {
         let base_humidity = (self.fbm(x, y, detail_level) + 1.0) * 0.5;
 
-        // Latitude factor: 0 = top (dark/frozen), 1 = bottom (sun/scorched)
-        let latitude = (y / world_height).clamp(0.0, 1.0);
+        // Boundary noise for irregular zone edges (same pattern as temperature)
+        let boundary_noise = self.fbm(x * 0.5, y * 0.3, 0);
+        let latitude_offset = boundary_noise * 0.15;
+
+        // Latitude factor with noise offset: 0 = top (dark/frozen), 1 = bottom (sun/scorched)
+        let latitude = ((y / world_height) + latitude_offset).clamp(0.0, 1.0);
 
         // Sun-side dryness multiplier
         // - Dark side (0-0.33): normal humidity possible
