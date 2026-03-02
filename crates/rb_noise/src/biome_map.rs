@@ -149,9 +149,14 @@ impl BiomeMap {
         let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, width, height);
         let rivers = river_gen.generate(&elevation, width, height);
 
-        // Override biomes where rivers flow (any value > 0 is a river)
+        // Override biomes where rivers flow - only in habitable climate zones
+        // No rivers in: ocean, frozen regions (< -10°C), or scorched regions (> 70°C)
         for idx in 0..total_pixels {
-            if rivers[idx] > 0.0 {
+            if rivers[idx] > 0.0
+                && continentalness[idx] >= SEA_LEVEL
+                && temperature[idx] > -10.0
+                && temperature[idx] < 70.0
+            {
                 biomes[idx] = TileType::River;
             }
         }
@@ -408,9 +413,13 @@ impl BiomeMap {
         let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, output_size, output_size);
         let rivers = river_gen.generate(&elevation, output_size, output_size);
 
-        // Override biomes where rivers flow (any value > 0 is a river)
+        // Override biomes where rivers flow - only in habitable climate zones
         for idx in 0..total_pixels {
-            if rivers[idx] > 0.0 {
+            if rivers[idx] > 0.0
+                && continentalness[idx] >= SEA_LEVEL
+                && temperature[idx] > -10.0
+                && temperature[idx] < 70.0
+            {
                 biomes[idx] = TileType::River;
             }
         }
@@ -580,9 +589,13 @@ impl BiomeMap {
         let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, output_size, output_size);
         let rivers = river_gen.generate(&elevation, output_size, output_size);
 
-        // Override biomes where rivers flow (any value > 0 is a river)
+        // Override biomes where rivers flow - only in habitable climate zones
         for idx in 0..total_pixels {
-            if rivers[idx] > 0.0 {
+            if rivers[idx] > 0.0
+                && continentalness[idx] >= SEA_LEVEL
+                && temperature[idx] > -10.0
+                && temperature[idx] < 70.0
+            {
                 biomes[idx] = TileType::River;
             }
         }
