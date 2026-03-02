@@ -508,9 +508,10 @@ impl BiomeMap {
 
         // Phase 1: Generate all layers in parallel with progress tracking
         // Each chunk of pixels updates progress atomically
+        // Note: flat_map_iter preserves order (unlike flat_map which can scramble)
         let all_data: Vec<_> = indices
             .par_chunks(progress_chunk)
-            .flat_map(|chunk| {
+            .flat_map_iter(|chunk| {
                 let mut results = Vec::with_capacity(chunk.len());
 
                 for &idx in chunk {

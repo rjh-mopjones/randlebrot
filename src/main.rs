@@ -7,7 +7,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use rayon::prelude::*;
 use rb_core::{AppMode, ModeTransitionEvent, handle_mode_shortcuts};
 use rb_editor::{CurrentLayer, GeneratorUiState, RegenerationRequest};
-use rb_noise::{BiomeMap, LayerId, LayerProgress, NoiseLayer};
+use rb_noise::{BiomeMap, LayerId, LayerProgress};
 use rb_world::{CivilizationConfig, CivilizationGenerator, CivilizationResult, WorldDefinition};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -332,18 +332,6 @@ fn start_generation(
     task_res.tile_progress = Some(tile_progress);
 }
 
-/// Marker for settlement sprites.
-#[derive(Component)]
-struct SettlementMarker {
-    city_id: u32,
-}
-
-/// Marker for road line sprites.
-#[derive(Component)]
-struct RoadMarker {
-    road_id: u32,
-}
-
 /// Poll generation task and transition when complete.
 fn poll_generation(
     mut commands: Commands,
@@ -399,61 +387,6 @@ fn poll_generation(
                 Transform::from_xyz(-10000.0, -10000.0, 0.5),
                 ChunkHighlight,
             ));
-
-            // Spawn settlement markers
-            let half_width = world_def.width as f32 / 2.0;
-            let half_height = world_def.height as f32 / 2.0;
-
-            for city in &world_def.cities {
-                let world_x = city.position.x as f32 - half_width;
-                let world_y = half_height - city.position.y as f32;
-
-                let (size, color) = match city.tier {
-                    rb_world::CityTier::Capital => (12.0, Color::srgb(1.0, 0.8, 0.2)), // Gold
-                    rb_world::CityTier::Town => (8.0, Color::srgb(0.8, 0.8, 0.8)),     // Silver
-                    rb_world::CityTier::Village => (5.0, Color::srgb(0.6, 0.5, 0.4)),  // Brown
-                };
-
-                commands.spawn((
-                    Sprite {
-                        color,
-                        custom_size: Some(Vec2::splat(size)),
-                        ..default()
-                    },
-                    Transform::from_xyz(world_x, world_y, 0.3),
-                    SettlementMarker { city_id: city.id },
-                ));
-            }
-
-            // Spawn road markers (simplified - just spawn dots along waypoints)
-            for road in &world_def.roads {
-                let color = match road.road_type {
-                    rb_world::RoadType::Imperial => Color::srgba(0.9, 0.7, 0.2, 0.8),
-                    rb_world::RoadType::Provincial => Color::srgba(0.7, 0.7, 0.7, 0.6),
-                    rb_world::RoadType::Trail => Color::srgba(0.5, 0.4, 0.3, 0.4),
-                };
-                let width = match road.road_type {
-                    rb_world::RoadType::Imperial => 3.0,
-                    rb_world::RoadType::Provincial => 2.0,
-                    rb_world::RoadType::Trail => 1.5,
-                };
-
-                // Draw dots along the road path
-                for waypoint in &road.waypoints {
-                    let world_x = waypoint.x as f32 - half_width;
-                    let world_y = half_height - waypoint.y as f32;
-
-                    commands.spawn((
-                        Sprite {
-                            color,
-                            custom_size: Some(Vec2::splat(width)),
-                            ..default()
-                        },
-                        Transform::from_xyz(world_x, world_y, 0.2),
-                        RoadMarker { road_id: road.id },
-                    ));
-                }
-            }
         }
 
         // Clean up and transition
@@ -473,6 +406,16 @@ fn generation_progress_ui(
 ) {
     let ctx = contexts.ctx_mut();
 
+    // Get the available area (excludes side panels)
+    let available_rect = ctx.available_rect();
+    let modal_size = egui::vec2(350.0, 280.0);
+
+    // Center the modal in the available area
+    let modal_pos = egui::pos2(
+        available_rect.min.x + (available_rect.width() - modal_size.x) / 2.0,
+        available_rect.min.y + (available_rect.height() - modal_size.y) / 2.0,
+    );
+
     egui::CentralPanel::default()
         .frame(egui::Frame::default().fill(egui::Color32::from_rgb(30, 30, 30)))
         .show(ctx, |_| {});
@@ -481,13 +424,13 @@ fn generation_progress_ui(
         .map(|p| p.load(Ordering::Relaxed))
         .unwrap_or(0);
 
-    // Position to the right of the left panel (approximately 200px) and centered vertically
+    // Position modal in center of available area (excluding side panels)
     egui::Window::new("Generating")
         .collapsible(false)
         .resizable(false)
         .title_bar(false)
-        .anchor(egui::Align2::LEFT_CENTER, [220.0, 0.0])
-        .fixed_size([350.0, 280.0])
+        .fixed_pos(modal_pos)
+        .fixed_size(modal_size)
         .show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.heading("Generating World...");
@@ -564,8 +507,6 @@ fn handle_layer_change(
     world_def: Res<WorldDefinition>,
     mut meso_cache: Option<ResMut<MesoTileCache>>,
     mut meso_sprites: Query<(&MesoTile, &mut Sprite), Without<WorldMapSprite>>,
-    mut settlement_query: Query<&mut Visibility, With<SettlementMarker>>,
-    mut road_query: Query<&mut Visibility, (With<RoadMarker>, Without<SettlementMarker>)>,
 ) {
     // Sync current layer to UI state so the dropdown shows the correct value
     ui_state.current_layer = Some(current_layer.0);
@@ -577,17 +518,6 @@ fn handle_layer_change(
 
     // Update current layer
     current_layer.0 = new_layer;
-
-    // Only show settlements/roads on the Biome (game) layer
-    let show_overlays = new_layer == NoiseLayer::Aggregate;
-    let overlay_visibility = if show_overlays { Visibility::Inherited } else { Visibility::Hidden };
-
-    for mut vis in settlement_query.iter_mut() {
-        *vis = overlay_visibility;
-    }
-    for mut vis in road_query.iter_mut() {
-        *vis = overlay_visibility;
-    }
 
     // Update macro map texture
     if let Some(ref mut tex) = textures {
@@ -641,6 +571,7 @@ fn regenerate_world(
     mut textures: ResMut<WorldMapTextures>,
     mut query: Query<&mut Sprite, With<WorldMapSprite>>,
     current_layer: Res<CurrentLayer>,
+    mut meso_cache: ResMut<MesoTileCache>,
 ) {
     if !regen_request.pending {
         return;
@@ -648,6 +579,10 @@ fn regenerate_world(
     regen_request.pending = false;
 
     println!("Regenerating world map with seed {}...", world_def.seed);
+
+    // Clear meso tile cache - old tiles are stale after seed/param changes
+    meso_cache.maps.clear();
+    meso_cache.textures.clear();
 
     // Generate new biome map with all layers
     let biome_map = Arc::new(BiomeMap::generate(world_def.seed, world_def.width, world_def.height));
