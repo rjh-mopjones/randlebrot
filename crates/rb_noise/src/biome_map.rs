@@ -104,7 +104,7 @@ impl BiomeMap {
                 let fy = y as f64;
 
                 let erosion = erosion_strategy.generate_with_continentalness(fx, fy, 0, cont);
-                let humidity = humidity_strategy.generate_with_continentalness(fx, fy, 0, cont);
+                let humidity = humidity_strategy.generate_tidally_locked(fx, fy, 0, cont, height as f64);
 
                 (erosion, humidity)
             })
@@ -382,7 +382,7 @@ impl BiomeMap {
                 let tect = tectonic_strategy.generate(wx, wy, detail_level);
                 let peaks = peaks_strategy.generate(wx, wy, detail_level);
                 let eros = erosion_strategy.generate_with_continentalness(wx, wy, detail_level, cont);
-                let humid = humidity_strategy.generate_with_continentalness(wx, wy, detail_level, cont);
+                let humid = humidity_strategy.generate_tidally_locked(wx, wy, detail_level, cont, world_height);
 
                 // Use splines for consistency with macro map and generate_meso_full
                 let biome = splines.evaluate(cont, temp, tect, eros, peaks, humid);
@@ -528,7 +528,7 @@ impl BiomeMap {
 
                     // Generate dependent layers
                     let eros = erosion_strategy.generate_with_continentalness(wx, wy, detail_level, cont);
-                    let humid = humidity_strategy.generate_with_continentalness(wx, wy, detail_level, cont);
+                    let humid = humidity_strategy.generate_tidally_locked(wx, wy, detail_level, cont, world_height);
 
                     // Compute biome using splines
                     let biome = splines.evaluate(cont, temp, tect, eros, peaks, humid);

@@ -1,17 +1,17 @@
 use noise::{NoiseFn, OpenSimplex};
 use rb_core::NoiseStrategy;
 
-/// Temperature strategy matching fungal-jungle's approach.
+/// Temperature strategy for a tidally locked planet.
 ///
-/// Temperature is calculated as:
-/// - Latitude component: (y / map_height) * 150 - 50 (range: -50 to +100)
-/// - Noise variation: 100 * noise.sample([x, y]) (adds variation)
-/// - Combined: latitude_temp + noise_variation
+/// The world has three distinct zones:
+/// - **North (dark side)**: Frozen wasteland, perpetually facing away from the star
+/// - **Middle (terminator)**: Habitable twilight band where civilization thrives
+/// - **South (sun side)**: Scorching desert, perpetually facing the star
 ///
-/// This creates cold at top (y=0), hot at bottom (y=max), with noise variation.
+/// Temperature uses a non-linear curve with reduced noise at extremes
+/// (frozen and scorched regions are more uniformly hostile).
 pub struct LatitudeTemperatureStrategy {
     noise: OpenSimplex,
-    scale: f64,
     octaves: u32,
     persistence: f64,
     lacunarity: f64,
@@ -22,7 +22,6 @@ impl LatitudeTemperatureStrategy {
     pub fn new(seed: u32, map_height: f64) -> Self {
         Self {
             noise: OpenSimplex::new(seed),
-            scale: 100.0,  // Scale for noise sampling
             octaves: 8,
             persistence: 0.59,
             lacunarity: 2.0,
@@ -44,7 +43,6 @@ impl LatitudeTemperatureStrategy {
         let total_octaves = self.octaves + detail_level;
 
         for _ in 0..total_octaves {
-            // Scale coordinates like fungal-jungle (0.01 scale factor)
             let nx = x * frequency * 0.01;
             let ny = y * frequency * 0.01;
             value += self.noise.get([nx, ny]) * amplitude;
@@ -59,19 +57,45 @@ impl LatitudeTemperatureStrategy {
 
 impl NoiseStrategy for LatitudeTemperatureStrategy {
     fn generate(&self, x: f64, y: f64, detail_level: u32) -> f64 {
-        // Latitude-based temperature: -50 at top, +100 at bottom
-        let latitude_temp = (y / self.map_height) * 150.0 - 50.0;
+        // Normalized position: 0 = top (dark side), 1 = bottom (sun side)
+        let t = (y / self.map_height).clamp(0.0, 1.0);
 
-        // Noise variation: ±100 degrees
+        // Non-linear temperature curve for tidally locked planet:
+        // - Top third (0-0.33): Frozen, -80°C to -20°C
+        // - Middle third (0.33-0.66): Habitable, -10°C to +60°C
+        // - Bottom third (0.66-1.0): Scorching, +80°C to +150°C
+        let base_temp = if t < 0.33 {
+            // Dark side: frozen
+            let local_t = t / 0.33; // 0 to 1 within this zone
+            -80.0 + local_t * 60.0  // -80 to -20
+        } else if t < 0.66 {
+            // Terminator: habitable band
+            let local_t = (t - 0.33) / 0.33;
+            -10.0 + local_t * 70.0  // -10 to +60
+        } else {
+            // Sun side: scorching
+            let local_t = (t - 0.66) / 0.34;
+            80.0 + local_t * 70.0   // +80 to +150
+        };
+
+        // Noise variation - reduced at extremes for more uniform hostile zones
         let noise_value = self.fbm(x, y, detail_level);
-        let noise_variation = 100.0 * noise_value;
+        let noise_scale = if t < 0.2 || t > 0.8 {
+            // Extreme zones: less variation (uniformly hostile)
+            20.0
+        } else if t < 0.33 || t > 0.66 {
+            // Transition zones: moderate variation
+            40.0
+        } else {
+            // Habitable zone: most variation (interesting terrain)
+            60.0
+        };
 
-        // Combined temperature
-        latitude_temp + noise_variation
+        base_temp + noise_value * noise_scale
     }
 
     fn name(&self) -> &'static str {
-        "LatitudeTemperature"
+        "TidallyLockedTemperature"
     }
 }
 
@@ -83,27 +107,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn top_is_cold() {
+    fn dark_side_is_frozen() {
         let strategy = LatitudeTemperatureStrategy::default_for_map(42);
+        // Top of map (dark side) - should be very cold
         let temp = strategy.generate(512.0, 0.0, 0);
-        // At y=0, latitude_temp = -50, plus noise
-        assert!(temp < 50.0, "Top temp {} should be cold", temp);
+        assert!(temp < -20.0, "Dark side temp {} should be frozen", temp);
     }
 
     #[test]
-    fn bottom_is_hot() {
+    fn sun_side_is_scorching() {
         let strategy = LatitudeTemperatureStrategy::default_for_map(42);
+        // Bottom of map (sun side) - should be very hot
         let temp = strategy.generate(512.0, 512.0, 0);
-        // At y=512, latitude_temp = +100, plus noise
-        assert!(temp > 0.0, "Bottom temp {} should be hot", temp);
+        assert!(temp > 100.0, "Sun side temp {} should be scorching", temp);
     }
 
     #[test]
-    fn middle_is_moderate() {
+    fn terminator_is_habitable() {
         let strategy = LatitudeTemperatureStrategy::default_for_map(42);
+        // Middle of map (terminator) - should be habitable range
         let temp = strategy.generate(512.0, 256.0, 0);
-        // At y=256, latitude_temp = +25, plus noise
-        // Should be in moderate range
-        assert!(temp > -50.0 && temp < 150.0, "Middle temp {} should be moderate", temp);
+        assert!(temp > -30.0 && temp < 80.0, "Terminator temp {} should be habitable", temp);
     }
 }

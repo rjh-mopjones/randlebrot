@@ -85,6 +85,63 @@ impl HumidityStrategy {
         combined.clamp(0.0, 1.0)
     }
 
+    /// Generate humidity for a tidally locked planet.
+    ///
+    /// Takes into account:
+    /// - Continentalness (distance from water)
+    /// - Latitude (y position) - sun side is extremely dry
+    ///
+    /// # Arguments
+    /// * `world_height` - Total height of the world map
+    pub fn generate_tidally_locked(
+        &self,
+        x: f64,
+        y: f64,
+        detail_level: u32,
+        continentalness: f64,
+        world_height: f64,
+    ) -> f64 {
+        let base_humidity = (self.fbm(x, y, detail_level) + 1.0) * 0.5;
+
+        // Latitude factor: 0 = top (dark/frozen), 1 = bottom (sun/scorched)
+        let latitude = (y / world_height).clamp(0.0, 1.0);
+
+        // Sun-side dryness multiplier
+        // - Dark side (0-0.33): normal humidity possible
+        // - Terminator (0.33-0.66): slightly reduced
+        // - Sun side (0.66-1.0): extremely dry
+        let latitude_multiplier = if latitude < 0.33 {
+            1.0  // Dark side can have normal humidity
+        } else if latitude < 0.66 {
+            // Terminator: gradual reduction
+            let t = (latitude - 0.33) / 0.33;
+            1.0 - t * 0.3  // 1.0 to 0.7
+        } else {
+            // Sun side: very dry
+            let t = (latitude - 0.66) / 0.34;
+            0.7 - t * 0.6  // 0.7 to 0.1
+        };
+
+        // Use continentalness as proxy for water distance
+        let water_factor = if continentalness < -0.025 {
+            // In water - high humidity (but reduced on sun side)
+            1.0
+        } else if continentalness < 0.05 {
+            // Coastal
+            0.85 - (continentalness + 0.025) * 4.0
+        } else if continentalness < 0.15 {
+            // Near coast
+            0.55 - (continentalness - 0.05) * 3.0
+        } else {
+            // Inland
+            0.25 - (continentalness - 0.15) * 0.8
+        };
+
+        // Combine factors
+        let combined = (base_humidity * 0.4 + water_factor.max(0.0) * 0.6) * latitude_multiplier;
+        combined.clamp(0.0, 1.0)
+    }
+
     /// Generate humidity based on continentalness (proxy for water distance).
     /// Useful when water distance isn't precomputed.
     pub fn generate_with_continentalness(
@@ -98,19 +155,23 @@ impl HumidityStrategy {
 
         // Use continentalness as proxy for water distance
         // Negative continentalness = water (high humidity)
-        // Positive continentalness = land (decreasing humidity with elevation)
+        // Positive continentalness = land (decreasing humidity inland)
         let water_factor = if continentalness < -0.025 {
             // In water - very high humidity
             1.0
-        } else if continentalness < 0.1 {
-            // Near coast - high humidity
-            0.9 - (continentalness + 0.025) * 2.0
+        } else if continentalness < 0.05 {
+            // Coastal - high humidity, gradual decrease
+            0.85 - (continentalness + 0.025) * 4.0
+        } else if continentalness < 0.15 {
+            // Near coast - moderate humidity
+            0.55 - (continentalness - 0.05) * 3.0
         } else {
-            // Inland - decreasing humidity
-            0.5 - (continentalness - 0.1) * 0.5
+            // Inland - can get quite dry
+            0.25 - (continentalness - 0.15) * 0.8
         };
 
-        let combined = base_humidity * 0.3 + water_factor.max(0.1) * 0.7;
+        // Allow humidity to go quite low inland (no floor)
+        let combined = base_humidity * 0.4 + water_factor.max(0.0) * 0.6;
         combined.clamp(0.0, 1.0)
     }
 }
