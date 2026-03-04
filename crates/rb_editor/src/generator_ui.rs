@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 use rb_core::AppMode;
-use rb_noise::NoiseLayer;
+use rb_noise::{NoiseBackend, NoiseLayer};
 use rb_persistence::{list_worlds, load_world, save_world, world_path};
 use rb_world::WorldDefinition;
 
@@ -32,6 +32,19 @@ pub struct GeneratorUiState {
     pub current_layer: Option<NoiseLayer>,
     /// Layer change requested by UI (read by main.rs to update textures).
     pub layer_changed: Option<NoiseLayer>,
+    /// Whether to use GPU for noise generation.
+    pub use_gpu: bool,
+}
+
+impl GeneratorUiState {
+    /// Get the noise backend based on current settings.
+    pub fn backend(&self) -> NoiseBackend {
+        if self.use_gpu {
+            NoiseBackend::Gpu
+        } else {
+            NoiseBackend::Cpu
+        }
+    }
 }
 
 /// Resource for signaling world regeneration is needed.
@@ -111,6 +124,24 @@ pub fn generator_ui_system(
             // Regenerate button
             if ui.button("Regenerate Map").clicked() {
                 regen_request.pending = true;
+            }
+            ui.add_space(8.0);
+
+            // GPU acceleration toggle
+            let gpu_available = NoiseBackend::gpu_available();
+            ui.horizontal(|ui| {
+                let checkbox = ui.checkbox(&mut ui_state.use_gpu, "GPU Acceleration");
+                if !gpu_available {
+                    ui_state.use_gpu = false;
+                    checkbox.on_hover_text("GPU not available, using CPU");
+                } else {
+                    checkbox.on_hover_text("Use GPU compute shaders for faster noise generation");
+                }
+            });
+            if gpu_available && ui_state.use_gpu {
+                ui.label(egui::RichText::new("GPU enabled").small().color(egui::Color32::GREEN));
+            } else if !gpu_available {
+                ui.label(egui::RichText::new("GPU unavailable").small().color(egui::Color32::GRAY));
             }
             ui.add_space(16.0);
 

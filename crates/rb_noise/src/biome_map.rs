@@ -21,6 +21,31 @@ use crate::visualization::{
 /// Values below this are ocean, values above are land.
 pub const SEA_LEVEL: f64 = -0.025;
 
+/// Backend selection for noise generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NoiseBackend {
+    /// CPU-based parallel noise generation using Rayon.
+    #[default]
+    Cpu,
+    /// GPU-accelerated noise generation using wgpu compute shaders.
+    /// Falls back to CPU if GPU is unavailable.
+    Gpu,
+}
+
+impl NoiseBackend {
+    /// Check if GPU is available for noise generation.
+    #[cfg(feature = "gpu")]
+    pub fn gpu_available() -> bool {
+        crate::gpu::GpuNoiseContext::is_available()
+    }
+
+    /// Check if GPU is available for noise generation.
+    #[cfg(not(feature = "gpu"))]
+    pub fn gpu_available() -> bool {
+        false
+    }
+}
+
 /// A complete biome map storing noise values and computed biomes.
 ///
 /// This struct holds all the data needed to render different visualization
@@ -56,6 +81,25 @@ pub struct BiomeMap {
 }
 
 impl BiomeMap {
+    /// Generate a biome map with all terrain layers using the specified backend.
+    ///
+    /// # Arguments
+    /// * `seed` - Random seed for noise generation
+    /// * `width` - Map width in pixels (e.g., 1024)
+    /// * `height` - Map height in pixels (e.g., 512)
+    /// * `backend` - CPU or GPU backend selection
+    pub fn generate_with_backend(
+        seed: u32,
+        width: usize,
+        height: usize,
+        backend: NoiseBackend,
+    ) -> Self {
+        match backend {
+            NoiseBackend::Cpu => Self::generate(seed, width, height),
+            NoiseBackend::Gpu => Self::generate_gpu(seed, width, height),
+        }
+    }
+
     /// Generate a biome map with all terrain layers using parallel processing.
     ///
     /// # Arguments
@@ -208,6 +252,131 @@ impl BiomeMap {
             rivers,
             resources,
         }
+    }
+
+    /// Generate a biome map using GPU-accelerated noise generation.
+    /// Falls back to CPU if GPU is unavailable.
+    #[cfg(feature = "gpu")]
+    fn generate_gpu(seed: u32, width: usize, height: usize) -> Self {
+        use crate::gpu::GpuNoiseContext;
+
+        // Try to get GPU context, fallback to CPU if unavailable
+        let Some(gpu) = GpuNoiseContext::global() else {
+            return Self::generate(seed, width, height);
+        };
+
+        let total_pixels = width * height;
+
+        // Generate all 6 base noise layers on GPU
+        let layers = gpu.generate_layers(
+            seed,
+            width,
+            height,
+            0.0, // world_x
+            0.0, // world_y
+            1.0, // scale (1:1 for macro)
+            height as f64,
+            0, // detail_level (macro)
+        );
+
+        // Convert f32 GPU results to f64
+        let continentalness: Vec<f64> = layers.continentalness.iter().map(|&v| v as f64).collect();
+        let temperature: Vec<f64> = layers.temperature.iter().map(|&v| v as f64).collect();
+        let tectonic: Vec<f64> = layers.tectonic.iter().map(|&v| v as f64).collect();
+        let peaks_valleys: Vec<f64> = layers.peaks_valleys.iter().map(|&v| v as f64).collect();
+        let erosion: Vec<f64> = layers.erosion.iter().map(|&v| v as f64).collect();
+        let humidity: Vec<f64> = layers.humidity.iter().map(|&v| v as f64).collect();
+
+        // Compute biomes using splines (same as CPU path)
+        let splines = BiomeSplines::new(SEA_LEVEL);
+        let mut biomes = Vec::with_capacity(total_pixels);
+
+        for idx in 0..total_pixels {
+            let biome = splines.evaluate(
+                continentalness[idx],
+                temperature[idx],
+                tectonic[idx],
+                erosion[idx],
+                peaks_valleys[idx],
+                humidity[idx],
+            );
+            biomes.push(biome);
+        }
+
+        // Generate rivers on CPU (D8 flow requires sequential processing)
+        let elevation: Vec<f64> = continentalness
+            .iter()
+            .zip(peaks_valleys.iter())
+            .zip(erosion.iter())
+            .zip(tectonic.iter())
+            .map(|(((&cont, &peaks), &eros), &tect)| {
+                let is_land = cont >= SEA_LEVEL;
+                let boundary = 1.0 - tect;
+
+                let tectonic_amp = 1.0 + boundary * boundary * 2.0;
+                let erosion_damp = 1.0 - eros * 0.7;
+
+                let peak_height = if is_land {
+                    peaks.max(0.0) * 0.15 * tectonic_amp * erosion_damp
+                } else {
+                    0.0
+                };
+                let valley_depth = if is_land { peaks.min(0.0).abs() * 0.08 } else { 0.0 };
+
+                let trench = if !is_land && boundary > 0.7 {
+                    (boundary - 0.7) * 0.5
+                } else {
+                    0.0
+                };
+
+                cont + peak_height - valley_depth - trench
+            })
+            .collect();
+
+        let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, width, height);
+        let rivers = river_gen.generate(&elevation, width, height);
+
+        // Override biomes where rivers flow
+        for idx in 0..total_pixels {
+            if rivers[idx] > 0.0
+                && continentalness[idx] >= SEA_LEVEL
+                && temperature[idx] > -10.0
+                && temperature[idx] < 70.0
+            {
+                biomes[idx] = TileType::River;
+            }
+        }
+
+        // Generate resources on CPU
+        let resources = Self::generate_resources(
+            seed,
+            width,
+            height,
+            &continentalness,
+            &tectonic,
+            &biomes,
+        );
+
+        Self {
+            width,
+            height,
+            biomes,
+            continentalness,
+            temperature,
+            tectonic,
+            erosion,
+            peaks_valleys,
+            humidity,
+            rivers,
+            resources,
+        }
+    }
+
+    /// GPU generation stub when gpu feature is disabled.
+    #[cfg(not(feature = "gpu"))]
+    fn generate_gpu(seed: u32, width: usize, height: usize) -> Self {
+        // GPU feature not enabled, fallback to CPU
+        Self::generate(seed, width, height)
     }
 
     /// Generate resources for all resource types.
@@ -684,6 +853,213 @@ impl BiomeMap {
             rivers,
             resources,
         }
+    }
+
+    /// Generate full meso BiomeMap using the specified backend.
+    ///
+    /// # Arguments
+    /// * `seed` - Random seed for noise generation
+    /// * `world_x`, `world_y` - Top-left corner in world coordinates
+    /// * `world_size` - Size of the region in world units
+    /// * `output_size` - Output resolution (e.g., 512 for 512x512)
+    /// * `world_height` - Total world height (for latitude-based temperature)
+    /// * `detail_level` - Noise detail level (0=macro, 1=meso, 2=micro)
+    /// * `progress` - Shared progress tracker for UI updates
+    /// * `backend` - CPU or GPU backend selection
+    pub fn generate_meso_full_with_backend(
+        seed: u32,
+        world_x: f64,
+        world_y: f64,
+        world_size: f64,
+        output_size: usize,
+        world_height: f64,
+        detail_level: u32,
+        progress: &Arc<LayerProgress>,
+        backend: NoiseBackend,
+    ) -> Self {
+        match backend {
+            NoiseBackend::Cpu => Self::generate_meso_full(
+                seed,
+                world_x,
+                world_y,
+                world_size,
+                output_size,
+                world_height,
+                detail_level,
+                progress,
+            ),
+            NoiseBackend::Gpu => Self::generate_meso_full_gpu(
+                seed,
+                world_x,
+                world_y,
+                world_size,
+                output_size,
+                world_height,
+                detail_level,
+                progress,
+            ),
+        }
+    }
+
+    /// GPU-accelerated meso generation with progress tracking.
+    #[cfg(feature = "gpu")]
+    fn generate_meso_full_gpu(
+        seed: u32,
+        world_x: f64,
+        world_y: f64,
+        world_size: f64,
+        output_size: usize,
+        world_height: f64,
+        detail_level: u32,
+        progress: &Arc<LayerProgress>,
+    ) -> Self {
+        use crate::gpu::GpuNoiseContext;
+
+        // Try to get GPU context, fallback to CPU if unavailable
+        let Some(gpu) = GpuNoiseContext::global() else {
+            return Self::generate_meso_full(
+                seed,
+                world_x,
+                world_y,
+                world_size,
+                output_size,
+                world_height,
+                detail_level,
+                progress,
+            );
+        };
+
+        let total_pixels = output_size * output_size;
+        let scale = world_size / output_size as f64;
+
+        // Generate all 6 base noise layers on GPU
+        let layers = gpu.generate_layers(
+            seed,
+            output_size,
+            output_size,
+            world_x,
+            world_y,
+            scale,
+            world_height,
+            detail_level,
+        );
+
+        // Mark all noise layers as complete (GPU does them all at once)
+        progress.increment(LayerId::Continentalness, total_pixels);
+        progress.increment(LayerId::Temperature, total_pixels);
+        progress.increment(LayerId::Tectonic, total_pixels);
+        progress.increment(LayerId::PeaksValleys, total_pixels);
+        progress.increment(LayerId::Erosion, total_pixels);
+        progress.increment(LayerId::Humidity, total_pixels);
+
+        // Convert f32 GPU results to f64
+        let continentalness: Vec<f64> = layers.continentalness.iter().map(|&v| v as f64).collect();
+        let temperature: Vec<f64> = layers.temperature.iter().map(|&v| v as f64).collect();
+        let tectonic: Vec<f64> = layers.tectonic.iter().map(|&v| v as f64).collect();
+        let peaks_valleys: Vec<f64> = layers.peaks_valleys.iter().map(|&v| v as f64).collect();
+        let erosion: Vec<f64> = layers.erosion.iter().map(|&v| v as f64).collect();
+        let humidity: Vec<f64> = layers.humidity.iter().map(|&v| v as f64).collect();
+
+        // Compute biomes using splines (same as CPU path)
+        let splines = BiomeSplines::new(SEA_LEVEL);
+        let mut biomes = Vec::with_capacity(total_pixels);
+
+        for idx in 0..total_pixels {
+            let biome = splines.evaluate(
+                continentalness[idx],
+                temperature[idx],
+                tectonic[idx],
+                erosion[idx],
+                peaks_valleys[idx],
+                humidity[idx],
+            );
+            biomes.push(biome);
+        }
+
+        // Generate rivers on CPU (D8 flow requires sequential processing)
+        let elevation: Vec<f64> = continentalness
+            .iter()
+            .zip(peaks_valleys.iter())
+            .zip(erosion.iter())
+            .zip(tectonic.iter())
+            .map(|(((&cont, &peaks), &eros), &tect)| {
+                let is_land = cont >= SEA_LEVEL;
+                let boundary = 1.0 - tect;
+
+                let tectonic_amp = 1.0 + boundary * boundary * 2.0;
+                let erosion_damp = 1.0 - eros * 0.7;
+
+                let peak_height = if is_land {
+                    peaks.max(0.0) * 0.15 * tectonic_amp * erosion_damp
+                } else {
+                    0.0
+                };
+                let valley_depth = if is_land { peaks.min(0.0).abs() * 0.08 } else { 0.0 };
+
+                let trench = if !is_land && boundary > 0.7 {
+                    (boundary - 0.7) * 0.5
+                } else {
+                    0.0
+                };
+
+                cont + peak_height - valley_depth - trench
+            })
+            .collect();
+
+        let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, output_size, output_size);
+        let rivers = river_gen.generate(&elevation, output_size, output_size);
+
+        // Override biomes where rivers flow
+        for idx in 0..total_pixels {
+            if rivers[idx] > 0.0
+                && continentalness[idx] >= SEA_LEVEL
+                && temperature[idx] > -10.0
+                && temperature[idx] < 70.0
+            {
+                biomes[idx] = TileType::River;
+            }
+        }
+
+        progress.increment(LayerId::Resources, total_pixels);
+
+        Self {
+            width: output_size,
+            height: output_size,
+            biomes,
+            continentalness,
+            temperature,
+            tectonic,
+            erosion,
+            peaks_valleys,
+            humidity,
+            rivers,
+            resources: ResourceMap::new(output_size, output_size),
+        }
+    }
+
+    /// GPU meso generation stub when gpu feature is disabled.
+    #[cfg(not(feature = "gpu"))]
+    fn generate_meso_full_gpu(
+        seed: u32,
+        world_x: f64,
+        world_y: f64,
+        world_size: f64,
+        output_size: usize,
+        world_height: f64,
+        detail_level: u32,
+        progress: &Arc<LayerProgress>,
+    ) -> Self {
+        // GPU feature not enabled, fallback to CPU
+        Self::generate_meso_full(
+            seed,
+            world_x,
+            world_y,
+            world_size,
+            output_size,
+            world_height,
+            detail_level,
+            progress,
+        )
     }
 }
 

@@ -7,7 +7,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use rayon::prelude::*;
 use rb_core::{AppMode, ModeTransitionEvent, handle_mode_shortcuts};
 use rb_editor::{CurrentLayer, GeneratorUiState, RegenerationRequest};
-use rb_noise::{BiomeMap, LayerId, LayerProgress};
+use rb_noise::{BiomeMap, LayerId, LayerProgress, NoiseBackend};
 use rb_world::{CivilizationConfig, CivilizationGenerator, CivilizationResult, WorldDefinition};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -247,16 +247,19 @@ fn start_generation(
     mut commands: Commands,
     mut task_res: ResMut<GenerationTask>,
     mut world_def: ResMut<WorldDefinition>,
+    ui_state: Res<GeneratorUiState>,
 ) {
     commands.remove_resource::<GenerationStarted>();
 
     let seed = world_def.seed;
     let width = world_def.width;
     let height = world_def.height;
+    let backend = ui_state.backend();
 
     // First generate macro map synchronously (fast)
-    println!("Generating macro map {}x{}...", width, height);
-    let biome_map = Arc::new(BiomeMap::generate(seed, width, height));
+    let backend_name = if backend == NoiseBackend::Gpu { "GPU" } else { "CPU" };
+    println!("Generating macro map {}x{} ({})...", width, height, backend_name);
+    let biome_map = Arc::new(BiomeMap::generate_with_backend(seed, width, height, backend));
     task_res.biome_map = Some(biome_map.clone());
     println!("  Resources: {} cells with deposits", biome_map.resources.cells_with_resources());
 
@@ -301,7 +304,7 @@ fn start_generation(
     let tile_progress_clone = tile_progress.clone();
 
     // Spawn async task for meso tiles with full 7-layer generation
-    println!("Generating {} meso tiles with 7-layer parallel generation...", TOTAL_CHUNKS);
+    println!("Generating {} meso tiles with 7-layer parallel generation ({})...", TOTAL_CHUNKS, backend_name);
     let task = AsyncComputeTaskPool::get().spawn(async move {
         (0..TOTAL_CHUNKS).into_par_iter().map(|chunk_idx| {
             let cx = (chunk_idx % CHUNKS_X) as i32;
@@ -311,7 +314,7 @@ fn start_generation(
             let world_y = cy as f64 * CHUNK_SIZE as f64;
 
             // Generate full BiomeMap with all 7 layers + derived
-            let meso_map = BiomeMap::generate_meso_full(
+            let meso_map = BiomeMap::generate_meso_full_with_backend(
                 seed,
                 world_x,
                 world_y,
@@ -320,6 +323,7 @@ fn start_generation(
                 height as f64,
                 1, // detail_level = meso
                 &layer_progress_clone,
+                backend,
             );
 
             tile_progress_clone.fetch_add(1, Ordering::Relaxed);
@@ -572,20 +576,23 @@ fn regenerate_world(
     mut query: Query<&mut Sprite, With<WorldMapSprite>>,
     current_layer: Res<CurrentLayer>,
     mut meso_cache: ResMut<MesoTileCache>,
+    ui_state: Res<GeneratorUiState>,
 ) {
     if !regen_request.pending {
         return;
     }
     regen_request.pending = false;
 
-    println!("Regenerating world map with seed {}...", world_def.seed);
+    let backend = ui_state.backend();
+    let backend_name = if backend == NoiseBackend::Gpu { "GPU" } else { "CPU" };
+    println!("Regenerating world map with seed {} ({})...", world_def.seed, backend_name);
 
     // Clear meso tile cache - old tiles are stale after seed/param changes
     meso_cache.maps.clear();
     meso_cache.textures.clear();
 
     // Generate new biome map with all layers
-    let biome_map = Arc::new(BiomeMap::generate(world_def.seed, world_def.width, world_def.height));
+    let biome_map = Arc::new(BiomeMap::generate_with_backend(world_def.seed, world_def.width, world_def.height, backend));
     println!("  Resources: {} cells with deposits", biome_map.resources.cells_with_resources());
 
     // Generate image for current layer

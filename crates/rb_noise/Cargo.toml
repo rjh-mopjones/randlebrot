@@ -3,12 +3,23 @@ name = "rb_noise"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster", "dep:rand", "dep:rand_xorshift"]
+
 [dependencies]
 rb_core.workspace = true
 noise.workspace = true
 bevy.workspace = true
 rayon = "1.10"
 smallvec = "1.13"
+
+# GPU compute (optional)
+wgpu = { version = "23", optional = true }
+bytemuck = { version = "1.14", features = ["derive"], optional = true }
+pollster = { version = "0.3", optional = true }
+rand = { version = "0.8", optional = true }
+rand_xorshift = { version = "0.3", optional = true }
 
 [dev-dependencies]
 bevy.workspace = true
