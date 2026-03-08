@@ -194,27 +194,16 @@ impl BiomeMap {
             .zip(tectonic.iter())
             .map(|(((&cont, &peaks), &eros), &tect)| {
                 let is_land = cont >= SEA_LEVEL;
-                let boundary = 1.0 - tect; // 1 at boundary, 0 at center
-
-                // Mountains amplified at plate boundaries
-                let tectonic_amp = 1.0 + boundary * boundary * 2.0;
                 let erosion_damp = 1.0 - eros * 0.7;
 
                 let peak_height = if is_land {
-                    peaks.max(0.0) * 0.15 * tectonic_amp * erosion_damp
+                    peaks.max(0.0) * 0.15 * erosion_damp
                 } else {
                     0.0
                 };
                 let valley_depth = if is_land { peaks.min(0.0).abs() * 0.08 } else { 0.0 };
 
-                // Ocean trenches at convergent boundaries
-                let trench = if !is_land && boundary > 0.7 {
-                    (boundary - 0.7) * 0.5
-                } else {
-                    0.0
-                };
-
-                cont + peak_height - valley_depth - trench
+                cont + peak_height - valley_depth
             })
             .collect();
 
@@ -326,25 +315,16 @@ impl BiomeMap {
             .zip(tectonic.iter())
             .map(|(((&cont, &peaks), &eros), &tect)| {
                 let is_land = cont >= SEA_LEVEL;
-                let boundary = 1.0 - tect;
-
-                let tectonic_amp = 1.0 + boundary * boundary * 2.0;
                 let erosion_damp = 1.0 - eros * 0.7;
 
                 let peak_height = if is_land {
-                    peaks.max(0.0) * 0.15 * tectonic_amp * erosion_damp
+                    peaks.max(0.0) * 0.15 * erosion_damp
                 } else {
                     0.0
                 };
                 let valley_depth = if is_land { peaks.min(0.0).abs() * 0.08 } else { 0.0 };
 
-                let trench = if !is_land && boundary > 0.7 {
-                    (boundary - 0.7) * 0.5
-                } else {
-                    0.0
-                };
-
-                cont + peak_height - valley_depth - trench
+                cont + peak_height - valley_depth
             })
             .collect();
 
@@ -660,25 +640,16 @@ impl BiomeMap {
             .zip(tectonic.iter())
             .map(|(((&cont, &peaks), &eros), &tect)| {
                 let is_land = cont >= SEA_LEVEL;
-                let boundary = 1.0 - tect;
-
-                let tectonic_amp = 1.0 + boundary * boundary * 2.0;
                 let erosion_damp = 1.0 - eros * 0.7;
 
                 let peak_height = if is_land {
-                    peaks.max(0.0) * 0.15 * tectonic_amp * erosion_damp
+                    peaks.max(0.0) * 0.15 * erosion_damp
                 } else {
                     0.0
                 };
                 let valley_depth = if is_land { peaks.min(0.0).abs() * 0.08 } else { 0.0 };
 
-                let trench = if !is_land && boundary > 0.7 {
-                    (boundary - 0.7) * 0.5
-                } else {
-                    0.0
-                };
-
-                cont + peak_height - valley_depth - trench
+                cont + peak_height - valley_depth
             })
             .collect();
 
@@ -861,25 +832,16 @@ impl BiomeMap {
             .zip(tectonic.iter())
             .map(|(((&cont, &peaks), &eros), &tect)| {
                 let is_land = cont >= SEA_LEVEL;
-                let boundary = 1.0 - tect;
-
-                let tectonic_amp = 1.0 + boundary * boundary * 2.0;
                 let erosion_damp = 1.0 - eros * 0.7;
 
                 let peak_height = if is_land {
-                    peaks.max(0.0) * 0.15 * tectonic_amp * erosion_damp
+                    peaks.max(0.0) * 0.15 * erosion_damp
                 } else {
                     0.0
                 };
                 let valley_depth = if is_land { peaks.min(0.0).abs() * 0.08 } else { 0.0 };
 
-                let trench = if !is_land && boundary > 0.7 {
-                    (boundary - 0.7) * 0.5
-                } else {
-                    0.0
-                };
-
-                cont + peak_height - valley_depth - trench
+                cont + peak_height - valley_depth
             })
             .collect();
 
@@ -1057,25 +1019,16 @@ impl BiomeMap {
             .zip(tectonic.iter())
             .map(|(((&cont, &peaks), &eros), &tect)| {
                 let is_land = cont >= SEA_LEVEL;
-                let boundary = 1.0 - tect;
-
-                let tectonic_amp = 1.0 + boundary * boundary * 2.0;
                 let erosion_damp = 1.0 - eros * 0.7;
 
                 let peak_height = if is_land {
-                    peaks.max(0.0) * 0.15 * tectonic_amp * erosion_damp
+                    peaks.max(0.0) * 0.15 * erosion_damp
                 } else {
                     0.0
                 };
                 let valley_depth = if is_land { peaks.min(0.0).abs() * 0.08 } else { 0.0 };
 
-                let trench = if !is_land && boundary > 0.7 {
-                    (boundary - 0.7) * 0.5
-                } else {
-                    0.0
-                };
-
-                cont + peak_height - valley_depth - trench
+                cont + peak_height - valley_depth
             })
             .collect();
 

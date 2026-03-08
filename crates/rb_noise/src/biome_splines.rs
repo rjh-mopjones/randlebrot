@@ -160,12 +160,6 @@ impl BiomeSplines {
         let terrain = TerrainClass::from_erosion(erosion);
 
         // Step 6: Check for special cases (volcanic, beach)
-        // Volcanic only at very close plate boundaries with high heat
-        let boundary_proximity = 1.0 - tectonic;
-        if boundary_proximity > 0.9 && adjusted_temp > 50.0 && above_sea > 0.08 {
-            return TileType::Volcanic;
-        }
-
         // Coastal beach check
         if above_sea < 0.02 {
             return match climate {
@@ -189,17 +183,14 @@ impl BiomeSplines {
         tectonic: f64,
     ) -> f64 {
         let is_land = cont >= self.sea_level;
-        let boundary_proximity = 1.0 - tectonic; // 1 at boundary, 0 at plate center
-
-        // Mountains form along plate boundaries
-        let tectonic_amp = 1.0 + boundary_proximity * boundary_proximity * 2.0;
+        let _boundary_proximity = 1.0 - tectonic; // reserved for future use
 
         // Erosion dampens peaks (high erosion = worn mountains)
         let erosion_damp = 1.0 - erosion * 0.7;
 
         // Peak contribution only on land
         let peak_height = if is_land {
-            pv.max(0.0) * 0.15 * tectonic_amp * erosion_damp
+            pv.max(0.0) * 0.15 * erosion_damp
         } else {
             0.0
         };
@@ -211,12 +202,7 @@ impl BiomeSplines {
             0.0
         };
 
-        // Ocean trenches at convergent plate boundaries
-        let trench = if !is_land && boundary_proximity > 0.7 {
-            (boundary_proximity - 0.7) * 0.5
-        } else {
-            0.0
-        };
+        let trench = 0.0;
 
         cont + peak_height - valley_depth - trench
     }
@@ -231,12 +217,6 @@ impl BiomeSplines {
             return TileType::Sahara; // Evaporated - salt flats
         }
 
-        // Ocean trenches only in temperate water at plate boundaries
-        let boundary_proximity = 1.0 - tectonic;
-        if boundary_proximity > 0.75 && elevation < self.sea_level - 0.2 {
-            return TileType::OceanTrench;
-        }
-
         TileType::Sea
     }
 
@@ -246,11 +226,7 @@ impl BiomeSplines {
         let elevation_above_sea = (elevation - self.sea_level).max(0.0);
         let lapse_rate = elevation_above_sea * 60.0; // ~60°C per 1.0 elevation unit
 
-        // Volcanic heat near plate boundaries
-        let boundary_proximity = 1.0 - tectonic;
-        let volcanic_heat = boundary_proximity * boundary_proximity * 8.0;
-
-        temp - lapse_rate + volcanic_heat
+        temp - lapse_rate
     }
 
     /// Adjust humidity with rain shadow effect at high elevations.
@@ -358,12 +334,10 @@ mod tests {
     }
 
     #[test]
-    fn ocean_trench_at_boundary() {
+    fn deep_ocean_is_sea() {
         let s = splines();
-        // Deep ocean at plate boundary (tectonic = 0) in temperate water
-        // Note: Needs to be deep enough (elevation < sea_level - 0.2)
         let biome = s.evaluate(-0.6, 20.0, 0.0, 0.5, 0.0, 0.5);
-        assert_eq!(biome, TileType::OceanTrench);
+        assert_eq!(biome, TileType::Sea);
     }
 
     #[test]
@@ -446,34 +420,11 @@ mod tests {
     }
 
     #[test]
-    fn volcanic_near_boundary() {
+    fn mountains_at_high_peaks() {
         let s = splines();
-        // Very close to plate boundary (tectonic < 0.1) with hot temperature
-        // Need higher elevation (above_sea > 0.08) and temp > 50 after adjustment
-        let biome = s.evaluate(0.15, 60.0, 0.05, 0.5, 0.0, 0.5);
-        assert_eq!(biome, TileType::Volcanic);
-    }
-
-    #[test]
-    fn mountains_at_plate_boundaries() {
-        let s = splines();
-        // High peaks at plate boundary should create mountains
-        // Use 50°C base temp because high elevation causes ~30°C cooling from lapse rate
-        let biome = s.evaluate(0.2, 50.0, 0.1, 0.2, 0.8, 0.5);
+        // High peaks with moderate erosion should create mountains
+        let biome = s.evaluate(0.2, 50.0, 0.5, 0.2, 0.8, 0.5);
         assert_eq!(biome, TileType::Mountain);
-    }
-
-    #[test]
-    fn volcanic_heat_affects_temperature() {
-        let s = splines();
-        let adjusted_temp_boundary = s.adjust_temperature(10.0, 0.0, 0.0);
-        let adjusted_temp_center = s.adjust_temperature(10.0, 0.0, 1.0);
-        assert!(
-            adjusted_temp_boundary > adjusted_temp_center,
-            "Boundary {} should be warmer than center {}",
-            adjusted_temp_boundary,
-            adjusted_temp_center
-        );
     }
 
     #[test]
