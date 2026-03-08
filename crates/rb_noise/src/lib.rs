@@ -24,8 +24,9 @@ pub use resource::WorldChunks;
 pub use resource_map::ResourceMap;
 pub use rivers::RiverGenerator;
 pub use strategy::{
-    ContinentalnessStrategy, ErosionStrategy, HumidityStrategy, PeaksAndValleysStrategy,
-    ResourceContext, ResourceNoiseStrategy, TectonicPlatesStrategy, TemperatureStrategy,
+    ContinentalnessStrategy, ErosionStrategy, HumidityStrategy, LightLevelStrategy,
+    PeaksAndValleysStrategy, ResourceContext, ResourceNoiseStrategy, RockHardnessStrategy,
+    TectonicPlatesStrategy, TemperatureStrategy,
 };
 pub use tidally_locked::{LatitudeTemperatureStrategy, TidallyLockedTemperatureStrategy};
 pub use visualization::NoiseLayer;

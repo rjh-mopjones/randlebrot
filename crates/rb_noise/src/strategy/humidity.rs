@@ -147,6 +147,51 @@ impl HumidityStrategy {
         combined.clamp(0.0, 1.0)
     }
 
+    /// Generate humidity for a tidally locked planet using light level.
+    ///
+    /// Replaces latitude-based drying with light-level-based drying:
+    /// - High light (> 0.7): extremely dry (sun side)
+    /// - Medium light (0.3-0.7): gradual reduction
+    /// - Low light (< 0.3): normal humidity (dark side, cold trap)
+    pub fn generate_with_light_level(
+        &self,
+        x: f64,
+        y: f64,
+        detail_level: u32,
+        continentalness: f64,
+        light_level: f64,
+        _world_height: f64,
+    ) -> f64 {
+        let base_humidity = (self.fbm(x, y, detail_level) + 1.0) * 0.5;
+
+        // Light-level-based dryness multiplier
+        let light_multiplier = if light_level < 0.3 {
+            1.0 // Dark side: normal humidity
+        } else if light_level < 0.7 {
+            // Transition zone: gradual reduction
+            let t = (light_level - 0.3) / 0.4;
+            1.0 - t * 0.3 // 1.0 to 0.7
+        } else {
+            // Sun side: very dry
+            let t = (light_level - 0.7) / 0.3;
+            0.7 - t * 0.6 // 0.7 to 0.1
+        };
+
+        // Use continentalness as proxy for water distance
+        let water_factor = if continentalness < -0.025 {
+            1.0
+        } else if continentalness < 0.05 {
+            0.85 - (continentalness + 0.025) * 4.0
+        } else if continentalness < 0.15 {
+            0.55 - (continentalness - 0.05) * 3.0
+        } else {
+            0.25 - (continentalness - 0.15) * 0.8
+        };
+
+        let combined = (base_humidity * 0.4 + water_factor.max(0.0) * 0.6) * light_multiplier;
+        combined.clamp(0.0, 1.0)
+    }
+
     /// Generate humidity based on continentalness (proxy for water distance).
     /// Useful when water distance isn't precomputed.
     pub fn generate_with_continentalness(

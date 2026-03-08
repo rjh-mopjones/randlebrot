@@ -26,6 +26,9 @@ pub struct WorldDefinition {
     pub terminator_x: f64,
     /// Width of the habitable twilight zone.
     pub twilight_width: f64,
+    /// Sub-stellar point position (normalized 0-1). Default: (0.5, 1.0) = bottom center.
+    #[serde(default = "default_sub_stellar")]
+    pub sub_stellar: (f64, f64),
     /// Noise parameters for world generation.
     pub noise_params: NoiseParams,
     /// Authored regions (countries, territories).
@@ -57,6 +60,7 @@ impl Default for WorldDefinition {
             sea_level: -0.025,
             terminator_x: 512.0,
             twilight_width: 200.0,
+            sub_stellar: default_sub_stellar(),
             noise_params: NoiseParams::default(),
             regions: Vec::new(),
             cities: Vec::new(),
@@ -70,6 +74,10 @@ impl Default for WorldDefinition {
     }
 }
 
+fn default_sub_stellar() -> (f64, f64) {
+    (0.5, 1.0)
+}
+
 /// Noise generation parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NoiseParams {
@@ -79,11 +87,24 @@ pub struct NoiseParams {
     pub continentalness_persistence: f64,
     /// Lacunarity for continentalness noise.
     pub continentalness_lacunarity: f64,
-    /// Number of octaves for temperature noise.
+    /// Number of octaves for temperature noise (legacy, kept for save compat).
+    #[serde(default = "default_temp_octaves")]
     pub temperature_octaves: u32,
-    /// Persistence for temperature noise.
+    /// Persistence for temperature noise (legacy, kept for save compat).
+    #[serde(default = "default_temp_persistence")]
     pub temperature_persistence: f64,
+    /// Number of octaves for rock hardness noise.
+    #[serde(default = "default_rock_hardness_octaves")]
+    pub rock_hardness_octaves: u32,
+    /// Persistence for rock hardness noise.
+    #[serde(default = "default_rock_hardness_persistence")]
+    pub rock_hardness_persistence: f64,
 }
+
+fn default_temp_octaves() -> u32 { 8 }
+fn default_temp_persistence() -> f64 { 0.59 }
+fn default_rock_hardness_octaves() -> u32 { 3 }
+fn default_rock_hardness_persistence() -> f64 { 0.6 }
 
 impl Default for NoiseParams {
     fn default() -> Self {
@@ -93,6 +114,8 @@ impl Default for NoiseParams {
             continentalness_lacunarity: 2.0,
             temperature_octaves: 8,
             temperature_persistence: 0.59,
+            rock_hardness_octaves: 3,
+            rock_hardness_persistence: 0.6,
         }
     }
 }

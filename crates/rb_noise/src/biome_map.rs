@@ -7,14 +7,15 @@ use crate::progress::{LayerId, LayerProgress};
 use crate::resource_map::ResourceMap;
 use crate::rivers::RiverGenerator;
 use crate::strategy::resource::ResourceContext;
+use crate::derived;
 use crate::strategy::{
-    ContinentalnessStrategy, ErosionStrategy, HumidityStrategy, PeaksAndValleysStrategy,
-    ResourceNoiseStrategy, TectonicPlatesStrategy,
+    ContinentalnessStrategy, ErosionStrategy, HumidityStrategy, LightLevelStrategy,
+    PeaksAndValleysStrategy, ResourceNoiseStrategy, RockHardnessStrategy,
+    TectonicPlatesStrategy,
 };
-use crate::tidally_locked::LatitudeTemperatureStrategy;
 use crate::visualization::{
-    grayscale_to_rgba, humidity_to_rgba, peaks_to_rgba, resource_to_rgba,
-    river_to_rgba, tectonic_to_rgba, temperature_to_rgba, NoiseLayer,
+    grayscale_to_rgba, humidity_to_rgba, light_level_to_rgba, peaks_to_rgba,
+    river_to_rgba, rock_hardness_to_rgba, tectonic_to_rgba, temperature_to_rgba, NoiseLayer,
 };
 
 /// Sea level threshold for continentalness.
@@ -73,6 +74,10 @@ pub struct BiomeMap {
     pub peaks_valleys: Vec<f64>,
     /// Humidity level (0-1)
     pub humidity: Vec<f64>,
+    /// Light level from sub-stellar point (0-1)
+    pub light_level: Vec<f64>,
+    /// Rock hardness (0-1)
+    pub rock_hardness: Vec<f64>,
 
     // Derived maps
     /// River flow accumulation (0-1, higher = larger river)
@@ -109,13 +114,31 @@ impl BiomeMap {
     /// * `width` - Map width in pixels (e.g., 1024)
     /// * `height` - Map height in pixels (e.g., 512)
     pub fn generate(seed: u32, width: usize, height: usize) -> Self {
+        Self::generate_with_sub_stellar(seed, width, height, 0.5, 1.0)
+    }
+
+    /// Generate a biome map with a custom sub-stellar point.
+    pub fn generate_with_sub_stellar(
+        seed: u32,
+        width: usize,
+        height: usize,
+        sub_stellar_x: f64,
+        sub_stellar_y: f64,
+    ) -> Self {
         // Create all strategies
         let cont_strategy = ContinentalnessStrategy::new(seed);
-        let temp_strategy = LatitudeTemperatureStrategy::new(seed.wrapping_add(1), height as f64);
         let tectonic_strategy = TectonicPlatesStrategy::new(seed.wrapping_add(2));
-        let erosion_strategy = ErosionStrategy::new(seed.wrapping_add(3));
-        let peaks_strategy = PeaksAndValleysStrategy::new(seed.wrapping_add(4));
+        let raw_erosion_strategy = ErosionStrategy::new(seed.wrapping_add(3));
+        let raw_peaks_strategy = PeaksAndValleysStrategy::new(seed.wrapping_add(4));
         let humidity_strategy = HumidityStrategy::new(seed.wrapping_add(5));
+        let light_level_strategy = LightLevelStrategy::new(
+            seed.wrapping_add(6),
+            sub_stellar_x,
+            sub_stellar_y,
+            width as f64,
+            height as f64,
+        );
+        let rock_hardness_strategy = RockHardnessStrategy::new(seed.wrapping_add(7));
 
         let total_pixels = width * height;
 
@@ -132,27 +155,38 @@ impl BiomeMap {
                 let fy = y as f64;
 
                 let cont = cont_strategy.generate(fx, fy, 0);
-                let temp = temp_strategy.generate(fx, fy, 0);
                 let (plate_id, tectonic) = tectonic_strategy.generate_voronoi(fx, fy);
-                let peaks = peaks_strategy.generate(fx, fy, 0);
+                let raw_peaks = raw_peaks_strategy.generate(fx, fy, 0);
+                let light = light_level_strategy.generate(fx, fy, 0);
+                let rock = rock_hardness_strategy.generate(fx, fy, 0);
 
-                (cont, temp, tectonic, plate_id, peaks)
+                (cont, tectonic, plate_id, raw_peaks, light, rock)
             })
             .collect();
 
-        // Phase 2: Generate dependent layers (need continentalness)
+        // Phase 2: Generate dependent layers + derive temperature
         let dependent_data: Vec<_> = indices
             .par_iter()
             .enumerate()
             .map(|(idx, &(x, y))| {
-                let (cont, _, _, _, _) = base_data[idx];
+                let (cont, tect, _, raw_peaks, light, rock) = base_data[idx];
                 let fx = x as f64;
                 let fy = y as f64;
 
-                let erosion = erosion_strategy.generate_with_continentalness(fx, fy, 0, cont);
-                let humidity = humidity_strategy.generate_tidally_locked(fx, fy, 0, cont, height as f64);
+                let raw_erosion = raw_erosion_strategy.generate_with_continentalness(fx, fy, 0, cont);
 
-                (erosion, humidity)
+                // Derive peaks/valleys and erosion from rock hardness
+                let peaks = derived::derive_peaks_valleys(raw_peaks, tect, rock);
+                let erosion = derived::derive_erosion(raw_erosion, rock);
+
+                // Humidity using light level for tidal lock drying
+                let humidity = humidity_strategy.generate_with_light_level(fx, fy, 0, cont, light, height as f64);
+
+                // Derive temperature from light level + elevation
+                let heightmap = derived::derive_heightmap(cont, tect, peaks);
+                let temp = derived::derive_temperature(light, heightmap, humidity);
+
+                (peaks, erosion, humidity, temp)
             })
             .collect();
 
@@ -165,23 +199,28 @@ impl BiomeMap {
         let mut peaks_valleys = Vec::with_capacity(total_pixels);
         let mut erosion = Vec::with_capacity(total_pixels);
         let mut humidity = Vec::with_capacity(total_pixels);
+        let mut light_level = Vec::with_capacity(total_pixels);
+        let mut rock_hardness = Vec::with_capacity(total_pixels);
 
         // Use spline-based biome evaluation for consistency with meso tiles
         let splines = BiomeSplines::new(SEA_LEVEL);
 
-        for (_idx, ((cont, temp, tect, pid, peaks), (eros, humid))) in
-            base_data.iter().zip(dependent_data.iter()).enumerate()
-        {
-            continentalness.push(*cont);
-            temperature.push(*temp);
-            tectonic.push(*tect);
-            tectonic_plate_ids.push(*pid);
-            peaks_valleys.push(*peaks);
-            erosion.push(*eros);
-            humidity.push(*humid);
+        for (base, dep) in base_data.iter().zip(dependent_data.iter()) {
+            let (cont, tect, pid, _raw_peaks, light, rock) = *base;
+            let (peaks, eros, humid, temp) = *dep;
+
+            continentalness.push(cont);
+            temperature.push(temp);
+            tectonic.push(tect);
+            tectonic_plate_ids.push(pid);
+            peaks_valleys.push(peaks);
+            erosion.push(eros);
+            humidity.push(humid);
+            light_level.push(light);
+            rock_hardness.push(rock);
 
             // Determine biome using splines (same as meso tiles)
-            let biome = splines.evaluate(*cont, *temp, *tect, *eros, *peaks, *humid);
+            let biome = splines.evaluate(cont, temp, tect, eros, peaks, humid);
             biomes.push(biome);
         }
 
@@ -242,6 +281,8 @@ impl BiomeMap {
             erosion,
             peaks_valleys,
             humidity,
+            light_level,
+            rock_hardness,
             rivers,
             resources,
         }
@@ -249,6 +290,8 @@ impl BiomeMap {
 
     /// Generate a biome map using GPU-accelerated noise generation.
     /// Falls back to CPU if GPU is unavailable.
+    ///
+    /// GPU generates base layers, then CPU derives temperature, erosion, peaks from them.
     #[cfg(feature = "gpu")]
     fn generate_gpu(seed: u32, width: usize, height: usize) -> Self {
         use crate::gpu::GpuNoiseContext;
@@ -260,7 +303,7 @@ impl BiomeMap {
 
         let total_pixels = width * height;
 
-        // Generate all 6 base noise layers on GPU
+        // Generate base noise layers on GPU
         let layers = gpu.generate_layers(
             seed,
             width,
@@ -272,13 +315,13 @@ impl BiomeMap {
             0, // detail_level (macro)
         );
 
-        // Convert f32 GPU results to f64
+        // Convert f32 GPU results to f64 (base layers from GPU)
         let continentalness: Vec<f64> = layers.continentalness.iter().map(|&v| v as f64).collect();
-        let temperature: Vec<f64> = layers.temperature.iter().map(|&v| v as f64).collect();
-        let tectonic: Vec<f64> = layers.tectonic.iter().map(|&v| v as f64).collect();
-        let peaks_valleys: Vec<f64> = layers.peaks_valleys.iter().map(|&v| v as f64).collect();
-        let erosion: Vec<f64> = layers.erosion.iter().map(|&v| v as f64).collect();
-        let humidity: Vec<f64> = layers.humidity.iter().map(|&v| v as f64).collect();
+        let gpu_tectonic: Vec<f64> = layers.tectonic.iter().map(|&v| v as f64).collect();
+        let raw_peaks: Vec<f64> = layers.peaks_valleys.iter().map(|&v| v as f64).collect();
+        let raw_erosion: Vec<f64> = layers.erosion.iter().map(|&v| v as f64).collect();
+        let gpu_light_level: Vec<f64> = layers.light_level.iter().map(|&v| v as f64).collect();
+        let gpu_rock_hardness: Vec<f64> = layers.rock_hardness.iter().map(|&v| v as f64).collect();
 
         // GPU doesn't compute plate IDs — generate them on CPU
         let tectonic_strategy = TectonicPlatesStrategy::new(seed.wrapping_add(2));
@@ -290,19 +333,38 @@ impl BiomeMap {
             })
             .collect();
 
-        // Compute biomes using splines (same as CPU path)
+        // Derive peaks, erosion, humidity, temperature on CPU from GPU base layers
+        let humidity_strategy = HumidityStrategy::new(seed.wrapping_add(5));
         let splines = BiomeSplines::new(SEA_LEVEL);
         let mut biomes = Vec::with_capacity(total_pixels);
+        let mut temperature = Vec::with_capacity(total_pixels);
+        let mut peaks_valleys = Vec::with_capacity(total_pixels);
+        let mut erosion = Vec::with_capacity(total_pixels);
+        let mut humidity = Vec::with_capacity(total_pixels);
 
         for idx in 0..total_pixels {
-            let biome = splines.evaluate(
-                continentalness[idx],
-                temperature[idx],
-                tectonic[idx],
-                erosion[idx],
-                peaks_valleys[idx],
-                humidity[idx],
-            );
+            let cont = continentalness[idx];
+            let tect = gpu_tectonic[idx];
+            let light = gpu_light_level[idx];
+            let rock = gpu_rock_hardness[idx];
+
+            let peaks = derived::derive_peaks_valleys(raw_peaks[idx], tect, rock);
+            let eros = derived::derive_erosion(raw_erosion[idx], rock);
+
+            // Derive humidity with light level
+            let x = (idx % width) as f64;
+            let y = (idx / width) as f64;
+            let humid = humidity_strategy.generate_with_light_level(x, y, 0, cont, light, height as f64);
+
+            let heightmap = derived::derive_heightmap(cont, tect, peaks);
+            let temp = derived::derive_temperature(light, heightmap, humid);
+
+            peaks_valleys.push(peaks);
+            erosion.push(eros);
+            humidity.push(humid);
+            temperature.push(temp);
+
+            let biome = splines.evaluate(cont, temp, tect, eros, peaks, humid);
             biomes.push(biome);
         }
 
@@ -346,7 +408,7 @@ impl BiomeMap {
             width,
             height,
             &continentalness,
-            &tectonic,
+            &gpu_tectonic,
             &biomes,
         );
 
@@ -356,11 +418,13 @@ impl BiomeMap {
             biomes,
             continentalness,
             temperature,
-            tectonic,
+            tectonic: gpu_tectonic,
             tectonic_plate_ids,
             erosion,
             peaks_valleys,
             humidity,
+            light_level: gpu_light_level,
+            rock_hardness: gpu_rock_hardness,
             rivers,
             resources,
         }
@@ -431,13 +495,9 @@ impl BiomeMap {
                     NoiseLayer::Erosion => grayscale_to_rgba(self.erosion[idx], 0.0, 1.0),
                     NoiseLayer::PeaksValleys => peaks_to_rgba(self.peaks_valleys[idx]),
                     NoiseLayer::Humidity => humidity_to_rgba(self.humidity[idx]),
+                    NoiseLayer::LightLevel => light_level_to_rgba(self.light_level[idx]),
+                    NoiseLayer::RockHardness => rock_hardness_to_rgba(self.rock_hardness[idx]),
                     NoiseLayer::Rivers => river_to_rgba(self.rivers[idx]),
-                    _ if layer.is_resource() => {
-                        let resource = layer.to_resource_type().unwrap();
-                        let abundance = self.resources.get(x, y, resource) as f64;
-                        resource_to_rgba(abundance, resource)
-                    }
-                    _ => [128, 128, 128, 255],
                 };
                 data.extend_from_slice(&color);
             }
@@ -462,28 +522,26 @@ impl BiomeMap {
     }
 
     /// Save all noise layers as PNG files to `debug_layers/` directory.
-    /// Creates the directory if it doesn't exist.
+    ///
+    /// Layout:
+    /// - `debug_layers/aggregate.png` (root)
+    /// - `debug_layers/base/continentalness.png`, `tectonic.png`, `light_level.png`, `rock_hardness.png`
+    /// - `debug_layers/derived/temperature.png`, `erosion.png`, `peaks_valleys.png`, `humidity.png`, `rivers.png`
     pub fn save_debug_layers(&self, base_path: &std::path::Path) {
         use image::{ImageBuffer, Rgba};
 
-        if let Err(e) = std::fs::create_dir_all(base_path) {
-            eprintln!("Failed to create debug_layers dir: {e}");
-            return;
+        let base_dir = base_path.join("base");
+        let derived_dir = base_path.join("derived");
+
+        for dir in [base_path, &base_dir, &derived_dir] {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                eprintln!("Failed to create dir {}: {e}", dir.display());
+                return;
+            }
         }
 
-        let layers = [
-            (NoiseLayer::Aggregate, "aggregate"),
-            (NoiseLayer::Continentalness, "continentalness"),
-            (NoiseLayer::Temperature, "temperature"),
-            (NoiseLayer::Tectonic, "tectonic"),
-            (NoiseLayer::Erosion, "erosion"),
-            (NoiseLayer::PeaksValleys, "peaks_valleys"),
-            (NoiseLayer::Humidity, "humidity"),
-            (NoiseLayer::Rivers, "rivers"),
-        ];
-
-        for (layer, name) in &layers {
-            let rgba_data = self.to_layer_image(*layer);
+        let save = |layer: NoiseLayer, path: &std::path::Path| {
+            let rgba_data = self.to_layer_image(layer);
             let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(
                 self.width as u32,
                 self.height as u32,
@@ -491,12 +549,37 @@ impl BiomeMap {
             )
             .expect("image buffer size mismatch");
 
-            let path = base_path.join(format!("{name}.png"));
-            if let Err(e) = img.save(&path) {
+            if let Err(e) = img.save(path) {
                 eprintln!("Failed to save {}: {e}", path.display());
             } else {
                 println!("  Saved debug layer: {}", path.display());
             }
+        };
+
+        // Aggregate at root
+        save(NoiseLayer::Aggregate, &base_path.join("aggregate.png"));
+
+        // Base layers
+        let base_layers = [
+            (NoiseLayer::Continentalness, "continentalness"),
+            (NoiseLayer::Tectonic, "tectonic"),
+            (NoiseLayer::LightLevel, "light_level"),
+            (NoiseLayer::RockHardness, "rock_hardness"),
+        ];
+        for (layer, name) in &base_layers {
+            save(*layer, &base_dir.join(format!("{name}.png")));
+        }
+
+        // Derived layers
+        let derived_layers = [
+            (NoiseLayer::Temperature, "temperature"),
+            (NoiseLayer::Erosion, "erosion"),
+            (NoiseLayer::PeaksValleys, "peaks_valleys"),
+            (NoiseLayer::Humidity, "humidity"),
+            (NoiseLayer::Rivers, "rivers"),
+        ];
+        for (layer, name) in &derived_layers {
+            save(*layer, &derived_dir.join(format!("{name}.png")));
         }
     }
 
@@ -583,13 +666,34 @@ impl BiomeMap {
         world_height: f64,
         detail_level: u32,
     ) -> Self {
+        Self::generate_region_with_sub_stellar(
+            seed, world_x, world_y, world_size, output_size, world_height, detail_level, 0.5, 1.0,
+        )
+    }
+
+    /// Generate a meso-level biome map with custom sub-stellar point.
+    pub fn generate_region_with_sub_stellar(
+        seed: u32,
+        world_x: f64,
+        world_y: f64,
+        world_size: f64,
+        output_size: usize,
+        world_height: f64,
+        detail_level: u32,
+        sub_stellar_x: f64,
+        sub_stellar_y: f64,
+    ) -> Self {
+        // Use world-scale width for light level (assume 2:1 aspect ratio)
+        let world_width = world_height * 2.0;
         let cont_strategy = ContinentalnessStrategy::new(seed);
-        let temp_strategy =
-            LatitudeTemperatureStrategy::new(seed.wrapping_add(1), world_height);
         let tectonic_strategy = TectonicPlatesStrategy::new(seed.wrapping_add(2));
-        let erosion_strategy = ErosionStrategy::new(seed.wrapping_add(3));
-        let peaks_strategy = PeaksAndValleysStrategy::new(seed.wrapping_add(4));
+        let raw_erosion_strategy = ErosionStrategy::new(seed.wrapping_add(3));
+        let raw_peaks_strategy = PeaksAndValleysStrategy::new(seed.wrapping_add(4));
         let humidity_strategy = HumidityStrategy::new(seed.wrapping_add(5));
+        let light_level_strategy = LightLevelStrategy::new(
+            seed.wrapping_add(6), sub_stellar_x, sub_stellar_y, world_width, world_height,
+        );
+        let rock_hardness_strategy = RockHardnessStrategy::new(seed.wrapping_add(7));
         let splines = BiomeSplines::new(SEA_LEVEL);
 
         let total_pixels = output_size * output_size;
@@ -603,6 +707,8 @@ impl BiomeMap {
         let mut erosion = Vec::with_capacity(total_pixels);
         let mut peaks_valleys = Vec::with_capacity(total_pixels);
         let mut humidity = Vec::with_capacity(total_pixels);
+        let mut light_level = Vec::with_capacity(total_pixels);
+        let mut rock_hardness = Vec::with_capacity(total_pixels);
 
         for py in 0..output_size {
             for px in 0..output_size {
@@ -610,13 +716,18 @@ impl BiomeMap {
                 let wy = world_y + (py as f64 * scale);
 
                 let cont = cont_strategy.generate(wx, wy, detail_level);
-                let temp = temp_strategy.generate(wx, wy, detail_level);
                 let (pid, tect) = tectonic_strategy.generate_voronoi(wx, wy);
-                let peaks = peaks_strategy.generate(wx, wy, detail_level);
-                let eros = erosion_strategy.generate_with_continentalness(wx, wy, detail_level, cont);
-                let humid = humidity_strategy.generate_tidally_locked(wx, wy, detail_level, cont, world_height);
+                let raw_peaks = raw_peaks_strategy.generate(wx, wy, detail_level);
+                let light = light_level_strategy.generate(wx, wy, detail_level);
+                let rock = rock_hardness_strategy.generate(wx, wy, detail_level);
+                let raw_eros = raw_erosion_strategy.generate_with_continentalness(wx, wy, detail_level, cont);
 
-                // Use splines for consistency with macro map and generate_meso_full
+                let peaks = derived::derive_peaks_valleys(raw_peaks, tect, rock);
+                let eros = derived::derive_erosion(raw_eros, rock);
+                let humid = humidity_strategy.generate_with_light_level(wx, wy, detail_level, cont, light, world_height);
+                let heightmap = derived::derive_heightmap(cont, tect, peaks);
+                let temp = derived::derive_temperature(light, heightmap, humid);
+
                 let biome = splines.evaluate(cont, temp, tect, eros, peaks, humid);
 
                 continentalness.push(cont);
@@ -626,6 +737,8 @@ impl BiomeMap {
                 peaks_valleys.push(peaks);
                 erosion.push(eros);
                 humidity.push(humid);
+                light_level.push(light);
+                rock_hardness.push(rock);
                 biomes.push(biome);
             }
         }
@@ -675,6 +788,8 @@ impl BiomeMap {
             erosion,
             peaks_valleys,
             humidity,
+            light_level,
+            rock_hardness,
             rivers,
             resources: ResourceMap::new(output_size, output_size),
         }
@@ -691,9 +806,11 @@ impl BiomeMap {
         world_height: f64,
         detail_level: u32,
     ) -> Vec<u8> {
+        let world_width = world_height * 2.0;
         let cont_strategy = ContinentalnessStrategy::new(seed);
-        let temp_strategy =
-            LatitudeTemperatureStrategy::new(seed.wrapping_add(1), world_height);
+        let light_strategy = LightLevelStrategy::new(
+            seed.wrapping_add(6), 0.5, 1.0, world_width, world_height,
+        );
 
         let total_pixels = output_size * output_size;
         let scale = world_size / output_size as f64;
@@ -705,7 +822,9 @@ impl BiomeMap {
                 let wy = world_y + (py as f64 * scale);
 
                 let cont = cont_strategy.generate(wx, wy, detail_level);
-                let temp = temp_strategy.generate(wx, wy, detail_level);
+                let light = light_strategy.generate(wx, wy, detail_level);
+                // Quick temperature derivation (no humidity/elevation detail)
+                let temp = derived::derive_temperature(light, cont.max(0.0), 0.3);
                 let biome = TileType::from_climate(cont, temp, SEA_LEVEL);
 
                 image_data.extend_from_slice(&biome.color());
@@ -718,14 +837,14 @@ impl BiomeMap {
     /// Generate full meso BiomeMap with all layers in parallel + progress tracking.
     ///
     /// Unlike `generate_biome_only` which outputs RGBA only, this returns a complete
-    /// BiomeMap with all 7 terrain layers + derived layers for instant layer switching.
+    /// BiomeMap with all terrain layers + derived layers for instant layer switching.
     ///
     /// # Arguments
     /// * `seed` - Random seed for noise generation
     /// * `world_x`, `world_y` - Top-left corner in world coordinates
     /// * `world_size` - Size of the region in world units
     /// * `output_size` - Output resolution (e.g., 512 for 512x512)
-    /// * `world_height` - Total world height (for latitude-based temperature)
+    /// * `world_height` - Total world height
     /// * `detail_level` - Noise detail level (0=macro, 1=meso, 2=micro)
     /// * `progress` - Shared progress tracker for UI updates
     pub fn generate_meso_full(
@@ -739,13 +858,17 @@ impl BiomeMap {
         progress: &Arc<LayerProgress>,
         macro_map: Option<&BiomeMap>,
     ) -> Self {
+        let world_width = world_height * 2.0;
         // Create all strategies
         let cont_strategy = ContinentalnessStrategy::new(seed);
-        let temp_strategy = LatitudeTemperatureStrategy::new(seed.wrapping_add(1), world_height);
         let tectonic_strategy = TectonicPlatesStrategy::new(seed.wrapping_add(2));
-        let erosion_strategy = ErosionStrategy::new(seed.wrapping_add(3));
-        let peaks_strategy = PeaksAndValleysStrategy::new(seed.wrapping_add(4));
+        let raw_erosion_strategy = ErosionStrategy::new(seed.wrapping_add(3));
+        let raw_peaks_strategy = PeaksAndValleysStrategy::new(seed.wrapping_add(4));
         let humidity_strategy = HumidityStrategy::new(seed.wrapping_add(5));
+        let light_level_strategy = LightLevelStrategy::new(
+            seed.wrapping_add(6), 0.5, 1.0, world_width, world_height,
+        );
+        let rock_hardness_strategy = RockHardnessStrategy::new(seed.wrapping_add(7));
         let splines = BiomeSplines::new(SEA_LEVEL);
 
         let total_pixels = output_size * output_size;
@@ -757,9 +880,7 @@ impl BiomeMap {
         // Generate all pixel indices
         let indices: Vec<usize> = (0..total_pixels).collect();
 
-        // Phase 1: Generate all layers in parallel with progress tracking
-        // Each chunk of pixels updates progress atomically
-        // Note: flat_map_iter preserves order (unlike flat_map which can scramble)
+        // Phase 1+2: Generate base layers and derive dependent layers in parallel
         let all_data: Vec<_> = indices
             .par_chunks(progress_chunk)
             .flat_map_iter(|chunk| {
@@ -771,20 +892,24 @@ impl BiomeMap {
                     let wx = world_x + (px as f64 * scale);
                     let wy = world_y + (py as f64 * scale);
 
-                    // Generate base layers
+                    // Phase 1: Base layers
                     let cont = cont_strategy.generate(wx, wy, detail_level);
-                    let temp = temp_strategy.generate(wx, wy, detail_level);
                     let (pid, tect) = tectonic_strategy.generate_voronoi(wx, wy);
-                    let peaks = peaks_strategy.generate(wx, wy, detail_level);
+                    let raw_peaks = raw_peaks_strategy.generate(wx, wy, detail_level);
+                    let light = light_level_strategy.generate(wx, wy, detail_level);
+                    let rock = rock_hardness_strategy.generate(wx, wy, detail_level);
+                    let raw_eros = raw_erosion_strategy.generate_with_continentalness(wx, wy, detail_level, cont);
 
-                    // Generate dependent layers
-                    let eros = erosion_strategy.generate_with_continentalness(wx, wy, detail_level, cont);
-                    let humid = humidity_strategy.generate_tidally_locked(wx, wy, detail_level, cont, world_height);
+                    // Phase 2: Derived layers
+                    let peaks = derived::derive_peaks_valleys(raw_peaks, tect, rock);
+                    let eros = derived::derive_erosion(raw_eros, rock);
+                    let humid = humidity_strategy.generate_with_light_level(wx, wy, detail_level, cont, light, world_height);
+                    let heightmap = derived::derive_heightmap(cont, tect, peaks);
+                    let temp = derived::derive_temperature(light, heightmap, humid);
 
-                    // Compute biome using splines
                     let biome = splines.evaluate(cont, temp, tect, eros, peaks, humid);
 
-                    results.push((cont, temp, tect, pid, peaks, eros, humid, biome));
+                    results.push((cont, temp, tect, pid, peaks, eros, humid, light, rock, biome));
                 }
 
                 // Update progress for all layers
@@ -795,6 +920,8 @@ impl BiomeMap {
                 progress.increment(LayerId::PeaksValleys, n);
                 progress.increment(LayerId::Erosion, n);
                 progress.increment(LayerId::Humidity, n);
+                progress.increment(LayerId::LightLevel, n);
+                progress.increment(LayerId::RockHardness, n);
                 progress.increment(LayerId::Resources, n);
 
                 results
@@ -810,8 +937,10 @@ impl BiomeMap {
         let mut peaks_valleys = Vec::with_capacity(total_pixels);
         let mut erosion = Vec::with_capacity(total_pixels);
         let mut humidity = Vec::with_capacity(total_pixels);
+        let mut light_level = Vec::with_capacity(total_pixels);
+        let mut rock_hardness = Vec::with_capacity(total_pixels);
 
-        for (cont, temp, tect, pid, peaks, eros, humid, biome) in all_data {
+        for (cont, temp, tect, pid, peaks, eros, humid, light, rock, biome) in all_data {
             continentalness.push(cont);
             temperature.push(temp);
             tectonic.push(tect);
@@ -819,6 +948,8 @@ impl BiomeMap {
             peaks_valleys.push(peaks);
             erosion.push(eros);
             humidity.push(humid);
+            light_level.push(light);
+            rock_hardness.push(rock);
             biomes.push(biome);
         }
 
@@ -886,6 +1017,8 @@ impl BiomeMap {
             erosion,
             peaks_valleys,
             humidity,
+            light_level,
+            rock_hardness,
             rivers,
             resources,
         }
@@ -973,7 +1106,7 @@ impl BiomeMap {
         let total_pixels = output_size * output_size;
         let scale = world_size / output_size as f64;
 
-        // Generate all 6 base noise layers on GPU
+        // Generate base noise layers on GPU
         let layers = gpu.generate_layers(
             seed,
             output_size,
@@ -987,19 +1120,17 @@ impl BiomeMap {
 
         // Mark all noise layers as complete (GPU does them all at once)
         progress.increment(LayerId::Continentalness, total_pixels);
-        progress.increment(LayerId::Temperature, total_pixels);
         progress.increment(LayerId::Tectonic, total_pixels);
-        progress.increment(LayerId::PeaksValleys, total_pixels);
-        progress.increment(LayerId::Erosion, total_pixels);
-        progress.increment(LayerId::Humidity, total_pixels);
+        progress.increment(LayerId::LightLevel, total_pixels);
+        progress.increment(LayerId::RockHardness, total_pixels);
 
         // Convert f32 GPU results to f64
         let continentalness: Vec<f64> = layers.continentalness.iter().map(|&v| v as f64).collect();
-        let temperature: Vec<f64> = layers.temperature.iter().map(|&v| v as f64).collect();
-        let tectonic: Vec<f64> = layers.tectonic.iter().map(|&v| v as f64).collect();
-        let peaks_valleys: Vec<f64> = layers.peaks_valleys.iter().map(|&v| v as f64).collect();
-        let erosion: Vec<f64> = layers.erosion.iter().map(|&v| v as f64).collect();
-        let humidity: Vec<f64> = layers.humidity.iter().map(|&v| v as f64).collect();
+        let gpu_tectonic: Vec<f64> = layers.tectonic.iter().map(|&v| v as f64).collect();
+        let raw_peaks: Vec<f64> = layers.peaks_valleys.iter().map(|&v| v as f64).collect();
+        let raw_erosion: Vec<f64> = layers.erosion.iter().map(|&v| v as f64).collect();
+        let gpu_light_level: Vec<f64> = layers.light_level.iter().map(|&v| v as f64).collect();
+        let gpu_rock_hardness: Vec<f64> = layers.rock_hardness.iter().map(|&v| v as f64).collect();
 
         // GPU doesn't compute plate IDs — generate them on CPU
         let tectonic_strategy = TectonicPlatesStrategy::new(seed.wrapping_add(2));
@@ -1013,21 +1144,46 @@ impl BiomeMap {
             })
             .collect();
 
-        // Compute biomes using splines (same as CPU path)
+        // Derive peaks, erosion, humidity, temperature on CPU from GPU base layers
+        let humidity_strategy = HumidityStrategy::new(seed.wrapping_add(5));
         let splines = BiomeSplines::new(SEA_LEVEL);
         let mut biomes = Vec::with_capacity(total_pixels);
+        let mut temperature = Vec::with_capacity(total_pixels);
+        let mut peaks_valleys = Vec::with_capacity(total_pixels);
+        let mut erosion = Vec::with_capacity(total_pixels);
+        let mut humidity = Vec::with_capacity(total_pixels);
 
         for idx in 0..total_pixels {
-            let biome = splines.evaluate(
-                continentalness[idx],
-                temperature[idx],
-                tectonic[idx],
-                erosion[idx],
-                peaks_valleys[idx],
-                humidity[idx],
-            );
+            let cont = continentalness[idx];
+            let tect = gpu_tectonic[idx];
+            let light = gpu_light_level[idx];
+            let rock = gpu_rock_hardness[idx];
+
+            let peaks = derived::derive_peaks_valleys(raw_peaks[idx], tect, rock);
+            let eros = derived::derive_erosion(raw_erosion[idx], rock);
+
+            let px = idx % output_size;
+            let py = idx / output_size;
+            let wx = world_x + (px as f64 * scale);
+            let wy = world_y + (py as f64 * scale);
+            let humid = humidity_strategy.generate_with_light_level(wx, wy, detail_level, cont, light, world_height);
+
+            let heightmap = derived::derive_heightmap(cont, tect, peaks);
+            let temp = derived::derive_temperature(light, heightmap, humid);
+
+            peaks_valleys.push(peaks);
+            erosion.push(eros);
+            humidity.push(humid);
+            temperature.push(temp);
+
+            let biome = splines.evaluate(cont, temp, tect, eros, peaks, humid);
             biomes.push(biome);
         }
+
+        progress.increment(LayerId::Temperature, total_pixels);
+        progress.increment(LayerId::PeaksValleys, total_pixels);
+        progress.increment(LayerId::Erosion, total_pixels);
+        progress.increment(LayerId::Humidity, total_pixels);
 
         // Compute meso elevation for D8 river generation
         let elevation: Vec<f64> = continentalness
@@ -1087,11 +1243,13 @@ impl BiomeMap {
             biomes,
             continentalness,
             temperature,
-            tectonic,
+            tectonic: gpu_tectonic,
             tectonic_plate_ids,
             erosion,
             peaks_valleys,
             humidity,
+            light_level: gpu_light_level,
+            rock_hardness: gpu_rock_hardness,
             rivers,
             resources: ResourceMap::new(output_size, output_size),
         }
@@ -1141,6 +1299,8 @@ mod tests {
         assert_eq!(map.erosion.len(), 64 * 32);
         assert_eq!(map.peaks_valleys.len(), 64 * 32);
         assert_eq!(map.humidity.len(), 64 * 32);
+        assert_eq!(map.light_level.len(), 64 * 32);
+        assert_eq!(map.rock_hardness.len(), 64 * 32);
         assert_eq!(map.rivers.len(), 64 * 32);
     }
 
@@ -1167,17 +1327,20 @@ mod tests {
     }
 
     #[test]
-    fn top_is_cold() {
+    fn far_from_sub_stellar_is_cold() {
+        // Sub-stellar is at (0.5, 1.0) normalized = (64, 64) in a 128x64 map
+        // Top of map (y=5) is far from sub-stellar (bottom center)
         let map = BiomeMap::generate(42, 128, 64);
         let temp = map.get_temperature(64, 5).unwrap();
-        assert!(temp < 0.0, "Top temperature {} should be cold (< 0)", temp);
+        assert!(temp < 0.0, "Far from sub-stellar temp {} should be cold (< 0)", temp);
     }
 
     #[test]
-    fn bottom_is_hot() {
+    fn near_sub_stellar_is_hot() {
+        // Bottom center is near sub-stellar point
         let map = BiomeMap::generate(42, 128, 64);
         let temp = map.get_temperature(64, 60).unwrap();
-        assert!(temp > 30.0, "Bottom temperature {} should be hot (> 30)", temp);
+        assert!(temp > 30.0, "Near sub-stellar temp {} should be hot (> 30)", temp);
     }
 
     #[test]

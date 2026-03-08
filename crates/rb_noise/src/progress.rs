@@ -9,6 +9,8 @@ pub enum LayerId {
     PeaksValleys,
     Erosion,
     Humidity,
+    LightLevel,
+    RockHardness,
     Resources,
 }
 
@@ -22,6 +24,8 @@ impl LayerId {
             Self::PeaksValleys,
             Self::Erosion,
             Self::Humidity,
+            Self::LightLevel,
+            Self::RockHardness,
             Self::Resources,
         ]
     }
@@ -35,11 +39,13 @@ impl LayerId {
             Self::PeaksValleys => "Peaks/Valleys",
             Self::Erosion => "Erosion",
             Self::Humidity => "Humidity",
+            Self::LightLevel => "Light Level",
+            Self::RockHardness => "Rock Hardness",
             Self::Resources => "Resources",
         }
     }
 
-    /// Index for array access (0-6).
+    /// Index for array access (0-8).
     pub fn index(&self) -> usize {
         match self {
             Self::Continentalness => 0,
@@ -48,7 +54,9 @@ impl LayerId {
             Self::PeaksValleys => 3,
             Self::Erosion => 4,
             Self::Humidity => 5,
-            Self::Resources => 6,
+            Self::LightLevel => 6,
+            Self::RockHardness => 7,
+            Self::Resources => 8,
         }
     }
 }
@@ -56,7 +64,7 @@ impl LayerId {
 /// Thread-safe progress tracker for parallel layer generation.
 /// Uses atomic counters for lock-free progress updates from multiple threads.
 pub struct LayerProgress {
-    counters: [AtomicUsize; 7],
+    counters: [AtomicUsize; 9],
     total_pixels: usize,
 }
 
@@ -107,7 +115,7 @@ mod tests {
 
     #[test]
     fn layer_id_indices_are_unique() {
-        let mut seen = [false; 7];
+        let mut seen = [false; 9];
         for layer in LayerId::all() {
             let idx = layer.index();
             assert!(!seen[idx], "Duplicate index {} for {:?}", idx, layer);

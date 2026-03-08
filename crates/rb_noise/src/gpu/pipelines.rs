@@ -9,8 +9,11 @@ pub struct NoisePipelines {
     pub continentalness: ComputePipeline,
     pub continentalness_layout: BindGroupLayout,
 
-    pub temperature: ComputePipeline,
-    pub temperature_layout: BindGroupLayout,
+    pub light_level: ComputePipeline,
+    pub light_level_layout: BindGroupLayout,
+
+    pub rock_hardness: ComputePipeline,
+    pub rock_hardness_layout: BindGroupLayout,
 
     pub tectonic: ComputePipeline,
     pub tectonic_layout: BindGroupLayout,
@@ -34,9 +37,13 @@ impl NoisePipelines {
             "{}{}{}",
             INDEPENDENT_BINDINGS, OPEN_SIMPLEX_2D_FUNCS, CONTINENTALNESS_MAIN
         );
-        let temperature_shader = format!(
+        let light_level_shader = format!(
             "{}{}{}",
-            INDEPENDENT_BINDINGS, OPEN_SIMPLEX_2D_FUNCS, TEMPERATURE_MAIN
+            INDEPENDENT_BINDINGS, OPEN_SIMPLEX_2D_FUNCS, LIGHT_LEVEL_MAIN
+        );
+        let rock_hardness_shader = format!(
+            "{}{}{}",
+            INDEPENDENT_BINDINGS, OPEN_SIMPLEX_2D_FUNCS, ROCK_HARDNESS_MAIN
         );
         let tectonic_shader = format!(
             "{}{}{}",
@@ -60,8 +67,11 @@ impl NoisePipelines {
         let (continentalness, continentalness_layout) =
             Self::create_perm_pipeline(device, "Continentalness", &continentalness_shader);
 
-        let (temperature, temperature_layout) =
-            Self::create_perm_pipeline(device, "Temperature", &temperature_shader);
+        let (light_level, light_level_layout) =
+            Self::create_perm_pipeline(device, "LightLevel", &light_level_shader);
+
+        let (rock_hardness, rock_hardness_layout) =
+            Self::create_perm_pipeline(device, "RockHardness", &rock_hardness_shader);
 
         let (tectonic, tectonic_layout) =
             Self::create_perm_pipeline(device, "Tectonic", &tectonic_shader);
@@ -78,8 +88,10 @@ impl NoisePipelines {
         Self {
             continentalness,
             continentalness_layout,
-            temperature,
-            temperature_layout,
+            light_level,
+            light_level_layout,
+            rock_hardness,
+            rock_hardness_layout,
             tectonic,
             tectonic_layout,
             peaks_valleys,
@@ -420,8 +432,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// Temperature shader main - latitude-based with OpenSimplex noise.
-const TEMPERATURE_MAIN: &str = r#"
+/// Light level shader main - angular distance from sub-stellar point + scatter noise.
+/// Sub-stellar point is at (0.5, 1.0) in normalized coords (bottom center).
+/// world_height is used to derive world_width as world_height * 2.0.
+const LIGHT_LEVEL_MAIN: &str = r#"
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= params.width || gid.y >= params.height) { return; }
@@ -430,18 +444,42 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let wx = params.world_x + f32(gid.x) * params.scale;
     let wy = params.world_y + f32(gid.y) * params.scale;
 
-    // Latitude-based temperature (matching CPU LatitudeTemperatureStrategy)
-    let latitude_factor = wy / params.world_height;
+    // Sub-stellar at (0.5, 1.0) normalized
+    let map_width = params.world_height * 2.0;
+    let nx = wx / map_width;
+    let ny = wy / params.world_height;
 
-    // Noise for variation (scale 0.02)
-    let nx = wx * 0.02;
-    let ny = wy * 0.02;
-    let noise = fbm_open_simplex(nx, ny, params.octaves, params.frequency, params.persistence, params.lacunarity);
+    let dx = nx - 0.5;
+    let dy = ny - 1.0;
+    let dist = min(sqrt(dx * dx + dy * dy), 1.0);
 
-    // Temperature formula: (latitude * 150) - 50 + (noise * 100)
-    let temperature = latitude_factor * 150.0 - 50.0 + noise * 100.0;
+    // Cosine falloff: dist=0 => cos(0)=1, dist=1 => cos(PI/2)=0
+    let base_light = cos(dist * 1.5707963);
 
-    output[idx] = temperature;
+    // Atmospheric scatter noise (~5% variation)
+    let scatter = fbm_open_simplex(wx * 0.005, wy * 0.005, params.octaves, params.frequency, params.persistence, params.lacunarity) * 0.05;
+
+    output[idx] = clamp(base_light + scatter, 0.0, 1.0);
+}
+"#;
+
+/// Rock hardness shader main - simple fBm, output [0, 1].
+const ROCK_HARDNESS_MAIN: &str = r#"
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+
+    let idx = gid.y * params.width + gid.x;
+    let wx = params.world_x + f32(gid.x) * params.scale;
+    let wy = params.world_y + f32(gid.y) * params.scale;
+
+    // Scale ~80.0 => frequency factor 0.0125
+    let nx = wx * 0.0125;
+    let ny = wy * 0.0125;
+
+    let raw = fbm_open_simplex(nx, ny, params.octaves, params.frequency, params.persistence, params.lacunarity);
+    // Map [-1, 1] to [0, 1]
+    output[idx] = clamp((raw + 1.0) * 0.5, 0.0, 1.0);
 }
 "#;
 

@@ -236,41 +236,17 @@ pub fn generator_ui_system(
             if let Some(ref mut current_layer) = ui_state.current_layer {
                 ui.heading("View Layer");
 
-                let terrain_layers = [
-                    NoiseLayer::Aggregate,
-                    NoiseLayer::Continentalness,
-                    NoiseLayer::Temperature,
-                    NoiseLayer::Tectonic,
-                    NoiseLayer::Erosion,
-                    NoiseLayer::PeaksValleys,
-                    NoiseLayer::Humidity,
-                ];
-
-                let derived_layers = [
-                    NoiseLayer::Rivers,
-                ];
-
-                let resource_layers = [
-                    NoiseLayer::ResourceIron,
-                    NoiseLayer::ResourceGold,
-                    NoiseLayer::ResourceCopper,
-                    NoiseLayer::ResourceSilver,
-                    NoiseLayer::ResourceGems,
-                    NoiseLayer::ResourceCoal,
-                    NoiseLayer::ResourceStone,
-                    NoiseLayer::ResourceSalt,
-                    NoiseLayer::ResourceTimber,
-                    NoiseLayer::ResourceFish,
-                    NoiseLayer::ResourceFertileSoil,
-                    NoiseLayer::ResourceWildGame,
-                ];
-
                 let current = *current_layer;
                 egui::ComboBox::from_label("Layer")
                     .selected_text(current.name())
                     .show_ui(ui, |ui| {
-                        ui.label("Terrain");
-                        for layer in terrain_layers {
+                        if ui.selectable_label(current == NoiseLayer::Aggregate, NoiseLayer::Aggregate.name()).clicked() {
+                            ui_state.layer_changed = Some(NoiseLayer::Aggregate);
+                        }
+
+                        ui.separator();
+                        ui.label("Base");
+                        for &layer in NoiseLayer::base_layers() {
                             if ui.selectable_label(current == layer, layer.name()).clicked() {
                                 ui_state.layer_changed = Some(layer);
                             }
@@ -278,15 +254,7 @@ pub fn generator_ui_system(
 
                         ui.separator();
                         ui.label("Derived");
-                        for layer in derived_layers {
-                            if ui.selectable_label(current == layer, layer.name()).clicked() {
-                                ui_state.layer_changed = Some(layer);
-                            }
-                        }
-
-                        ui.separator();
-                        ui.label("Resources");
-                        for layer in resource_layers {
+                        for &layer in NoiseLayer::derived_layers() {
                             if ui.selectable_label(current == layer, layer.name()).clicked() {
                                 ui_state.layer_changed = Some(layer);
                             }

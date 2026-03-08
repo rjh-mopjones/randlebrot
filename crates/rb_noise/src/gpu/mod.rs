@@ -19,15 +19,19 @@ pub use context::GpuNoiseContext;
 pub use perm_table::generate_permutation_table;
 pub use pipelines::NoisePipelines;
 
-/// Result of GPU noise generation containing all 6 base layers.
+/// Result of GPU noise generation containing all base layers.
+///
+/// Temperature is no longer generated on GPU — it's derived on CPU
+/// from light_level + elevation + humidity.
 #[derive(Debug)]
 pub struct GpuNoiseResult {
     pub continentalness: Vec<f32>,
-    pub temperature: Vec<f32>,
     pub tectonic: Vec<f32>,
     pub erosion: Vec<f32>,
     pub peaks_valleys: Vec<f32>,
     pub humidity: Vec<f32>,
+    pub light_level: Vec<f32>,
+    pub rock_hardness: Vec<f32>,
 }
 
 impl GpuNoiseResult {
@@ -35,11 +39,12 @@ impl GpuNoiseResult {
     pub fn to_f64_vecs(self) -> GpuNoiseResultF64 {
         GpuNoiseResultF64 {
             continentalness: self.continentalness.into_iter().map(|v| v as f64).collect(),
-            temperature: self.temperature.into_iter().map(|v| v as f64).collect(),
             tectonic: self.tectonic.into_iter().map(|v| v as f64).collect(),
             erosion: self.erosion.into_iter().map(|v| v as f64).collect(),
             peaks_valleys: self.peaks_valleys.into_iter().map(|v| v as f64).collect(),
             humidity: self.humidity.into_iter().map(|v| v as f64).collect(),
+            light_level: self.light_level.into_iter().map(|v| v as f64).collect(),
+            rock_hardness: self.rock_hardness.into_iter().map(|v| v as f64).collect(),
         }
     }
 }
@@ -48,9 +53,10 @@ impl GpuNoiseResult {
 #[derive(Debug)]
 pub struct GpuNoiseResultF64 {
     pub continentalness: Vec<f64>,
-    pub temperature: Vec<f64>,
     pub tectonic: Vec<f64>,
     pub erosion: Vec<f64>,
     pub peaks_valleys: Vec<f64>,
     pub humidity: Vec<f64>,
+    pub light_level: Vec<f64>,
+    pub rock_hardness: Vec<f64>,
 }

@@ -1,30 +1,19 @@
-use rb_core::ResourceType;
-
 /// Noise layers that can be visualized in the map view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum NoiseLayer {
     #[default]
     Aggregate,
+    // Base layers (independent noise)
     Continentalness,
-    Temperature,
     Tectonic,
+    LightLevel,
+    RockHardness,
+    // Derived layers (computed from base layers)
+    Temperature,
     Erosion,
     PeaksValleys,
     Humidity,
     Rivers,
-    // Resource layers
-    ResourceIron,
-    ResourceGold,
-    ResourceCopper,
-    ResourceSilver,
-    ResourceGems,
-    ResourceCoal,
-    ResourceStone,
-    ResourceSalt,
-    ResourceTimber,
-    ResourceFish,
-    ResourceFertileSoil,
-    ResourceWildGame,
 }
 
 impl NoiseLayer {
@@ -33,24 +22,35 @@ impl NoiseLayer {
         &[
             Self::Aggregate,
             Self::Continentalness,
-            Self::Temperature,
             Self::Tectonic,
+            Self::LightLevel,
+            Self::RockHardness,
+            Self::Temperature,
             Self::Erosion,
             Self::PeaksValleys,
             Self::Humidity,
             Self::Rivers,
-            Self::ResourceIron,
-            Self::ResourceGold,
-            Self::ResourceCopper,
-            Self::ResourceSilver,
-            Self::ResourceGems,
-            Self::ResourceCoal,
-            Self::ResourceStone,
-            Self::ResourceSalt,
-            Self::ResourceTimber,
-            Self::ResourceFish,
-            Self::ResourceFertileSoil,
-            Self::ResourceWildGame,
+        ]
+    }
+
+    /// Returns base layers (independent noise strategies).
+    pub fn base_layers() -> &'static [NoiseLayer] {
+        &[
+            Self::Continentalness,
+            Self::Tectonic,
+            Self::LightLevel,
+            Self::RockHardness,
+        ]
+    }
+
+    /// Returns derived layers (computed from base layers).
+    pub fn derived_layers() -> &'static [NoiseLayer] {
+        &[
+            Self::Temperature,
+            Self::Erosion,
+            Self::PeaksValleys,
+            Self::Humidity,
+            Self::Rivers,
         ]
     }
 
@@ -64,76 +64,33 @@ impl NoiseLayer {
             Self::Erosion => "Erosion",
             Self::PeaksValleys => "Peaks & Valleys",
             Self::Humidity => "Humidity",
+            Self::LightLevel => "Light Level",
+            Self::RockHardness => "Rock Hardness",
             Self::Rivers => "Rivers",
-            Self::ResourceIron => "Iron Deposits",
-            Self::ResourceGold => "Gold Deposits",
-            Self::ResourceCopper => "Copper Deposits",
-            Self::ResourceSilver => "Silver Deposits",
-            Self::ResourceGems => "Gem Deposits",
-            Self::ResourceCoal => "Coal Deposits",
-            Self::ResourceStone => "Stone Deposits",
-            Self::ResourceSalt => "Salt Deposits",
-            Self::ResourceTimber => "Timber",
-            Self::ResourceFish => "Fishing Grounds",
-            Self::ResourceFertileSoil => "Fertile Soil",
-            Self::ResourceWildGame => "Wild Game",
         }
     }
 
-    /// Check if this is a resource layer.
-    pub fn is_resource(&self) -> bool {
+    /// Check if this is a base (independent noise) layer.
+    pub fn is_base_layer(&self) -> bool {
         matches!(
             self,
-            Self::ResourceIron
-                | Self::ResourceGold
-                | Self::ResourceCopper
-                | Self::ResourceSilver
-                | Self::ResourceGems
-                | Self::ResourceCoal
-                | Self::ResourceStone
-                | Self::ResourceSalt
-                | Self::ResourceTimber
-                | Self::ResourceFish
-                | Self::ResourceFertileSoil
-                | Self::ResourceWildGame
+            Self::Continentalness
+                | Self::Tectonic
+                | Self::LightLevel
+                | Self::RockHardness
         )
     }
 
-    /// Convert to ResourceType if this is a resource layer.
-    pub fn to_resource_type(&self) -> Option<ResourceType> {
-        match self {
-            Self::ResourceIron => Some(ResourceType::Iron),
-            Self::ResourceGold => Some(ResourceType::Gold),
-            Self::ResourceCopper => Some(ResourceType::Copper),
-            Self::ResourceSilver => Some(ResourceType::Silver),
-            Self::ResourceGems => Some(ResourceType::Gems),
-            Self::ResourceCoal => Some(ResourceType::Coal),
-            Self::ResourceStone => Some(ResourceType::Stone),
-            Self::ResourceSalt => Some(ResourceType::Salt),
-            Self::ResourceTimber => Some(ResourceType::Timber),
-            Self::ResourceFish => Some(ResourceType::Fish),
-            Self::ResourceFertileSoil => Some(ResourceType::FertileSoil),
-            Self::ResourceWildGame => Some(ResourceType::WildGame),
-            _ => None,
-        }
-    }
-
-    /// Create from ResourceType.
-    pub fn from_resource_type(resource: ResourceType) -> Self {
-        match resource {
-            ResourceType::Iron => Self::ResourceIron,
-            ResourceType::Gold => Self::ResourceGold,
-            ResourceType::Copper => Self::ResourceCopper,
-            ResourceType::Silver => Self::ResourceSilver,
-            ResourceType::Gems => Self::ResourceGems,
-            ResourceType::Coal => Self::ResourceCoal,
-            ResourceType::Stone => Self::ResourceStone,
-            ResourceType::Salt => Self::ResourceSalt,
-            ResourceType::Timber => Self::ResourceTimber,
-            ResourceType::Fish => Self::ResourceFish,
-            ResourceType::FertileSoil => Self::ResourceFertileSoil,
-            ResourceType::WildGame => Self::ResourceWildGame,
-        }
+    /// Check if this is a derived (computed from base) layer.
+    pub fn is_derived(&self) -> bool {
+        matches!(
+            self,
+            Self::Temperature
+                | Self::Erosion
+                | Self::PeaksValleys
+                | Self::Humidity
+                | Self::Rivers
+        )
     }
 }
 
@@ -238,21 +195,23 @@ pub fn river_to_rgba(flow: f64) -> [u8; 4] {
     }
 }
 
-/// Convert resource abundance to RGBA.
-pub fn resource_to_rgba(abundance: f64, resource: ResourceType) -> [u8; 4] {
-    if abundance < 0.01 {
-        return [30, 30, 30, 255]; // No resources - dark background
-    }
+/// Convert light level to RGBA (black -> yellow gradient).
+pub fn light_level_to_rgba(light: f64) -> [u8; 4] {
+    let t = light.clamp(0.0, 1.0);
+    let r = (t * 255.0) as u8;
+    let g = (t * 230.0) as u8;
+    let b = (t * 50.0) as u8;
+    [r, g, b, 255]
+}
 
-    let base_color = resource.color();
-    let intensity = (0.5 + abundance * 0.5).min(1.0);
-
-    [
-        (base_color[0] as f64 * intensity) as u8,
-        (base_color[1] as f64 * intensity) as u8,
-        (base_color[2] as f64 * intensity) as u8,
-        255,
-    ]
+/// Convert rock hardness to RGBA (brown -> gray gradient).
+pub fn rock_hardness_to_rgba(hardness: f64) -> [u8; 4] {
+    let t = hardness.clamp(0.0, 1.0);
+    // Soft rock = brown (139, 90, 43), hard rock = gray (180, 180, 180)
+    let r = (139.0 + t * 41.0) as u8;
+    let g = (90.0 + t * 90.0) as u8;
+    let b = (43.0 + t * 137.0) as u8;
+    [r, g, b, 255]
 }
 
 #[cfg(test)]
@@ -270,14 +229,11 @@ mod tests {
     }
 
     #[test]
-    fn resource_layer_conversion() {
-        for layer in NoiseLayer::all() {
-            if layer.is_resource() {
-                let resource = layer.to_resource_type().expect("Should have resource type");
-                let back = NoiseLayer::from_resource_type(resource);
-                assert_eq!(*layer, back, "Round-trip conversion failed for {:?}", layer);
-            }
-        }
+    fn base_and_derived_cover_all_non_aggregate() {
+        let base = NoiseLayer::base_layers();
+        let derived = NoiseLayer::derived_layers();
+        let all_non_agg: Vec<_> = NoiseLayer::all().iter().filter(|l| **l != NoiseLayer::Aggregate).collect();
+        assert_eq!(base.len() + derived.len(), all_non_agg.len());
     }
 
     #[test]
