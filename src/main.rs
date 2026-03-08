@@ -272,6 +272,8 @@ fn start_generation(
     let tile_progress_clone = tile_progress.clone();
 
     // Spawn async task for meso tiles with full 7-layer generation
+    // Clone macro map for meso tiles to upscale rivers from
+    let macro_map_for_meso = biome_map.clone();
     println!("Generating {} meso tiles with 7-layer parallel generation ({})...", TOTAL_CHUNKS, backend_name);
     let task = AsyncComputeTaskPool::get().spawn(async move {
         (0..TOTAL_CHUNKS).into_par_iter().map(|chunk_idx| {
@@ -282,6 +284,7 @@ fn start_generation(
             let world_y = cy as f64 * CHUNK_SIZE as f64;
 
             // Generate full BiomeMap with all 7 layers + derived
+            // Pass macro map so rivers are upscaled instead of re-generated
             let meso_map = BiomeMap::generate_meso_full_with_backend(
                 seed,
                 world_x,
@@ -292,6 +295,7 @@ fn start_generation(
                 1, // detail_level = meso
                 &layer_progress_clone,
                 backend,
+                Some(&macro_map_for_meso),
             );
 
             tile_progress_clone.fetch_add(1, Ordering::Relaxed);

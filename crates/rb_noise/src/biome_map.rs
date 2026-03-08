@@ -737,6 +737,7 @@ impl BiomeMap {
         world_height: f64,
         detail_level: u32,
         progress: &Arc<LayerProgress>,
+        macro_map: Option<&BiomeMap>,
     ) -> Self {
         // Create all strategies
         let cont_strategy = ContinentalnessStrategy::new(seed);
@@ -821,7 +822,7 @@ impl BiomeMap {
             biomes.push(biome);
         }
 
-        // Generate rivers using D8 flow accumulation with tectonic elevation
+        // Compute meso elevation for D8 river generation
         let elevation: Vec<f64> = continentalness
             .iter()
             .zip(peaks_valleys.iter())
@@ -842,7 +843,23 @@ impl BiomeMap {
             .collect();
 
         let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, output_size, output_size);
-        let rivers = river_gen.generate(&elevation, output_size, output_size);
+
+        // If macro map available, seed edges with macro flow for cross-tile connectivity
+        let rivers = if let Some(macro_map) = macro_map {
+            river_gen.generate_with_macro_flow(
+                &elevation,
+                output_size,
+                output_size,
+                &macro_map.rivers,
+                macro_map.width,
+                macro_map.height,
+                world_x,
+                world_y,
+                world_size,
+            )
+        } else {
+            river_gen.generate(&elevation, output_size, output_size)
+        };
 
         // Override biomes where rivers flow - only in habitable climate zones
         for idx in 0..total_pixels {
@@ -895,6 +912,7 @@ impl BiomeMap {
         detail_level: u32,
         progress: &Arc<LayerProgress>,
         backend: NoiseBackend,
+        macro_map: Option<&BiomeMap>,
     ) -> Self {
         match backend {
             NoiseBackend::Cpu => Self::generate_meso_full(
@@ -906,6 +924,7 @@ impl BiomeMap {
                 world_height,
                 detail_level,
                 progress,
+                macro_map,
             ),
             NoiseBackend::Gpu => Self::generate_meso_full_gpu(
                 seed,
@@ -916,6 +935,7 @@ impl BiomeMap {
                 world_height,
                 detail_level,
                 progress,
+                macro_map,
             ),
         }
     }
@@ -931,6 +951,7 @@ impl BiomeMap {
         world_height: f64,
         detail_level: u32,
         progress: &Arc<LayerProgress>,
+        macro_map: Option<&BiomeMap>,
     ) -> Self {
         use crate::gpu::GpuNoiseContext;
 
@@ -945,6 +966,7 @@ impl BiomeMap {
                 world_height,
                 detail_level,
                 progress,
+                macro_map,
             );
         };
 
@@ -1007,7 +1029,7 @@ impl BiomeMap {
             biomes.push(biome);
         }
 
-        // Generate rivers on CPU (D8 flow requires sequential processing)
+        // Compute meso elevation for D8 river generation
         let elevation: Vec<f64> = continentalness
             .iter()
             .zip(peaks_valleys.iter())
@@ -1028,7 +1050,23 @@ impl BiomeMap {
             .collect();
 
         let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, output_size, output_size);
-        let rivers = river_gen.generate(&elevation, output_size, output_size);
+
+        // If macro map available, seed edges with macro flow for cross-tile connectivity
+        let rivers = if let Some(macro_map) = macro_map {
+            river_gen.generate_with_macro_flow(
+                &elevation,
+                output_size,
+                output_size,
+                &macro_map.rivers,
+                macro_map.width,
+                macro_map.height,
+                world_x,
+                world_y,
+                world_size,
+            )
+        } else {
+            river_gen.generate(&elevation, output_size, output_size)
+        };
 
         // Override biomes where rivers flow
         for idx in 0..total_pixels {
@@ -1070,6 +1108,7 @@ impl BiomeMap {
         world_height: f64,
         detail_level: u32,
         progress: &Arc<LayerProgress>,
+        macro_map: Option<&BiomeMap>,
     ) -> Self {
         // GPU feature not enabled, fallback to CPU
         Self::generate_meso_full(
@@ -1081,6 +1120,7 @@ impl BiomeMap {
             world_height,
             detail_level,
             progress,
+            macro_map,
         )
     }
 }

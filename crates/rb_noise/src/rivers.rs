@@ -63,11 +63,115 @@ impl RiverGenerator {
     /// Uses approximately 0.02% of total cells as threshold.
     pub fn for_map_size(sea_level: f64, width: usize, height: usize) -> Self {
         let total = width * height;
-        let threshold = ((total as f64) * 0.0002).max(25.0) as u32;
+        let threshold = ((total as f64) * 0.0005).max(25.0) as u32;
         Self {
             sea_level,
             min_accumulation: threshold,
         }
+    }
+
+    /// Generate rivers for a meso tile using D8 on local elevation, with macro
+    /// river flow injected at tile edges to maintain cross-tile connectivity.
+    ///
+    /// The key problem with naive per-tile D8 is that a meso tile can't know about
+    /// upstream drainage area outside itself. This method solves it by seeding
+    /// edge cells with the macro flow accumulation values, so rivers entering the
+    /// tile carry their full upstream weight and propagate downstream following
+    /// the actual meso-scale terrain.
+    ///
+    /// # Arguments
+    /// * `elevation` - Meso-scale elevation for this tile
+    /// * `width`, `height` - Tile dimensions in pixels (e.g., 512x512)
+    /// * `macro_rivers` - Macro D8 river flow (log-normalized 0-1)
+    /// * `macro_width`, `macro_height` - Macro map dimensions
+    /// * `world_x`, `world_y` - Top-left of tile in world coordinates
+    /// * `world_size` - Tile size in world units (e.g., 64.0)
+    pub fn generate_with_macro_flow(
+        &self,
+        elevation: &[f64],
+        width: usize,
+        height: usize,
+        macro_rivers: &[f64],
+        macro_width: usize,
+        macro_height: usize,
+        world_x: f64,
+        world_y: f64,
+        world_size: f64,
+    ) -> Vec<f64> {
+        let filled = self.fill_depressions(elevation, width, height);
+        let flow_dir = self.compute_flow_directions(&filled, width, height);
+
+        // Start with standard accumulation (1 per cell)
+        let total = width * height;
+        let mut accumulation = vec![1u32; total];
+
+        // Seed edge band with macro flow values.
+        // A macro pixel = 1 world unit = (width/world_size) meso pixels.
+        // We seed a band of that width at each edge so we don't miss macro rivers
+        // that straddle the tile boundary.
+        let scale = world_size / width as f64;
+        let edge_band = (1.0 / scale).ceil() as usize; // ~8 pixels for 512/64
+        let macro_total = (macro_width * macro_height) as f64;
+
+        for y in 0..height {
+            for x in 0..width {
+                // Only seed cells in the edge band
+                let in_band = x < edge_band || x >= width - edge_band
+                    || y < edge_band || y >= height - edge_band;
+                if !in_band {
+                    continue;
+                }
+
+                let wx = world_x + x as f64 * scale;
+                let wy = world_y + y as f64 * scale;
+                let mx = wx as i64;
+                let my = wy as i64;
+
+                if mx >= 0 && mx < macro_width as i64
+                    && my >= 0 && my < macro_height as i64
+                {
+                    let macro_flow = macro_rivers[my as usize * macro_width + mx as usize];
+                    if macro_flow > 0.0 {
+                        // Convert log-normalized flow back to a drainage area estimate.
+                        // macro_flow is 0-1 log-normalized, so a value of 0.5 represents
+                        // a moderately large river. Scale by macro map size to give
+                        // realistic upstream cell counts.
+                        let boost = (macro_flow * macro_total * 0.5) as u32;
+                        let idx = y * width + x;
+                        accumulation[idx] = accumulation[idx].saturating_add(boost);
+                    }
+                }
+            }
+        }
+
+        // Topological sort: propagate flow from highest to lowest elevation.
+        // Seeded edge cells pass their boosted accumulation downstream.
+        let mut sorted_indices: Vec<usize> = (0..total).collect();
+        sorted_indices.sort_by(|&a, &b| {
+            filled[b]
+                .partial_cmp(&filled[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        for &idx in &sorted_indices {
+            if flow_dir[idx] == NO_FLOW {
+                continue;
+            }
+
+            let x = idx % width;
+            let y = idx / width;
+            let (dx, dy) = D8_OFFSETS[flow_dir[idx] as usize];
+            let nx = (x as i32 + dx) as usize;
+            let ny = (y as i32 + dy) as usize;
+
+            if nx < width && ny < height {
+                let target_idx = ny * width + nx;
+                accumulation[target_idx] =
+                    accumulation[target_idx].saturating_add(accumulation[idx]);
+            }
+        }
+
+        self.extract_rivers(&accumulation, width, height)
     }
 
     /// Generate rivers for a map.
@@ -377,6 +481,43 @@ mod tests {
             accumulation[center_idx] > accumulation[corner_idx],
             "Valley bottom should accumulate more flow than corners"
         );
+    }
+
+    #[test]
+    fn test_generate_with_macro_flow() {
+        // 8x8 meso tile with a valley running left to right
+        let width = 8;
+        let height = 8;
+        let mut elevation = vec![0.1; width * height];
+
+        // Create a valley channel across the middle (row 3-4)
+        for x in 0..width {
+            elevation[3 * width + x] = 0.02;
+            elevation[4 * width + x] = 0.02;
+        }
+
+        // Macro map: 4x4, river entering from left edge at row 1 (maps to meso rows 2-3)
+        let macro_width = 4;
+        let macro_height = 4;
+        let mut macro_rivers = vec![0.0; macro_width * macro_height];
+        macro_rivers[1 * macro_width + 0] = 0.5; // River at macro (0, 1)
+
+        let gen = RiverGenerator {
+            sea_level: -0.025,
+            min_accumulation: 2,
+        };
+
+        let result = gen.generate_with_macro_flow(
+            &elevation, width, height,
+            &macro_rivers, macro_width, macro_height,
+            0.0, 0.0, 4.0,
+        );
+
+        assert_eq!(result.len(), width * height);
+
+        // The seeded edge should produce flow that propagates into the tile
+        let has_river = result.iter().any(|&v| v > 0.0);
+        assert!(has_river, "Should have river flow from macro seeding");
     }
 
     #[test]
