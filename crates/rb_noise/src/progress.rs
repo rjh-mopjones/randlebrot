@@ -4,14 +4,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LayerId {
     Continentalness,
-    Temperature,
     Tectonic,
     PeaksValleys,
-    Erosion,
     Humidity,
     LightLevel,
     RockHardness,
-    Resources,
+    Derivation,
 }
 
 impl LayerId {
@@ -19,14 +17,12 @@ impl LayerId {
     pub fn all() -> &'static [LayerId] {
         &[
             Self::Continentalness,
-            Self::Temperature,
             Self::Tectonic,
             Self::PeaksValleys,
-            Self::Erosion,
             Self::Humidity,
             Self::LightLevel,
             Self::RockHardness,
-            Self::Resources,
+            Self::Derivation,
         ]
     }
 
@@ -34,29 +30,25 @@ impl LayerId {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Continentalness => "Continentalness",
-            Self::Temperature => "Temperature",
             Self::Tectonic => "Tectonic",
             Self::PeaksValleys => "Peaks/Valleys",
-            Self::Erosion => "Erosion",
             Self::Humidity => "Humidity",
             Self::LightLevel => "Light Level",
             Self::RockHardness => "Rock Hardness",
-            Self::Resources => "Resources",
+            Self::Derivation => "Derivation",
         }
     }
 
-    /// Index for array access (0-8).
+    /// Index for array access (0-6).
     pub fn index(&self) -> usize {
         match self {
             Self::Continentalness => 0,
-            Self::Temperature => 1,
-            Self::Tectonic => 2,
-            Self::PeaksValleys => 3,
-            Self::Erosion => 4,
-            Self::Humidity => 5,
-            Self::LightLevel => 6,
-            Self::RockHardness => 7,
-            Self::Resources => 8,
+            Self::Tectonic => 1,
+            Self::PeaksValleys => 2,
+            Self::Humidity => 3,
+            Self::LightLevel => 4,
+            Self::RockHardness => 5,
+            Self::Derivation => 6,
         }
     }
 }
@@ -64,7 +56,7 @@ impl LayerId {
 /// Thread-safe progress tracker for parallel layer generation.
 /// Uses atomic counters for lock-free progress updates from multiple threads.
 pub struct LayerProgress {
-    counters: [AtomicUsize; 9],
+    counters: [AtomicUsize; 7],
     total_pixels: usize,
 }
 
@@ -115,7 +107,7 @@ mod tests {
 
     #[test]
     fn layer_id_indices_are_unique() {
-        let mut seen = [false; 9];
+        let mut seen = [false; 7];
         for layer in LayerId::all() {
             let idx = layer.index();
             assert!(!seen[idx], "Duplicate index {} for {:?}", idx, layer);

@@ -21,9 +21,6 @@ pub struct NoisePipelines {
     pub peaks_valleys: ComputePipeline,
     pub peaks_valleys_layout: BindGroupLayout,
 
-    pub erosion: ComputePipeline,
-    pub erosion_layout: BindGroupLayout,
-
     pub humidity: ComputePipeline,
     pub humidity_layout: BindGroupLayout,
 }
@@ -54,10 +51,6 @@ impl NoisePipelines {
             INDEPENDENT_BINDINGS, OPEN_SIMPLEX_2D_FUNCS, PEAKS_VALLEYS_MAIN
         );
         // Dependent shaders (params, perm_table, continentalness, output)
-        let erosion_shader = format!(
-            "{}{}{}",
-            DEPENDENT_BINDINGS, OPEN_SIMPLEX_2D_FUNCS, EROSION_MAIN
-        );
         let humidity_shader = format!(
             "{}{}{}",
             DEPENDENT_BINDINGS, OPEN_SIMPLEX_2D_FUNCS, HUMIDITY_MAIN
@@ -79,9 +72,6 @@ impl NoisePipelines {
         let (peaks_valleys, peaks_valleys_layout) =
             Self::create_perm_pipeline(device, "PeaksValleys", &peaks_valleys_shader);
 
-        let (erosion, erosion_layout) =
-            Self::create_dependent_perm_pipeline(device, "Erosion", &erosion_shader);
-
         let (humidity, humidity_layout) =
             Self::create_dependent_perm_pipeline(device, "Humidity", &humidity_shader);
 
@@ -96,8 +86,6 @@ impl NoisePipelines {
             tectonic_layout,
             peaks_valleys,
             peaks_valleys_layout,
-            erosion,
-            erosion_layout,
             humidity,
             humidity_layout,
         }
@@ -593,31 +581,6 @@ struct Params {
 @group(0) @binding(1) var<storage, read> perm_table: array<u32>;
 @group(0) @binding(2) var<storage, read> continentalness: array<f32>;
 @group(0) @binding(3) var<storage, read_write> output: array<f32>;
-"#;
-
-/// Erosion shader main - depends on continentalness.
-const EROSION_MAIN: &str = r#"
-@compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-
-    let idx = gid.y * params.width + gid.x;
-    let wx = params.world_x + f32(gid.x) * params.scale;
-    let wy = params.world_y + f32(gid.y) * params.scale;
-    let cont = continentalness[idx];
-
-    // Erosion with continentalness modulation (scale 0.02 matching CPU)
-    let nx = wx * 0.02;
-    let ny = wy * 0.02;
-    let base_erosion = fbm_open_simplex(nx, ny, params.octaves, params.frequency, params.persistence, params.lacunarity);
-
-    // Normalize to [0, 1] and modulate by elevation
-    let normalized = (base_erosion + 1.0) * 0.5;
-    let elevation_factor = clamp((cont + 0.025) * 2.0, 0.0, 1.0);
-    let erosion = normalized * elevation_factor;
-
-    output[idx] = clamp(erosion, 0.0, 1.0);
-}
 "#;
 
 /// Humidity shader main - depends on continentalness, tidally locked model.

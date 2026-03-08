@@ -21,13 +21,13 @@ pub use pipelines::NoisePipelines;
 
 /// Result of GPU noise generation containing all base layers.
 ///
-/// Temperature is no longer generated on GPU — it's derived on CPU
-/// from light_level + elevation + humidity.
+/// Erosion is no longer generated on GPU — it's fully derived on CPU
+/// from heightmap + rock_hardness + humidity.
+/// Temperature is derived on CPU from light_level + elevation + humidity.
 #[derive(Debug)]
 pub struct GpuNoiseResult {
     pub continentalness: Vec<f32>,
     pub tectonic: Vec<f32>,
-    pub erosion: Vec<f32>,
     pub peaks_valleys: Vec<f32>,
     pub humidity: Vec<f32>,
     pub light_level: Vec<f32>,
@@ -40,7 +40,6 @@ impl GpuNoiseResult {
         GpuNoiseResultF64 {
             continentalness: self.continentalness.into_iter().map(|v| v as f64).collect(),
             tectonic: self.tectonic.into_iter().map(|v| v as f64).collect(),
-            erosion: self.erosion.into_iter().map(|v| v as f64).collect(),
             peaks_valleys: self.peaks_valleys.into_iter().map(|v| v as f64).collect(),
             humidity: self.humidity.into_iter().map(|v| v as f64).collect(),
             light_level: self.light_level.into_iter().map(|v| v as f64).collect(),
@@ -54,7 +53,6 @@ impl GpuNoiseResult {
 pub struct GpuNoiseResultF64 {
     pub continentalness: Vec<f64>,
     pub tectonic: Vec<f64>,
-    pub erosion: Vec<f64>,
     pub peaks_valleys: Vec<f64>,
     pub humidity: Vec<f64>,
     pub light_level: Vec<f64>,

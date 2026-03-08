@@ -129,6 +129,7 @@ impl BiomeSplines {
     /// * `erosion` - Erosion amount (0-1)
     /// * `peaks_valleys` - Ridgeline noise (-1 = valley, 1 = peak)
     /// * `humidity` - Moisture level (0 = dry, 1 = wet)
+    /// * `aridity` - Aridity level (0 = lush, 1 = hyper-arid)
     pub fn evaluate(
         &self,
         continentalness: f64,
@@ -137,6 +138,7 @@ impl BiomeSplines {
         erosion: f64,
         peaks_valleys: f64,
         humidity: f64,
+        aridity: f64,
     ) -> TileType {
         // Step 1: Compute effective elevation with tectonic amplification
         let elevation = self.compute_elevation(continentalness, peaks_valleys, erosion, tectonic);
@@ -154,10 +156,21 @@ impl BiomeSplines {
 
         // Step 5: Classify climate parameters
         let climate = ClimateClass::from_temperature(adjusted_temp);
-        let moisture = MoistureClass::from_humidity(adjusted_humidity);
+        let mut moisture = MoistureClass::from_humidity(adjusted_humidity);
         let above_sea = elevation - self.sea_level;
         let elev_class = ElevationClass::from_elevation(above_sea);
         let terrain = TerrainClass::from_erosion(erosion);
+
+        // Step 5b: Aridity overrides moisture class
+        // Makes sun-side desert zones more dramatic
+        if aridity > 0.85 {
+            moisture = MoistureClass::Arid;
+        } else if aridity > 0.7 {
+            // Cap at Dry
+            if matches!(moisture, MoistureClass::Moderate | MoistureClass::Humid | MoistureClass::Saturated) {
+                moisture = MoistureClass::Dry;
+            }
+        }
 
         // Step 6: Check for special cases (volcanic, beach)
         // Coastal beach check
@@ -322,28 +335,28 @@ mod tests {
     #[test]
     fn ocean_is_sea() {
         let s = splines();
-        let biome = s.evaluate(-0.5, 20.0, 0.5, 0.5, 0.0, 0.5);
+        let biome = s.evaluate(-0.5, 20.0, 0.5, 0.5, 0.0, 0.5, 0.3);
         assert_eq!(biome, TileType::Sea);
     }
 
     #[test]
     fn frozen_ocean_is_white() {
         let s = splines();
-        let biome = s.evaluate(-0.5, -30.0, 0.5, 0.5, 0.0, 0.5);
+        let biome = s.evaluate(-0.5, -30.0, 0.5, 0.5, 0.0, 0.5, 0.3);
         assert_eq!(biome, TileType::White);
     }
 
     #[test]
     fn deep_ocean_is_sea() {
         let s = splines();
-        let biome = s.evaluate(-0.6, 20.0, 0.0, 0.5, 0.0, 0.5);
+        let biome = s.evaluate(-0.6, 20.0, 0.0, 0.5, 0.0, 0.5, 0.3);
         assert_eq!(biome, TileType::Sea);
     }
 
     #[test]
     fn coastal_is_beach() {
         let s = splines();
-        let biome = s.evaluate(-0.01, 25.0, 0.5, 0.5, 0.0, 0.5);
+        let biome = s.evaluate(-0.01, 25.0, 0.5, 0.5, 0.0, 0.5, 0.3);
         assert_eq!(biome, TileType::Beach);
     }
 
@@ -351,38 +364,38 @@ mod tests {
     fn frozen_land_is_glacier_or_snow() {
         let s = splines();
         // Frozen + dry = glacier
-        let biome = s.evaluate(0.1, -40.0, 0.5, 0.5, 0.0, 0.1);
+        let biome = s.evaluate(0.1, -40.0, 0.5, 0.5, 0.0, 0.1, 0.3);
         assert_eq!(biome, TileType::Glacier);
         // Frozen + humid = snow
-        let biome2 = s.evaluate(0.1, -40.0, 0.5, 0.5, 0.0, 0.7);
+        let biome2 = s.evaluate(0.1, -40.0, 0.5, 0.5, 0.0, 0.7, 0.3);
         assert_eq!(biome2, TileType::Snow);
     }
 
     #[test]
     fn cold_dry_is_tundra() {
         let s = splines();
-        let biome = s.evaluate(0.1, -10.0, 0.5, 0.5, 0.0, 0.1);
+        let biome = s.evaluate(0.1, -10.0, 0.5, 0.5, 0.0, 0.1, 0.3);
         assert_eq!(biome, TileType::Tundra);
     }
 
     #[test]
     fn cold_wet_is_taiga() {
         let s = splines();
-        let biome = s.evaluate(0.1, -10.0, 0.5, 0.5, 0.0, 0.6);
+        let biome = s.evaluate(0.1, -10.0, 0.5, 0.5, 0.0, 0.6, 0.3);
         assert_eq!(biome, TileType::Taiga);
     }
 
     #[test]
     fn temperate_dry_is_steppe() {
         let s = splines();
-        let biome = s.evaluate(0.1, 20.0, 0.5, 0.5, 0.0, 0.15);
+        let biome = s.evaluate(0.1, 20.0, 0.5, 0.5, 0.0, 0.15, 0.3);
         assert_eq!(biome, TileType::Steppe);
     }
 
     #[test]
     fn temperate_wet_lowland_is_marsh() {
         let s = splines();
-        let biome = s.evaluate(0.02, 20.0, 0.5, 0.5, 0.0, 0.9);
+        let biome = s.evaluate(0.02, 20.0, 0.5, 0.5, 0.0, 0.9, 0.3);
         assert_eq!(biome, TileType::Marsh);
     }
 
@@ -390,21 +403,21 @@ mod tests {
     fn hot_dry_rugged_is_badlands() {
         let s = splines();
         // Hot + arid + rugged terrain (low erosion)
-        let biome = s.evaluate(0.1, 65.0, 0.5, 0.1, 0.0, 0.1);
+        let biome = s.evaluate(0.1, 65.0, 0.5, 0.1, 0.0, 0.1, 0.3);
         assert_eq!(biome, TileType::Badlands);
     }
 
     #[test]
     fn hot_humid_is_jungle() {
         let s = splines();
-        let biome = s.evaluate(0.1, 65.0, 0.5, 0.5, 0.0, 0.7);
+        let biome = s.evaluate(0.1, 65.0, 0.5, 0.5, 0.0, 0.7, 0.3);
         assert_eq!(biome, TileType::Jungle);
     }
 
     #[test]
     fn warm_moderate_is_savanna() {
         let s = splines();
-        let biome = s.evaluate(0.1, 45.0, 0.5, 0.5, 0.0, 0.5);
+        let biome = s.evaluate(0.1, 45.0, 0.5, 0.5, 0.0, 0.5, 0.3);
         assert_eq!(biome, TileType::Savanna);
     }
 
@@ -412,10 +425,10 @@ mod tests {
     fn scorching_is_sahara_or_desert() {
         let s = splines();
         // Scorching + arid = sahara
-        let biome = s.evaluate(0.1, 100.0, 0.5, 0.5, 0.0, 0.1);
+        let biome = s.evaluate(0.1, 100.0, 0.5, 0.5, 0.0, 0.1, 0.3);
         assert_eq!(biome, TileType::Sahara);
         // Scorching + some moisture = desert
-        let biome2 = s.evaluate(0.1, 100.0, 0.5, 0.5, 0.0, 0.4);
+        let biome2 = s.evaluate(0.1, 100.0, 0.5, 0.5, 0.0, 0.4, 0.3);
         assert_eq!(biome2, TileType::Desert);
     }
 
@@ -423,8 +436,16 @@ mod tests {
     fn mountains_at_high_peaks() {
         let s = splines();
         // High peaks with moderate erosion should create mountains
-        let biome = s.evaluate(0.2, 50.0, 0.5, 0.2, 0.8, 0.5);
+        let biome = s.evaluate(0.2, 50.0, 0.5, 0.2, 0.8, 0.5, 0.3);
         assert_eq!(biome, TileType::Mountain);
+    }
+
+    #[test]
+    fn high_aridity_forces_arid() {
+        let s = splines();
+        // Temperate + moderate humidity but very high aridity => should force arid moisture class
+        let biome = s.evaluate(0.1, 20.0, 0.5, 0.5, 0.0, 0.5, 0.9);
+        assert_eq!(biome, TileType::Steppe, "High aridity should override moisture to Arid");
     }
 
     #[test]

@@ -128,7 +128,6 @@ impl GpuNoiseContext {
         // Each layer needs its own permutation table (matching CPU behavior)
         let cont_seed = seed;
         let tect_seed = seed.wrapping_add(2);
-        let eros_seed = seed.wrapping_add(3);
         let peak_seed = seed.wrapping_add(4);
         let humi_seed = seed.wrapping_add(5);
         let light_seed = seed.wrapping_add(6);
@@ -137,7 +136,6 @@ impl GpuNoiseContext {
         let cont_perm = make_perm_buffer(cont_seed, "Continentalness perm");
         let tect_perm = make_perm_buffer(tect_seed, "Tectonic perm");
         let peak_perm = make_perm_buffer(peak_seed, "PeaksValleys perm");
-        let eros_perm = make_perm_buffer(eros_seed, "Erosion perm");
         let humi_perm = make_perm_buffer(humi_seed, "Humidity perm");
         let light_perm = make_perm_buffer(light_seed, "LightLevel perm");
         let rock_perm = make_perm_buffer(rock_seed, "RockHardness perm");
@@ -200,18 +198,6 @@ impl GpuNoiseContext {
         );
 
         // Dependent layers - need continentalness first
-        let erosion = self.dispatch_erosion(
-            eros_seed,
-            width,
-            height,
-            world_x,
-            world_y,
-            scale,
-            detail_level,
-            &continentalness,
-            &eros_perm,
-        );
-
         let humidity = self.dispatch_humidity(
             humi_seed,
             width,
@@ -228,7 +214,6 @@ impl GpuNoiseContext {
         GpuNoiseResult {
             continentalness,
             tectonic,
-            erosion,
             peaks_valleys,
             humidity,
             light_level,
@@ -691,101 +676,6 @@ impl GpuNoiseContext {
 
         self.dispatch_compute(
             &self.pipelines.peaks_valleys,
-            &bind_group,
-            &output_buffer,
-            &staging_buffer,
-            width,
-            height,
-            buffer_size,
-        )
-    }
-
-    /// Dispatch erosion noise generation (depends on continentalness).
-    fn dispatch_erosion(
-        &self,
-        seed: u32,
-        width: usize,
-        height: usize,
-        world_x: f64,
-        world_y: f64,
-        scale: f64,
-        detail_level: u32,
-        continentalness: &[f32],
-        perm_buffer: &wgpu::Buffer,
-    ) -> Vec<f32> {
-        let params = NoiseParams {
-            seed,
-            width: width as u32,
-            height: height as u32,
-            octaves: 6 + detail_level,
-            frequency: 1.0,
-            persistence: 0.5,
-            lacunarity: 2.0,
-            scale: scale as f32,
-            world_x: world_x as f32,
-            world_y: world_y as f32,
-            world_height: 0.0,
-            _padding: 0.0,
-        };
-
-        let total_pixels = width * height;
-        let buffer_size = (total_pixels * std::mem::size_of::<f32>()) as u64;
-
-        let params_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Erosion params"),
-                contents: bytemuck::cast_slice(&[params]),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-
-        let cont_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Erosion continentalness input"),
-                contents: bytemuck::cast_slice(continentalness),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
-
-        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Erosion output"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Erosion staging"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Erosion bind group"),
-            layout: &self.pipelines.erosion_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: params_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: perm_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: cont_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: output_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
-        self.dispatch_compute(
-            &self.pipelines.erosion,
             &bind_group,
             &output_buffer,
             &staging_buffer,

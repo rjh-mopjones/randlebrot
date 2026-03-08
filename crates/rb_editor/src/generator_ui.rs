@@ -11,7 +11,7 @@ pub struct CurrentLayer(pub NoiseLayer);
 
 impl Default for CurrentLayer {
     fn default() -> Self {
-        Self(NoiseLayer::Aggregate)
+        Self(NoiseLayer::Biome)
     }
 }
 
@@ -240,23 +240,23 @@ pub fn generator_ui_system(
                 egui::ComboBox::from_label("Layer")
                     .selected_text(current.name())
                     .show_ui(ui, |ui| {
-                        if ui.selectable_label(current == NoiseLayer::Aggregate, NoiseLayer::Aggregate.name()).clicked() {
-                            ui_state.layer_changed = Some(NoiseLayer::Aggregate);
+                        // Biome (default) at top
+                        if ui.selectable_label(current == NoiseLayer::Biome, NoiseLayer::Biome.name()).clicked() {
+                            ui_state.layer_changed = Some(NoiseLayer::Biome);
                         }
 
-                        ui.separator();
-                        ui.label("Base");
-                        for &layer in NoiseLayer::base_layers() {
-                            if ui.selectable_label(current == layer, layer.name()).clicked() {
-                                ui_state.layer_changed = Some(layer);
-                            }
-                        }
-
-                        ui.separator();
-                        ui.label("Derived");
-                        for &layer in NoiseLayer::derived_layers() {
-                            if ui.selectable_label(current == layer, layer.name()).clicked() {
-                                ui_state.layer_changed = Some(layer);
+                        // Group layers by category
+                        let categories = ["Base", "Terrain", "Climate", "Hydrology", "Ecology"];
+                        for &cat in &categories {
+                            ui.separator();
+                            ui.label(cat);
+                            for &layer in NoiseLayer::all() {
+                                if layer == NoiseLayer::Biome { continue; }
+                                if layer.category() == cat {
+                                    if ui.selectable_label(current == layer, layer.name()).clicked() {
+                                        ui_state.layer_changed = Some(layer);
+                                    }
+                                }
                             }
                         }
                     });

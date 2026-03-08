@@ -255,7 +255,7 @@ fn start_generation(
     println!("Generating macro map {}x{} ({})...", width, height, backend_name);
     let biome_map = Arc::new(BiomeMap::generate_with_backend(seed, width, height, backend));
     task_res.biome_map = Some(biome_map.clone());
-    println!("  Resources: {} cells with deposits", biome_map.resources.cells_with_resources());
+    println!("  Macro map generated successfully");
 
     // Save debug layer images
     let debug_path = std::path::Path::new("debug_layers");
@@ -560,7 +560,7 @@ fn regenerate_world(
 
     // Generate new biome map with all layers
     let biome_map = Arc::new(BiomeMap::generate_with_backend(world_def.seed, world_def.width, world_def.height, backend));
-    println!("  Resources: {} cells with deposits", biome_map.resources.cells_with_resources());
+    println!("  Macro map generated successfully");
 
     // Save debug layer images
     let debug_path = std::path::Path::new("debug_layers");
