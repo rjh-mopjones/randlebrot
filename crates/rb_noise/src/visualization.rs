@@ -159,12 +159,32 @@ pub fn temperature_to_rgba(temp: f64) -> [u8; 4] {
     [r, g, b, 255]
 }
 
-/// Convert tectonic boundary distance to RGBA.
-/// Red at boundaries (0), gray at plate centers (1).
-pub fn tectonic_to_rgba(boundary_distance: f64) -> [u8; 4] {
-    let r = ((1.0 - boundary_distance) * 255.0) as u8;
-    let g = (boundary_distance * 128.0) as u8;
-    let b = (boundary_distance * 128.0) as u8;
+/// Convert tectonic plate ID + boundary distance to RGBA.
+/// Each plate gets a distinct color, boundaries are drawn dark.
+pub fn tectonic_to_rgba(plate_id: f64, boundary_distance: f64) -> [u8; 4] {
+    // 16 distinct plate colors (hue-spread, saturated)
+    let plate_colors: [[u8; 3]; 16] = [
+        [34, 180, 100],  // green
+        [200, 50, 120],  // magenta
+        [140, 130, 140], // gray
+        [180, 120, 50],  // brown/orange
+        [50, 190, 180],  // cyan
+        [200, 50, 60],   // red
+        [80, 80, 200],   // blue
+        [170, 170, 60],  // olive
+        [130, 50, 170],  // purple
+        [80, 170, 50],   // lime
+        [190, 140, 100], // tan
+        [60, 130, 170],  // steel blue
+        [190, 90, 170],  // pink
+        [100, 160, 130], // teal
+        [170, 80, 60],   // rust
+        [140, 170, 190], // light blue-gray
+    ];
+
+    let idx = ((plate_id * 255.0) as usize) % plate_colors.len();
+    let [r, g, b] = plate_colors[idx];
+
     [r, g, b, 255]
 }
 

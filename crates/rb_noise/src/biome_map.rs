@@ -65,6 +65,8 @@ pub struct BiomeMap {
     // New terrain layers
     /// Tectonic plate boundary distance (0 = boundary, 1 = center)
     pub tectonic: Vec<f64>,
+    /// Tectonic plate ID for each pixel (0.0-1.0, same ID = same plate)
+    pub tectonic_plate_ids: Vec<f64>,
     /// Erosion amount (0-1)
     pub erosion: Vec<f64>,
     /// Peaks and valleys ridgeline noise (-1 to 1)
@@ -131,10 +133,10 @@ impl BiomeMap {
 
                 let cont = cont_strategy.generate(fx, fy, 0);
                 let temp = temp_strategy.generate(fx, fy, 0);
-                let tectonic = tectonic_strategy.generate(fx, fy, 0);
+                let (plate_id, tectonic) = tectonic_strategy.generate_voronoi(fx, fy);
                 let peaks = peaks_strategy.generate(fx, fy, 0);
 
-                (cont, temp, tectonic, peaks)
+                (cont, temp, tectonic, plate_id, peaks)
             })
             .collect();
 
@@ -143,7 +145,7 @@ impl BiomeMap {
             .par_iter()
             .enumerate()
             .map(|(idx, &(x, y))| {
-                let (cont, _, _, _) = base_data[idx];
+                let (cont, _, _, _, _) = base_data[idx];
                 let fx = x as f64;
                 let fy = y as f64;
 
@@ -159,6 +161,7 @@ impl BiomeMap {
         let mut continentalness = Vec::with_capacity(total_pixels);
         let mut temperature = Vec::with_capacity(total_pixels);
         let mut tectonic = Vec::with_capacity(total_pixels);
+        let mut tectonic_plate_ids = Vec::with_capacity(total_pixels);
         let mut peaks_valleys = Vec::with_capacity(total_pixels);
         let mut erosion = Vec::with_capacity(total_pixels);
         let mut humidity = Vec::with_capacity(total_pixels);
@@ -166,12 +169,13 @@ impl BiomeMap {
         // Use spline-based biome evaluation for consistency with meso tiles
         let splines = BiomeSplines::new(SEA_LEVEL);
 
-        for (_idx, ((cont, temp, tect, peaks), (eros, humid))) in
+        for (_idx, ((cont, temp, tect, pid, peaks), (eros, humid))) in
             base_data.iter().zip(dependent_data.iter()).enumerate()
         {
             continentalness.push(*cont);
             temperature.push(*temp);
             tectonic.push(*tect);
+            tectonic_plate_ids.push(*pid);
             peaks_valleys.push(*peaks);
             erosion.push(*eros);
             humidity.push(*humid);
@@ -246,6 +250,7 @@ impl BiomeMap {
             continentalness,
             temperature,
             tectonic,
+            tectonic_plate_ids,
             erosion,
             peaks_valleys,
             humidity,
@@ -286,6 +291,16 @@ impl BiomeMap {
         let peaks_valleys: Vec<f64> = layers.peaks_valleys.iter().map(|&v| v as f64).collect();
         let erosion: Vec<f64> = layers.erosion.iter().map(|&v| v as f64).collect();
         let humidity: Vec<f64> = layers.humidity.iter().map(|&v| v as f64).collect();
+
+        // GPU doesn't compute plate IDs — generate them on CPU
+        let tectonic_strategy = TectonicPlatesStrategy::new(seed.wrapping_add(2));
+        let tectonic_plate_ids: Vec<f64> = (0..total_pixels)
+            .map(|idx| {
+                let x = (idx % width) as f64;
+                let y = (idx / width) as f64;
+                tectonic_strategy.plate_id(x, y)
+            })
+            .collect();
 
         // Compute biomes using splines (same as CPU path)
         let splines = BiomeSplines::new(SEA_LEVEL);
@@ -364,6 +379,7 @@ impl BiomeMap {
             continentalness,
             temperature,
             tectonic,
+            tectonic_plate_ids,
             erosion,
             peaks_valleys,
             humidity,
@@ -433,7 +449,7 @@ impl BiomeMap {
                         grayscale_to_rgba(self.continentalness[idx], -1.0, 1.0)
                     }
                     NoiseLayer::Temperature => temperature_to_rgba(self.temperature[idx]),
-                    NoiseLayer::Tectonic => tectonic_to_rgba(self.tectonic[idx]),
+                    NoiseLayer::Tectonic => tectonic_to_rgba(self.tectonic_plate_ids[idx], self.tectonic[idx]),
                     NoiseLayer::Erosion => grayscale_to_rgba(self.erosion[idx], 0.0, 1.0),
                     NoiseLayer::PeaksValleys => peaks_to_rgba(self.peaks_valleys[idx]),
                     NoiseLayer::Humidity => humidity_to_rgba(self.humidity[idx]),
@@ -605,6 +621,7 @@ impl BiomeMap {
         let mut continentalness = Vec::with_capacity(total_pixels);
         let mut temperature = Vec::with_capacity(total_pixels);
         let mut tectonic = Vec::with_capacity(total_pixels);
+        let mut tectonic_plate_ids = Vec::with_capacity(total_pixels);
         let mut erosion = Vec::with_capacity(total_pixels);
         let mut peaks_valleys = Vec::with_capacity(total_pixels);
         let mut humidity = Vec::with_capacity(total_pixels);
@@ -616,7 +633,7 @@ impl BiomeMap {
 
                 let cont = cont_strategy.generate(wx, wy, detail_level);
                 let temp = temp_strategy.generate(wx, wy, detail_level);
-                let tect = tectonic_strategy.generate(wx, wy, detail_level);
+                let (pid, tect) = tectonic_strategy.generate_voronoi(wx, wy);
                 let peaks = peaks_strategy.generate(wx, wy, detail_level);
                 let eros = erosion_strategy.generate_with_continentalness(wx, wy, detail_level, cont);
                 let humid = humidity_strategy.generate_tidally_locked(wx, wy, detail_level, cont, world_height);
@@ -627,6 +644,7 @@ impl BiomeMap {
                 continentalness.push(cont);
                 temperature.push(temp);
                 tectonic.push(tect);
+                tectonic_plate_ids.push(pid);
                 peaks_valleys.push(peaks);
                 erosion.push(eros);
                 humidity.push(humid);
@@ -685,6 +703,7 @@ impl BiomeMap {
             continentalness,
             temperature,
             tectonic,
+            tectonic_plate_ids,
             erosion,
             peaks_valleys,
             humidity,
@@ -786,7 +805,7 @@ impl BiomeMap {
                     // Generate base layers
                     let cont = cont_strategy.generate(wx, wy, detail_level);
                     let temp = temp_strategy.generate(wx, wy, detail_level);
-                    let tect = tectonic_strategy.generate(wx, wy, detail_level);
+                    let (pid, tect) = tectonic_strategy.generate_voronoi(wx, wy);
                     let peaks = peaks_strategy.generate(wx, wy, detail_level);
 
                     // Generate dependent layers
@@ -796,7 +815,7 @@ impl BiomeMap {
                     // Compute biome using splines
                     let biome = splines.evaluate(cont, temp, tect, eros, peaks, humid);
 
-                    results.push((cont, temp, tect, peaks, eros, humid, biome));
+                    results.push((cont, temp, tect, pid, peaks, eros, humid, biome));
                 }
 
                 // Update progress for all layers
@@ -818,14 +837,16 @@ impl BiomeMap {
         let mut continentalness = Vec::with_capacity(total_pixels);
         let mut temperature = Vec::with_capacity(total_pixels);
         let mut tectonic = Vec::with_capacity(total_pixels);
+        let mut tectonic_plate_ids = Vec::with_capacity(total_pixels);
         let mut peaks_valleys = Vec::with_capacity(total_pixels);
         let mut erosion = Vec::with_capacity(total_pixels);
         let mut humidity = Vec::with_capacity(total_pixels);
 
-        for (cont, temp, tect, peaks, eros, humid, biome) in all_data {
+        for (cont, temp, tect, pid, peaks, eros, humid, biome) in all_data {
             continentalness.push(cont);
             temperature.push(temp);
             tectonic.push(tect);
+            tectonic_plate_ids.push(pid);
             peaks_valleys.push(peaks);
             erosion.push(eros);
             humidity.push(humid);
@@ -886,6 +907,7 @@ impl BiomeMap {
             continentalness,
             temperature,
             tectonic,
+            tectonic_plate_ids,
             erosion,
             peaks_valleys,
             humidity,
@@ -999,6 +1021,18 @@ impl BiomeMap {
         let erosion: Vec<f64> = layers.erosion.iter().map(|&v| v as f64).collect();
         let humidity: Vec<f64> = layers.humidity.iter().map(|&v| v as f64).collect();
 
+        // GPU doesn't compute plate IDs — generate them on CPU
+        let tectonic_strategy = TectonicPlatesStrategy::new(seed.wrapping_add(2));
+        let tectonic_plate_ids: Vec<f64> = (0..total_pixels)
+            .map(|idx| {
+                let px = idx % output_size;
+                let py = idx / output_size;
+                let wx = world_x + (px as f64 * scale);
+                let wy = world_y + (py as f64 * scale);
+                tectonic_strategy.plate_id(wx, wy)
+            })
+            .collect();
+
         // Compute biomes using splines (same as CPU path)
         let splines = BiomeSplines::new(SEA_LEVEL);
         let mut biomes = Vec::with_capacity(total_pixels);
@@ -1068,6 +1102,7 @@ impl BiomeMap {
             continentalness,
             temperature,
             tectonic,
+            tectonic_plate_ids,
             erosion,
             peaks_valleys,
             humidity,
