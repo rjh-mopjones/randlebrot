@@ -16,7 +16,7 @@ impl Default for CurrentLayer {
 }
 
 /// Resource for tracking UI state in the generator.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct GeneratorUiState {
     /// Seed input as string for editing.
     pub seed_text: String,
@@ -32,8 +32,23 @@ pub struct GeneratorUiState {
     pub current_layer: Option<NoiseLayer>,
     /// Layer change requested by UI (read by main.rs to update textures).
     pub layer_changed: Option<NoiseLayer>,
-    /// Whether to use GPU for noise generation.
+    /// Whether to use GPU for noise generation (defaults to true).
     pub use_gpu: bool,
+}
+
+impl Default for GeneratorUiState {
+    fn default() -> Self {
+        Self {
+            seed_text: String::new(),
+            initialized: false,
+            show_load_dialog: false,
+            available_worlds: Vec::new(),
+            status_message: None,
+            current_layer: None,
+            layer_changed: None,
+            use_gpu: true,
+        }
+    }
 }
 
 impl GeneratorUiState {

@@ -25,10 +25,10 @@ pub const SEA_LEVEL: f64 = -0.025;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NoiseBackend {
     /// CPU-based parallel noise generation using Rayon.
-    #[default]
     Cpu,
     /// GPU-accelerated noise generation using wgpu compute shaders.
     /// Falls back to CPU if GPU is unavailable.
+    #[default]
     Gpu,
 }
 
