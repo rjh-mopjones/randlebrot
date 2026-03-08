@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use rb_core::{AppMode, ModeTransitionEvent, handle_mode_shortcuts};
 use rb_editor::{CurrentLayer, GeneratorUiState, RegenerationRequest};
 use rb_noise::{BiomeMap, LayerId, LayerProgress, NoiseBackend};
-use rb_world::{CivilizationConfig, CivilizationGenerator, CivilizationResult, WorldDefinition};
+use rb_world::WorldDefinition;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -107,8 +107,6 @@ struct WorldMapTextures {
     biome_map: Arc<BiomeMap>,
     /// Current layer texture handle
     current_handle: Handle<Image>,
-    /// Territory overlay from civilization generation
-    territory_overlay: Option<Vec<u8>>,
 }
 
 /// Marker component for the world map sprite.
@@ -185,10 +183,6 @@ struct GenerationTask {
     tile_progress: Option<Arc<AtomicUsize>>,
     /// Generated macro biome map with all layers
     biome_map: Option<Arc<BiomeMap>>,
-    /// Civilization generation result
-    civ_result: Option<CivilizationResult>,
-    /// Territory overlay image data
-    territory_image: Option<Vec<u8>>,
 }
 
 /// Size of macro chunks in pixels (for highlighting grid).
@@ -246,7 +240,7 @@ fn config_ui(
 fn start_generation(
     mut commands: Commands,
     mut task_res: ResMut<GenerationTask>,
-    mut world_def: ResMut<WorldDefinition>,
+    world_def: Res<WorldDefinition>,
     ui_state: Res<GeneratorUiState>,
 ) {
     commands.remove_resource::<GenerationStarted>();
@@ -266,36 +260,6 @@ fn start_generation(
     // Save debug layer images
     let debug_path = std::path::Path::new("debug_layers");
     biome_map.save_debug_layers(debug_path);
-
-    // Generate civilization
-    println!("Generating civilization...");
-    let civ_config = CivilizationConfig {
-        max_settlements: 40,
-        generate_roads: true,
-        generate_trade_routes: true,
-        generate_territories: true,
-        territory_threshold: 0.1,
-    };
-    let civ_generator = CivilizationGenerator::new(seed, civ_config);
-    let civ_result = civ_generator.generate(&biome_map, &mut world_def);
-    println!(
-        "Civilization: {} settlements, {} factions, {} roads",
-        civ_result.settlements_placed,
-        civ_result.factions_created,
-        civ_result.roads_built
-    );
-
-    // Generate territory overlay image
-    let territory_image = if let Some(ref territory) = world_def.territory_cache {
-        let faction_colors: Vec<_> = world_def.factions.iter()
-            .map(|f| (f.id, f.color))
-            .collect();
-        Some(territory.to_image(&faction_colors))
-    } else {
-        None
-    };
-    task_res.territory_image = territory_image;
-    task_res.civ_result = Some(civ_result);
 
     // Per-layer progress tracking for all meso tiles
     let total_pixels_per_tile = MESO_MAP_SIZE * MESO_MAP_SIZE;
@@ -372,13 +336,9 @@ fn poll_generation(
             let biome_image = create_image(world_def.width, world_def.height, biome_data);
             let biome_handle = images.add(biome_image);
 
-            // Store territory overlay for Political layer
-            let territory_overlay = task_res.territory_image.take();
-
             commands.insert_resource(WorldMapTextures {
                 biome_map,
                 current_handle: biome_handle.clone(),
-                territory_overlay,
             });
 
             commands.spawn((
@@ -401,7 +361,6 @@ fn poll_generation(
         task_res.task = None;
         task_res.layer_progress = None;
         task_res.tile_progress = None;
-        task_res.civ_result = None;
         next_phase.set(AppPhase::Ready);
         println!("World ready! {} meso tiles cached ({} BiomeMaps).", cache.textures.len(), cache.maps.len());
     }
@@ -611,7 +570,6 @@ fn regenerate_world(
     // Update textures resource
     textures.biome_map = biome_map;
     textures.current_handle = new_handle.clone();
-    textures.territory_overlay = None; // Clear territory overlay (would need to regenerate civilization)
 
     // Update sprite
     for mut sprite in &mut query {

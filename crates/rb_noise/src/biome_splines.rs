@@ -208,7 +208,7 @@ impl BiomeSplines {
     }
 
     /// Determine ocean biome based on temperature and tectonic activity.
-    fn ocean_biome(&self, elevation: f64, temp: f64, tectonic: f64) -> TileType {
+    fn ocean_biome(&self, _elevation: f64, temp: f64, _tectonic: f64) -> TileType {
         // Temperature extremes take priority - frozen or evaporated ocean
         if temp < -15.0 {
             return TileType::White; // Frozen ocean
@@ -221,7 +221,7 @@ impl BiomeSplines {
     }
 
     /// Adjust temperature based on elevation (lapse rate) and tectonic heat.
-    fn adjust_temperature(&self, temp: f64, elevation: f64, tectonic: f64) -> f64 {
+    fn adjust_temperature(&self, temp: f64, elevation: f64, _tectonic: f64) -> f64 {
         // Lapse rate: temperature decreases with altitude
         let elevation_above_sea = (elevation - self.sea_level).max(0.0);
         let lapse_rate = elevation_above_sea * 60.0; // ~60°C per 1.0 elevation unit

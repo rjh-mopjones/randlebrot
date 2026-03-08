@@ -191,8 +191,7 @@ impl BiomeMap {
             .iter()
             .zip(peaks_valleys.iter())
             .zip(erosion.iter())
-            .zip(tectonic.iter())
-            .map(|(((&cont, &peaks), &eros), &tect)| {
+            .map(|((&cont, &peaks), &eros)| {
                 let is_land = cont >= SEA_LEVEL;
                 let erosion_damp = 1.0 - eros * 0.7;
 
@@ -312,8 +311,7 @@ impl BiomeMap {
             .iter()
             .zip(peaks_valleys.iter())
             .zip(erosion.iter())
-            .zip(tectonic.iter())
-            .map(|(((&cont, &peaks), &eros), &tect)| {
+            .map(|((&cont, &peaks), &eros)| {
                 let is_land = cont >= SEA_LEVEL;
                 let erosion_damp = 1.0 - eros * 0.7;
 
@@ -637,8 +635,7 @@ impl BiomeMap {
             .iter()
             .zip(peaks_valleys.iter())
             .zip(erosion.iter())
-            .zip(tectonic.iter())
-            .map(|(((&cont, &peaks), &eros), &tect)| {
+            .map(|((&cont, &peaks), &eros)| {
                 let is_land = cont >= SEA_LEVEL;
                 let erosion_damp = 1.0 - eros * 0.7;
 
@@ -829,8 +826,7 @@ impl BiomeMap {
             .iter()
             .zip(peaks_valleys.iter())
             .zip(erosion.iter())
-            .zip(tectonic.iter())
-            .map(|(((&cont, &peaks), &eros), &tect)| {
+            .map(|((&cont, &peaks), &eros)| {
                 let is_land = cont >= SEA_LEVEL;
                 let erosion_damp = 1.0 - eros * 0.7;
 
@@ -1016,8 +1012,7 @@ impl BiomeMap {
             .iter()
             .zip(peaks_valleys.iter())
             .zip(erosion.iter())
-            .zip(tectonic.iter())
-            .map(|(((&cont, &peaks), &eros), &tect)| {
+            .map(|((&cont, &peaks), &eros)| {
                 let is_land = cont >= SEA_LEVEL;
                 let erosion_damp = 1.0 - eros * 0.7;
 
