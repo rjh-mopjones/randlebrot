@@ -1,43 +1,251 @@
 use noise::{NoiseFn, OpenSimplex};
 use rb_core::NoiseStrategy;
+use std::collections::HashMap;
 
-/// Generates tectonic plate boundaries using Voronoi cells with domain warping.
+/// Boundary type between two tectonic plates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BoundaryType {
+    None,
+    Convergent,
+    Subduction,
+    OceanicSubduction,
+    Divergent,
+    Transform,
+}
+
+/// Full tectonic sample at a world position.
+#[derive(Clone, Copy, Debug)]
+pub struct TectonicSample {
+    pub plate_id: f64,
+    pub boundary_distance: f64,
+    pub stress: f64,
+    pub boundary_type: BoundaryType,
+    pub volcanism: f64,
+}
+
+/// A tectonic plate with physical properties.
+pub struct Plate {
+    pub center: (f64, f64),
+    pub velocity: (f64, f64),
+    pub density: f64,
+    pub age: f64,
+}
+
+/// A volcanic hotspot independent of plate boundaries.
+pub struct Hotspot {
+    pub pos: (f64, f64),
+    pub intensity: f64,
+    pub radius: f64,
+}
+
+/// Registry of plates and hotspots, built deterministically from seed.
+pub struct PlateRegistry {
+    pub plates: Vec<Plate>,
+    pub hotspots: Vec<Hotspot>,
+    cell_to_plate: HashMap<(i32, i32), usize>,
+}
+
+impl PlateRegistry {
+    /// Build a plate registry from seed.
+    /// Generates 20-40 plates with properties and 3-8 hotspots.
+    pub fn from_seed(seed: u32, plate_scale: f64) -> Self {
+        // Use a simple seeded RNG (xorshift-style)
+        let mut rng_state = seed as u64 ^ 0xDEADBEEF_CAFEBABE;
+        let mut next_f64 = || -> f64 {
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 7;
+            rng_state ^= rng_state << 17;
+            (rng_state & 0xFFFFFFFF) as f64 / 0xFFFFFFFF_u64 as f64
+        };
+
+        // Determine world range in cell space
+        // World is typically 1024x512, at scale 0.004 that's ~4x2 cells
+        let world_width = 1024.0;
+        let world_height = 512.0;
+        let cell_range_x = (world_width * plate_scale).ceil() as i32 + 4;
+        let cell_range_y = (world_height * plate_scale).ceil() as i32 + 4;
+
+        // Collect all cell centers
+        let hash = |ix: i32, iy: i32, s: u32| -> (f64, f64) {
+            let n = (ix.wrapping_mul(374761393) as u32)
+                .wrapping_add((iy.wrapping_mul(668265263)) as u32)
+                .wrapping_add(s);
+            let n1 = n.wrapping_mul(1103515245).wrapping_add(12345);
+            let n2 = n1.wrapping_mul(1103515245).wrapping_add(12345);
+            let x = (n1 & 0x7FFFFFFF) as f64 / 0x7FFFFFFF as f64;
+            let y = (n2 & 0x7FFFFFFF) as f64 / 0x7FFFFFFF as f64;
+            (x, y)
+        };
+
+        // Generate candidate cell centers
+        let mut all_cells: Vec<(i32, i32, f64, f64)> = Vec::new();
+        for iy in -2..cell_range_y + 2 {
+            for ix in -2..cell_range_x + 2 {
+                let (ox, oy) = hash(ix, iy, seed.wrapping_add(2));
+                let cx = ix as f64 + ox;
+                let cy = iy as f64 + oy;
+                all_cells.push((ix, iy, cx, cy));
+            }
+        }
+
+        // Select 25-35 plates using rejection sampling
+        let target_count = 25 + (next_f64() * 10.0) as usize;
+        let min_dist_sq = {
+            let d = 1.0 / (target_count as f64).sqrt() * 0.5;
+            d * d
+        };
+
+        let mut plates = Vec::new();
+        let mut selected_centers: Vec<(f64, f64)> = Vec::new();
+
+        // Shuffle cells deterministically
+        let mut indices: Vec<usize> = (0..all_cells.len()).collect();
+        for i in (1..indices.len()).rev() {
+            let j = (next_f64() * (i + 1) as f64) as usize % (i + 1);
+            indices.swap(i, j);
+        }
+
+        for &cell_idx in &indices {
+            if plates.len() >= target_count {
+                break;
+            }
+            let (_ix, _iy, cx, cy) = all_cells[cell_idx];
+
+            // Check minimum distance
+            let too_close = selected_centers.iter().any(|&(sx, sy)| {
+                let dx = cx - sx;
+                let dy = cy - sy;
+                dx * dx + dy * dy < min_dist_sq
+            });
+            if too_close {
+                continue;
+            }
+
+            let vel_angle = next_f64() * std::f64::consts::TAU;
+            let vel_mag = next_f64() * 0.8 + 0.2;
+
+            plates.push(Plate {
+                center: (cx, cy),
+                velocity: (vel_angle.cos() * vel_mag, vel_angle.sin() * vel_mag),
+                density: next_f64(),
+                age: next_f64(),
+            });
+            selected_centers.push((cx, cy));
+        }
+
+        // Build cell-to-plate lookup: each cell maps to its nearest plate
+        let mut cell_to_plate = HashMap::new();
+        for &(ix, iy, cx, cy) in &all_cells {
+            let mut best_plate = 0usize;
+            let mut best_dist = f64::MAX;
+            for (pi, plate) in plates.iter().enumerate() {
+                let dx = cx - plate.center.0;
+                let dy = cy - plate.center.1;
+                let d = dx * dx + dy * dy;
+                if d < best_dist {
+                    best_dist = d;
+                    best_plate = pi;
+                }
+            }
+            cell_to_plate.insert((ix, iy), best_plate);
+        }
+
+        // Generate 3-8 hotspots in world coordinates
+        let hotspot_count = 3 + (next_f64() * 5.0) as usize;
+        let mut hotspots = Vec::with_capacity(hotspot_count);
+        for _ in 0..hotspot_count {
+            hotspots.push(Hotspot {
+                pos: (next_f64() * world_width, next_f64() * world_height),
+                intensity: 0.6 + next_f64() * 0.4,
+                radius: 30.0 + next_f64() * 50.0,
+            });
+        }
+
+        Self {
+            plates,
+            hotspots,
+            cell_to_plate,
+        }
+    }
+
+    /// Get the plate index for a given cell, or find nearest plate if not in lookup.
+    fn plate_for_cell(&self, ix: i32, iy: i32) -> usize {
+        if let Some(&idx) = self.cell_to_plate.get(&(ix, iy)) {
+            return idx;
+        }
+        // Fallback: find nearest plate center
+        let cx = ix as f64 + 0.5;
+        let cy = iy as f64 + 0.5;
+        let mut best = 0;
+        let mut best_dist = f64::MAX;
+        for (i, p) in self.plates.iter().enumerate() {
+            let dx = cx - p.center.0;
+            let dy = cy - p.center.1;
+            let d = dx * dx + dy * dy;
+            if d < best_dist {
+                best_dist = d;
+                best = i;
+            }
+        }
+        best
+    }
+}
+
+/// Generates tectonic plate boundaries using Voronoi cells with heavy domain warping,
+/// plate properties, boundary classification, and multi-source volcanism.
 ///
 /// Output range: [0.0, 1.0] where 0 = on plate boundary, 1 = center of plate
-/// Uses domain-warped Voronoi noise for natural, organic plate shapes with
-/// varied sizes and irregular boundaries.
 pub struct TectonicPlatesStrategy {
     seed: u32,
-    /// Low-frequency noise for large-scale domain warping (organic plate shapes)
-    warp_noise_x: OpenSimplex,
-    warp_noise_y: OpenSimplex,
-    /// Higher-frequency noise for boundary roughness (small wiggles)
-    boundary_noise: OpenSimplex,
+    // Pass 1: large-scale domain warping
+    warp1_x: OpenSimplex,
+    warp1_y: OpenSimplex,
+    // Pass 2: medium-scale kinks and fault offsets
+    warp2_x: OpenSimplex,
+    warp2_y: OpenSimplex,
+    // Boundary perturbation
+    boundary_perturb: OpenSimplex,
+    // Interior stress texture
+    interior_noise: OpenSimplex,
+    // Subduction arc mask (breaks continuous band into discrete peaks)
+    arc_mask_noise: OpenSimplex,
+    // Rift fissure field
+    fissure_noise: OpenSimplex,
     plate_scale: f64,
-    /// How much domain warping to apply (in cell units). Higher = more organic.
-    warp_strength: f64,
+    registry: PlateRegistry,
 }
 
 impl TectonicPlatesStrategy {
     pub fn new(seed: u32) -> Self {
+        let plate_scale = 0.004;
         Self {
             seed,
-            warp_noise_x: OpenSimplex::new(seed.wrapping_add(100)),
-            warp_noise_y: OpenSimplex::new(seed.wrapping_add(200)),
-            boundary_noise: OpenSimplex::new(seed.wrapping_add(300)),
-            plate_scale: 0.004,
-            warp_strength: 1.5, // Warp by up to 1.5 cell widths
+            warp1_x: OpenSimplex::new(seed.wrapping_add(100)),
+            warp1_y: OpenSimplex::new(seed.wrapping_add(101)),
+            warp2_x: OpenSimplex::new(seed.wrapping_add(200)),
+            warp2_y: OpenSimplex::new(seed.wrapping_add(201)),
+            boundary_perturb: OpenSimplex::new(seed.wrapping_add(300)),
+            interior_noise: OpenSimplex::new(seed.wrapping_add(400)),
+            arc_mask_noise: OpenSimplex::new(seed.wrapping_add(500)),
+            fissure_noise: OpenSimplex::new(seed.wrapping_add(600)),
+            plate_scale,
+            registry: PlateRegistry::from_seed(seed, plate_scale),
         }
     }
 
     pub fn with_scale(seed: u32, plate_scale: f64) -> Self {
         Self {
             seed,
-            warp_noise_x: OpenSimplex::new(seed.wrapping_add(100)),
-            warp_noise_y: OpenSimplex::new(seed.wrapping_add(200)),
-            boundary_noise: OpenSimplex::new(seed.wrapping_add(300)),
+            warp1_x: OpenSimplex::new(seed.wrapping_add(100)),
+            warp1_y: OpenSimplex::new(seed.wrapping_add(101)),
+            warp2_x: OpenSimplex::new(seed.wrapping_add(200)),
+            warp2_y: OpenSimplex::new(seed.wrapping_add(201)),
+            boundary_perturb: OpenSimplex::new(seed.wrapping_add(300)),
+            interior_noise: OpenSimplex::new(seed.wrapping_add(400)),
+            arc_mask_noise: OpenSimplex::new(seed.wrapping_add(500)),
+            fissure_noise: OpenSimplex::new(seed.wrapping_add(600)),
             plate_scale,
-            warp_strength: 1.5,
+            registry: PlateRegistry::from_seed(seed, plate_scale),
         }
     }
 
@@ -65,35 +273,44 @@ impl TectonicPlatesStrategy {
         (n & 0xFF) as f64 / 255.0
     }
 
-    /// Apply domain warping: distort input coordinates with low-frequency noise
-    /// to create organic, natural-looking plate shapes instead of geometric Voronoi.
+    /// 2-pass domain warping for irregular, fractured plate boundaries.
     fn warp_coordinates(&self, x: f64, y: f64) -> (f64, f64) {
-        // Use low frequency for large-scale warping (plate-scale distortion)
-        let warp_freq = self.plate_scale * 0.8;
+        // Pass 1: large-scale — bends overall boundary paths
+        let w1x = self.warp1_x.get([x * 0.002, y * 0.002]) * 120.0;
+        let w1y = self.warp1_y.get([x * 0.002 + 43.7, y * 0.002 + 17.3]) * 120.0;
 
-        // Two octaves of warping for more natural shapes
-        let wx1 = self.warp_noise_x.get([x * warp_freq, y * warp_freq]);
-        let wy1 = self.warp_noise_y.get([x * warp_freq, y * warp_freq]);
+        // Pass 2: medium-scale — adds kinks and fault offsets
+        let w2x = self.warp2_x.get([x * 0.008, y * 0.008]) * 40.0;
+        let w2y = self.warp2_y.get([x * 0.008 + 91.2, y * 0.008 + 55.8]) * 40.0;
 
-        // Second octave at double frequency, half amplitude
-        let wx2 = self.warp_noise_x.get([x * warp_freq * 2.3 + 50.0, y * warp_freq * 2.3 + 50.0]);
-        let wy2 = self.warp_noise_y.get([x * warp_freq * 2.3 + 50.0, y * warp_freq * 2.3 + 50.0]);
+        let wx = x + w1x + w2x;
+        let wy = y + w1y + w2y;
 
-        let warp_x = (wx1 + wx2 * 0.5) * self.warp_strength;
-        let warp_y = (wy1 + wy2 * 0.5) * self.warp_strength;
-
-        // Apply warp in scaled (cell) space
-        let sx = x * self.plate_scale + warp_x;
-        let sy = y * self.plate_scale + warp_y;
-
-        (sx, sy)
+        // Scale to cell space for Voronoi lookup
+        (wx * self.plate_scale, wy * self.plate_scale)
     }
 
-    /// Generate tectonic value using domain-warped Voronoi cells.
-    /// Returns (plate_id, boundary_distance) where boundary_distance:
-    /// 0 = at boundary, 1 = center of plate
-    pub fn generate_voronoi(&self, x: f64, y: f64) -> (f64, f64) {
-        // Apply domain warping for organic plate shapes
+    /// Classify the boundary between two plates based on their properties.
+    fn classify_boundary(a: &Plate, b: &Plate, normal: (f64, f64)) -> BoundaryType {
+        let rel_vel = (a.velocity.0 - b.velocity.0, a.velocity.1 - b.velocity.1);
+        let dot = rel_vel.0 * normal.0 + rel_vel.1 * normal.1;
+
+        if dot > 0.1 {
+            // Converging
+            match (a.density > 0.5, b.density > 0.5) {
+                (true, true) => BoundaryType::Convergent,
+                (false, false) => BoundaryType::OceanicSubduction,
+                _ => BoundaryType::Subduction,
+            }
+        } else if dot < -0.1 {
+            BoundaryType::Divergent
+        } else {
+            BoundaryType::Transform
+        }
+    }
+
+    /// Generate full tectonic sample with stress, boundary type, and volcanism.
+    pub fn generate_full(&self, x: f64, y: f64) -> TectonicSample {
         let (sx, sy) = self.warp_coordinates(x, y);
 
         let ix = sx.floor() as i32;
@@ -102,9 +319,11 @@ impl TectonicPlatesStrategy {
         let mut min_dist = f64::MAX;
         let mut second_dist = f64::MAX;
         let mut nearest_cell = (0i32, 0i32);
+        let mut second_cell = (0i32, 0i32);
+        let mut nearest_center = (0.0f64, 0.0f64);
+        let mut second_center = (0.0f64, 0.0f64);
 
-        // Check 5x5 grid — larger neighborhood needed because domain warping
-        // can shift points across cell boundaries
+        // 5x5 neighborhood search
         for dx in -2..=2 {
             for dy in -2..=2 {
                 let cell_x = ix + dx;
@@ -119,44 +338,177 @@ impl TectonicPlatesStrategy {
 
                 if dist < min_dist {
                     second_dist = min_dist;
+                    second_cell = nearest_cell;
+                    second_center = nearest_center;
                     min_dist = dist;
                     nearest_cell = (cell_x, cell_y);
+                    nearest_center = (cx, cy);
                 } else if dist < second_dist {
                     second_dist = dist;
+                    second_cell = (cell_x, cell_y);
+                    second_center = (cx, cy);
                 }
             }
         }
 
-        // Boundary distance from ratio of nearest to second-nearest
-        let ratio = if second_dist > 0.001 {
-            min_dist / second_dist
+        // Look up which plates own these cells
+        let plate_a_idx = self.registry.plate_for_cell(nearest_cell.0, nearest_cell.1);
+        let plate_b_idx = self.registry.plate_for_cell(second_cell.0, second_cell.1);
+
+        let plate_id = self.plate_id_hash(nearest_cell.0, nearest_cell.1);
+
+        // F2 - F1 distance (raw boundary proximity)
+        let f2_minus_f1 = second_dist - min_dist;
+
+        // Boundary perturbation — makes boundary position wobble locally
+        let perturb = self.boundary_perturb.get([x * 0.015, y * 0.015]) * 0.15;
+        let perturbed_dist = f2_minus_f1 + perturb;
+
+        // Determine boundary type
+        let boundary_type = if plate_a_idx == plate_b_idx {
+            BoundaryType::None
+        } else {
+            // Normal approximation: direction between plate centers
+            let pa = &self.registry.plates[plate_a_idx];
+            let pb = &self.registry.plates[plate_b_idx];
+            let ndx = pb.center.0 - pa.center.0;
+            let ndy = pb.center.1 - pa.center.1;
+            let len = (ndx * ndx + ndy * ndy).sqrt().max(0.001);
+            let normal = (ndx / len, ndy / len);
+            Self::classify_boundary(pa, pb, normal)
+        };
+
+        // Stress field computation
+        let (intensity, falloff) = match boundary_type {
+            BoundaryType::Convergent => (1.0, 12.0),
+            BoundaryType::Subduction => (0.8, 10.0),
+            BoundaryType::OceanicSubduction => (0.7, 9.0),
+            BoundaryType::Divergent => (0.4, 15.0),
+            BoundaryType::Transform => (0.25, 18.0),
+            BoundaryType::None => (0.0, 12.0),
+        };
+
+        let boundary_stress = intensity * (-perturbed_dist.abs() * falloff).exp();
+
+        // Interior texture — plate cores have low-amplitude stress variation
+        let interior = self.interior_noise.get([sx * 1.5, sy * 1.5]).abs() * 0.15;
+        let plate_age = if !self.registry.plates.is_empty() {
+            self.registry.plates[plate_a_idx].age
+        } else {
+            0.5
+        };
+        let age_damping = 1.0 - plate_age * 0.7;
+
+        let stress = (boundary_stress + interior * age_damping).clamp(0.0, 1.0);
+
+        // backward compat: boundary_distance = 1 - stress
+        let boundary_distance = 1.0 - stress;
+
+        // === Volcanism: 3 independent sources ===
+
+        // 1. Subduction arc volcanism
+        let arc_volcanism = if matches!(boundary_type, BoundaryType::Subduction | BoundaryType::OceanicSubduction) {
+            // Signed distance toward the overriding (denser) plate
+            let pa = &self.registry.plates[plate_a_idx];
+            let pb = &self.registry.plates[plate_b_idx];
+
+            // Direction from boundary midpoint toward the continental/denser plate
+            let overriding_center = if pa.density > pb.density {
+                nearest_center
+            } else {
+                second_center
+            };
+
+            // Distance from point to nearest boundary (approximated by midpoint of F1/F2)
+            let mid_x = (nearest_center.0 + second_center.0) / 2.0;
+            let mid_y = (nearest_center.1 + second_center.1) / 2.0;
+
+            // Direction toward overriding plate from boundary
+            let to_over_x = overriding_center.0 - mid_x;
+            let to_over_y = overriding_center.1 - mid_y;
+            let to_over_len = (to_over_x * to_over_x + to_over_y * to_over_y).sqrt().max(0.001);
+
+            // Project point's offset from boundary midpoint onto overriding direction
+            let point_from_mid_x = sx - mid_x;
+            let point_from_mid_y = sy - mid_y;
+            // Signed distance in cell units toward overriding plate
+            let signed_dist_cell = (point_from_mid_x * to_over_x + point_from_mid_y * to_over_y) / to_over_len;
+
+            // Convert to world units (approximate)
+            let signed_dist = signed_dist_cell / self.plate_scale;
+
+            let arc_min = 80.0;
+            let arc_max = 200.0;
+            let arc_peak = 130.0;
+
+            if signed_dist >= arc_min && signed_dist <= arc_max {
+                let t = 1.0 - ((signed_dist - arc_peak) / 60.0).powi(2);
+                let base = t.max(0.0) * 0.8;
+
+                // Break into discrete peaks
+                let mask = self.arc_mask_noise.get([x * 0.025, y * 0.025]);
+                let mask = (mask * 2.5).max(0.0).min(1.0);
+                base * mask
+            } else {
+                0.0
+            }
         } else {
             0.0
         };
 
-        let boundary_dist = (1.0 - ratio).clamp(0.0, 1.0);
+        // 2. Rift volcanism (divergent boundaries only)
+        let rift_volcanism = if boundary_type == BoundaryType::Divergent {
+            let base = 0.4 * (-perturbed_dist.abs() * 30.0).exp(); // very tight falloff
 
-        // Add higher-frequency noise for boundary roughness (small wiggles)
-        let roughness = self.boundary_noise.get([x * 0.015, y * 0.015]) * 0.08
-            + self.boundary_noise.get([x * 0.04, y * 0.04]) * 0.04;
-        let adjusted_boundary = (boundary_dist + roughness).clamp(0.0, 1.0);
+            let fissure = self.fissure_noise.get([x * 0.04, y * 0.04]);
+            let fissure_mask = (fissure - 0.3).max(0.0) * 3.0;
+            base * fissure_mask
+        } else {
+            0.0
+        };
 
-        let plate_id = self.plate_id_hash(nearest_cell.0, nearest_cell.1);
+        // 3. Hotspot volcanism (independent of plate geometry)
+        let hotspot_volcanism: f64 = self.registry.hotspots.iter().map(|h| {
+            let dx = x - h.pos.0;
+            let dy = y - h.pos.1;
+            let d2 = dx * dx + dy * dy;
+            let base = h.intensity * (-d2 / (h.radius * h.radius)).exp();
 
-        (plate_id, adjusted_boundary)
+            let texture = self.interior_noise.get([x * 0.03 + h.pos.0, y * 0.03 + h.pos.1]) * 0.3;
+            (base + base * texture).clamp(0.0, 1.0)
+        }).sum::<f64>().min(1.0);
+
+        let volcanism = (arc_volcanism + rift_volcanism * 0.5 + hotspot_volcanism * 0.9)
+            .clamp(0.0, 1.0);
+
+        TectonicSample {
+            plate_id,
+            boundary_distance,
+            stress,
+            boundary_type,
+            volcanism,
+        }
+    }
+
+    /// Generate tectonic value using domain-warped Voronoi cells.
+    /// Returns (plate_id, boundary_distance) where boundary_distance:
+    /// 0 = at boundary, 1 = center of plate
+    pub fn generate_voronoi(&self, x: f64, y: f64) -> (f64, f64) {
+        let sample = self.generate_full(x, y);
+        (sample.plate_id, sample.boundary_distance)
     }
 
     /// Returns distance from nearest plate boundary.
     /// 0 = on boundary, 1 = center of plate
     pub fn plate_boundary_distance(&self, x: f64, y: f64, _detail_level: u32) -> f64 {
-        let (_, boundary_dist) = self.generate_voronoi(x, y);
-        boundary_dist
+        let sample = self.generate_full(x, y);
+        sample.boundary_distance
     }
 
     /// Returns the plate ID (for visualization/coloring).
     pub fn plate_id(&self, x: f64, y: f64) -> f64 {
-        let (plate_id, _) = self.generate_voronoi(x, y);
-        plate_id
+        let sample = self.generate_full(x, y);
+        sample.plate_id
     }
 }
 
@@ -201,7 +553,6 @@ mod tests {
         let (id2, _) = strat2.generate_voronoi(500.0, 500.0);
 
         // Different seeds should generally produce different plate IDs
-        // (not a guarantee but likely)
         assert!(
             (id1 - id2).abs() > 0.001 || true,
             "Seeds should produce different layouts"
@@ -212,8 +563,6 @@ mod tests {
     fn voronoi_has_boundaries() {
         let strategy = TectonicPlatesStrategy::new(42);
 
-        // Sample many points - should find some near boundaries (low values)
-        // and some near centers (high values)
         let mut found_boundary = false;
         let mut found_center = false;
 
@@ -232,5 +581,51 @@ mod tests {
 
         assert!(found_boundary, "Should find points near boundaries");
         assert!(found_center, "Should find points near plate centers");
+    }
+
+    #[test]
+    fn generate_full_returns_valid_sample() {
+        let strategy = TectonicPlatesStrategy::new(42);
+        let sample = strategy.generate_full(500.0, 250.0);
+
+        assert!(sample.plate_id >= 0.0 && sample.plate_id <= 1.0);
+        assert!(sample.boundary_distance >= 0.0 && sample.boundary_distance <= 1.0);
+        assert!(sample.stress >= 0.0 && sample.stress <= 1.0);
+        assert!(sample.volcanism >= 0.0 && sample.volcanism <= 1.0);
+    }
+
+    #[test]
+    fn volcanism_is_not_always_at_boundaries() {
+        let strategy = TectonicPlatesStrategy::new(42);
+
+        // Sample many points. With the new system, volcanism should sometimes
+        // occur away from boundaries (hotspots, offset arcs)
+        let mut volcanism_away_from_boundary = false;
+
+        for i in 0..2000 {
+            let x = (i as f64 * 7.3) % 1000.0;
+            let y = (i as f64 * 11.7) % 500.0;
+            let sample = strategy.generate_full(x, y);
+
+            // High boundary_distance means far from boundary
+            if sample.volcanism > 0.1 && sample.boundary_distance > 0.5 {
+                volcanism_away_from_boundary = true;
+                break;
+            }
+        }
+
+        // This is expected due to hotspots
+        assert!(
+            volcanism_away_from_boundary,
+            "Should find volcanism away from plate boundaries (hotspots)"
+        );
+    }
+
+    #[test]
+    fn plate_registry_has_plates() {
+        let registry = PlateRegistry::from_seed(42, 0.004);
+        assert!(!registry.plates.is_empty(), "Should have plates");
+        assert!(registry.plates.len() >= 10, "Should have at least 10 plates, got {}", registry.plates.len());
+        assert!(!registry.hotspots.is_empty(), "Should have hotspots");
     }
 }

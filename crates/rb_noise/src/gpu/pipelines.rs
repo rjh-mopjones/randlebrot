@@ -15,9 +15,6 @@ pub struct NoisePipelines {
     pub rock_hardness: ComputePipeline,
     pub rock_hardness_layout: BindGroupLayout,
 
-    pub tectonic: ComputePipeline,
-    pub tectonic_layout: BindGroupLayout,
-
     pub peaks_valleys: ComputePipeline,
     pub peaks_valleys_layout: BindGroupLayout,
 
@@ -42,10 +39,6 @@ impl NoisePipelines {
             "{}{}{}",
             INDEPENDENT_BINDINGS, OPEN_SIMPLEX_2D_FUNCS, ROCK_HARDNESS_MAIN
         );
-        let tectonic_shader = format!(
-            "{}{}{}",
-            INDEPENDENT_BINDINGS, OPEN_SIMPLEX_2D_FUNCS, TECTONIC_MAIN
-        );
         let peaks_valleys_shader = format!(
             "{}{}{}",
             INDEPENDENT_BINDINGS, OPEN_SIMPLEX_2D_FUNCS, PEAKS_VALLEYS_MAIN
@@ -66,9 +59,6 @@ impl NoisePipelines {
         let (rock_hardness, rock_hardness_layout) =
             Self::create_perm_pipeline(device, "RockHardness", &rock_hardness_shader);
 
-        let (tectonic, tectonic_layout) =
-            Self::create_perm_pipeline(device, "Tectonic", &tectonic_shader);
-
         let (peaks_valleys, peaks_valleys_layout) =
             Self::create_perm_pipeline(device, "PeaksValleys", &peaks_valleys_shader);
 
@@ -82,8 +72,6 @@ impl NoisePipelines {
             light_level_layout,
             rock_hardness,
             rock_hardness_layout,
-            tectonic,
-            tectonic_layout,
             peaks_valleys,
             peaks_valleys_layout,
             humidity,
@@ -468,77 +456,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let raw = fbm_open_simplex(nx, ny, params.octaves, params.frequency, params.persistence, params.lacunarity);
     // Map [-1, 1] to [0, 1]
     output[idx] = clamp((raw + 1.0) * 0.5, 0.0, 1.0);
-}
-"#;
-
-/// Tectonic plates shader - Voronoi cells with OpenSimplex roughness.
-/// Contains the cell_hash function and main entry point.
-const TECTONIC_MAIN: &str = r#"
-// Hash function matching CPU TectonicPlatesStrategy::hash()
-// IMPORTANT: Must do signed multiplication first, then convert to unsigned,
-// to match Rust's (ix.wrapping_mul(374761393) as u32) behavior
-fn cell_hash(ix: i32, iy: i32, seed: u32) -> vec2<f32> {
-    // Signed multiplication (wrapping) then convert to unsigned
-    let term1 = ix * 374761393;      // i32 wrapping multiplication
-    let term2 = iy * 668265263;      // i32 wrapping multiplication
-    var n = u32(term1) + u32(term2) + seed;  // Now convert to u32 and add
-    let n1 = n * 1103515245u + 12345u;
-    let n2 = n1 * 1103515245u + 12345u;
-    let x = f32(n1 & 0x7FFFFFFFu) / f32(0x7FFFFFFFu);
-    let y = f32(n2 & 0x7FFFFFFFu) / f32(0x7FFFFFFFu);
-    return vec2<f32>(x, y);
-}
-
-@compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-
-    let idx = gid.y * params.width + gid.x;
-    let wx = params.world_x + f32(gid.x) * params.scale;
-    let wy = params.world_y + f32(gid.y) * params.scale;
-
-    // Scale for tectonic plates - matches CPU plate_scale = 0.004
-    let plate_scale = 0.004;
-    let sx = wx * plate_scale;
-    let sy = wy * plate_scale;
-
-    let ix = i32(floor(sx));
-    let iy = i32(floor(sy));
-
-    var min_dist = 1e10f;
-    var second_dist = 1e10f;
-
-    // Check 3x3 grid of cells
-    for (var dy = -1; dy <= 1; dy++) {
-        for (var dx = -1; dx <= 1; dx++) {
-            let cell_x = ix + dx;
-            let cell_y = iy + dy;
-            let offset = cell_hash(cell_x, cell_y, params.seed);
-            let cx = f32(cell_x) + offset.x;
-            let cy = f32(cell_y) + offset.y;
-            let dist = sqrt((sx - cx) * (sx - cx) + (sy - cy) * (sy - cy));
-
-            if (dist < min_dist) {
-                second_dist = min_dist;
-                min_dist = dist;
-            } else if (dist < second_dist) {
-                second_dist = dist;
-            }
-        }
-    }
-
-    // Boundary distance calculation - matches CPU
-    var ratio = 0.0f;
-    if (second_dist > 0.001) {
-        ratio = min_dist / second_dist;
-    }
-    var boundary_dist = clamp(1.0 - ratio, 0.0, 1.0);
-
-    // Add roughness using OpenSimplex (matching CPU's noise.get([x * 0.02, y * 0.02]) * 0.1)
-    let roughness = open_simplex_2d(wx * 0.02, wy * 0.02) * 0.1;
-    let adjusted_boundary = clamp(boundary_dist + roughness, 0.0, 1.0);
-
-    output[idx] = adjusted_boundary;
 }
 "#;
 

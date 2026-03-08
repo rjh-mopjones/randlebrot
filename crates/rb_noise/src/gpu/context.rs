@@ -127,14 +127,12 @@ impl GpuNoiseContext {
 
         // Each layer needs its own permutation table (matching CPU behavior)
         let cont_seed = seed;
-        let tect_seed = seed.wrapping_add(2);
         let peak_seed = seed.wrapping_add(4);
         let humi_seed = seed.wrapping_add(5);
         let light_seed = seed.wrapping_add(6);
         let rock_seed = seed.wrapping_add(7);
 
         let cont_perm = make_perm_buffer(cont_seed, "Continentalness perm");
-        let tect_perm = make_perm_buffer(tect_seed, "Tectonic perm");
         let peak_perm = make_perm_buffer(peak_seed, "PeaksValleys perm");
         let humi_perm = make_perm_buffer(humi_seed, "Humidity perm");
         let light_perm = make_perm_buffer(light_seed, "LightLevel perm");
@@ -175,17 +173,6 @@ impl GpuNoiseContext {
             &rock_perm,
         );
 
-        let tectonic = self.dispatch_tectonic(
-            tect_seed,
-            width,
-            height,
-            world_x,
-            world_y,
-            scale,
-            detail_level,
-            &tect_perm,
-        );
-
         let peaks_valleys = self.dispatch_peaks_valleys(
             peak_seed,
             width,
@@ -213,7 +200,6 @@ impl GpuNoiseContext {
 
         GpuNoiseResult {
             continentalness,
-            tectonic,
             peaks_valleys,
             humidity,
             light_level,
@@ -512,88 +498,6 @@ impl GpuNoiseContext {
 
         self.dispatch_compute(
             &self.pipelines.rock_hardness,
-            &bind_group,
-            &output_buffer,
-            &staging_buffer,
-            width,
-            height,
-            buffer_size,
-        )
-    }
-
-    /// Dispatch tectonic plates noise generation.
-    fn dispatch_tectonic(
-        &self,
-        seed: u32,
-        width: usize,
-        height: usize,
-        world_x: f64,
-        world_y: f64,
-        scale: f64,
-        _detail_level: u32,
-        perm_buffer: &wgpu::Buffer,
-    ) -> Vec<f32> {
-        let params = NoiseParams {
-            seed,
-            width: width as u32,
-            height: height as u32,
-            octaves: 0, // Voronoi doesn't use octaves
-            frequency: 1.0,
-            persistence: 0.0,
-            lacunarity: 0.0,
-            scale: scale as f32,
-            world_x: world_x as f32,
-            world_y: world_y as f32,
-            world_height: 0.0,
-            _padding: 0.0,
-        };
-
-        let total_pixels = width * height;
-        let buffer_size = (total_pixels * std::mem::size_of::<f32>()) as u64;
-
-        let params_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Tectonic params"),
-                contents: bytemuck::cast_slice(&[params]),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-
-        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Tectonic output"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Tectonic staging"),
-            size: buffer_size,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Tectonic bind group"),
-            layout: &self.pipelines.tectonic_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: params_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: perm_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: output_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
-        self.dispatch_compute(
-            &self.pipelines.tectonic,
             &bind_group,
             &output_buffer,
             &staging_buffer,

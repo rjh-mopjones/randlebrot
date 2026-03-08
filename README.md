@@ -52,21 +52,24 @@ randlebrot/
 │   │       ├── derived/
 │   │       │   └── mod.rs             # Derived layer functions: derive_temperature,
 │   │       │                          #   derive_erosion, derive_peaks_valleys, derive_heightmap
+│   │       │                          #   (volcanism removed — now computed in tectonic strategy)
 │   │       ├── strategy/              # NoiseStrategy implementations (fBm-based)
 │   │       │   ├── mod.rs             # Re-exports all strategies
 │   │       │   ├── continentalness.rs # 16-octave fBm, land vs ocean
 │   │       │   ├── light_level.rs     # Radial light from sub-stellar point + scatter noise
 │   │       │   ├── rock_hardness.rs   # 3-octave fBm for geological hardness
 │   │       │   ├── temperature.rs     # Base temperature strategy (legacy)
-│   │       │   ├── tectonic.rs        # Voronoi plate boundaries + plate IDs
+│   │       │   ├── tectonic.rs        # PlateRegistry, domain-warped Voronoi, boundary
+│   │       │   │                     #   classification, 3-source volcanism (arcs/rifts/hotspots)
 │   │       │   ├── erosion.rs         # Erosion dependent on continentalness
 │   │       │   ├── peaks_valleys.rs   # Ridgeline noise for mountains
 │   │       │   ├── humidity.rs        # Moisture from ocean distance + light-level drying
 │   │       │   └── resource.rs        # Per-resource-type noise with geological bias
 │   │       └── gpu/                   # GPU compute shader acceleration
-│   │           ├── mod.rs             # GpuNoiseResult struct
+│   │           ├── mod.rs             # GpuNoiseResult struct (no tectonic — CPU only)
 │   │           ├── context.rs         # GpuNoiseContext: wgpu device/queue, layer dispatch
-│   │           ├── pipelines.rs       # WGSL compute shaders for each base layer
+│   │           ├── pipelines.rs       # WGSL shaders: continentalness, peaks, humidity,
+│   │           │                      #   light_level, rock_hardness (tectonic removed)
 │   │           └── perm_table.rs      # Permutation table for GPU noise
 │   │
 │   ├── rb_world/                       # World definition and high-level world systems

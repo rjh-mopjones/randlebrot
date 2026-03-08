@@ -34,7 +34,6 @@ pub use derived::{
     derive_aridity, derive_erosion, derive_heightmap, derive_peaks_valleys,
     derive_precipitation_type, derive_resource_richness, derive_river_moisture,
     derive_snowpack, derive_soil_type, derive_temperature, derive_vegetation_density,
-    derive_volcanism,
 };
 
 #[cfg(feature = "gpu")]

@@ -27,7 +27,6 @@ pub use pipelines::NoisePipelines;
 #[derive(Debug)]
 pub struct GpuNoiseResult {
     pub continentalness: Vec<f32>,
-    pub tectonic: Vec<f32>,
     pub peaks_valleys: Vec<f32>,
     pub humidity: Vec<f32>,
     pub light_level: Vec<f32>,
@@ -39,7 +38,6 @@ impl GpuNoiseResult {
     pub fn to_f64_vecs(self) -> GpuNoiseResultF64 {
         GpuNoiseResultF64 {
             continentalness: self.continentalness.into_iter().map(|v| v as f64).collect(),
-            tectonic: self.tectonic.into_iter().map(|v| v as f64).collect(),
             peaks_valleys: self.peaks_valleys.into_iter().map(|v| v as f64).collect(),
             humidity: self.humidity.into_iter().map(|v| v as f64).collect(),
             light_level: self.light_level.into_iter().map(|v| v as f64).collect(),
@@ -52,7 +50,6 @@ impl GpuNoiseResult {
 #[derive(Debug)]
 pub struct GpuNoiseResultF64 {
     pub continentalness: Vec<f64>,
-    pub tectonic: Vec<f64>,
     pub peaks_valleys: Vec<f64>,
     pub humidity: Vec<f64>,
     pub light_level: Vec<f64>,

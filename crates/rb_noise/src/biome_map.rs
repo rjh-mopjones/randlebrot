@@ -137,13 +137,13 @@ impl BiomeMap {
                 let fy = y as f64;
 
                 let cont = cont_strategy.generate(fx, fy, 0);
-                let (plate_id, tectonic) = tectonic_strategy.generate_voronoi(fx, fy);
+                let tect_sample = tectonic_strategy.generate_full(fx, fy);
                 let raw_peaks = raw_peaks_strategy.generate(fx, fy, 0);
                 let light = light_level_strategy.generate(fx, fy, 0);
                 let rock = rock_hardness_strategy.generate(fx, fy, 0);
                 let humid = humidity_strategy.generate_with_continentalness(fx, fy, 0, cont);
 
-                (cont, tectonic, plate_id, raw_peaks, light, rock, humid)
+                (cont, tect_sample.boundary_distance, tect_sample.plate_id, raw_peaks, light, rock, humid, tect_sample.volcanism)
             })
             .collect();
 
@@ -152,9 +152,8 @@ impl BiomeMap {
 
         let phase2_data: Vec<_> = base_data
             .par_iter()
-            .map(|&(cont, tect, _, raw_peaks, light, rock, humid)| {
+            .map(|&(cont, tect, _, raw_peaks, light, rock, humid, volc)| {
                 let peaks = derived::derive_peaks_valleys(raw_peaks, tect, rock);
-                let volc = derived::derive_volcanism(tect);
                 let hm = derived::derive_heightmap(cont, tect, peaks);
                 let temp = derived::derive_temperature(light, hm, humid);
                 let eros = derived::derive_erosion(hm, rock, humid);
@@ -187,7 +186,7 @@ impl BiomeMap {
         let mut biomes = Vec::with_capacity(total_pixels);
 
         for (base, p2) in base_data.iter().zip(phase2_data.iter()) {
-            let (cont, tect, pid, _raw_peaks, light, rock, humid) = *base;
+            let (cont, tect, pid, _raw_peaks, light, rock, humid, _volc_from_base) = *base;
             let (peaks, volc, hm, temp, eros, arid, precip, res, snow, biome) = *p2;
 
             continentalness.push(cont);
@@ -289,21 +288,24 @@ impl BiomeMap {
 
         // Convert f32 GPU results to f64
         let continentalness: Vec<f64> = layers.continentalness.iter().map(|&v| v as f64).collect();
-        let gpu_tectonic: Vec<f64> = layers.tectonic.iter().map(|&v| v as f64).collect();
         let raw_peaks: Vec<f64> = layers.peaks_valleys.iter().map(|&v| v as f64).collect();
         let gpu_light_level: Vec<f64> = layers.light_level.iter().map(|&v| v as f64).collect();
         let gpu_rock_hardness: Vec<f64> = layers.rock_hardness.iter().map(|&v| v as f64).collect();
 
-        // GPU doesn't compute plate IDs — generate them on CPU in parallel
+        // Tectonic computed on CPU (too complex for GPU shader)
         let tectonic_strategy = TectonicPlatesStrategy::new(seed.wrapping_add(2));
-        let tectonic_plate_ids: Vec<f64> = (0..total_pixels)
+        let tectonic_data: Vec<_> = (0..total_pixels)
             .into_par_iter()
             .map(|idx| {
                 let x = (idx % width) as f64;
                 let y = (idx / width) as f64;
-                tectonic_strategy.plate_id(x, y)
+                tectonic_strategy.generate_full(x, y)
             })
             .collect();
+
+        let gpu_tectonic: Vec<f64> = tectonic_data.iter().map(|s| s.boundary_distance).collect();
+        let tectonic_plate_ids: Vec<f64> = tectonic_data.iter().map(|s| s.plate_id).collect();
+        let tectonic_volcanism: Vec<f64> = tectonic_data.iter().map(|s| s.volcanism).collect();
 
         // Humidity from GPU is pure base (fBm + water distance, no light drying)
         let gpu_humidity: Vec<f64> = layers.humidity.iter().map(|&v| v as f64).collect();
@@ -320,7 +322,7 @@ impl BiomeMap {
                 let humid = gpu_humidity[idx];
 
                 let peaks = derived::derive_peaks_valleys(raw_peaks[idx], tect, rock);
-                let volc = derived::derive_volcanism(tect);
+                let volc = tectonic_volcanism[idx];
                 let hm = derived::derive_heightmap(cont, tect, peaks);
                 let temp = derived::derive_temperature(light, hm, humid);
                 let eros = derived::derive_erosion(hm, rock, humid);
@@ -671,14 +673,16 @@ impl BiomeMap {
                 let wy = world_y + (py as f64 * scale);
 
                 let cont = cont_strategy.generate(wx, wy, detail_level);
-                let (pid, tect) = tectonic_strategy.generate_voronoi(wx, wy);
+                let tect_sample = tectonic_strategy.generate_full(wx, wy);
+                let tect = tect_sample.boundary_distance;
+                let pid = tect_sample.plate_id;
                 let raw_peaks = raw_peaks_strategy.generate(wx, wy, detail_level);
                 let light = light_level_strategy.generate(wx, wy, detail_level);
                 let rock = rock_hardness_strategy.generate(wx, wy, detail_level);
                 let humid = humidity_strategy.generate_with_continentalness(wx, wy, detail_level, cont);
 
                 let peaks = derived::derive_peaks_valleys(raw_peaks, tect, rock);
-                let volc = derived::derive_volcanism(tect);
+                let volc = tect_sample.volcanism;
                 let hm = derived::derive_heightmap(cont, tect, peaks);
                 let temp = derived::derive_temperature(light, hm, humid);
                 let eros = derived::derive_erosion(hm, rock, humid);
@@ -840,7 +844,9 @@ impl BiomeMap {
 
                     // Phase 1: Base layers
                     let cont = cont_strategy.generate(wx, wy, detail_level);
-                    let (pid, tect) = tectonic_strategy.generate_voronoi(wx, wy);
+                    let tect_sample = tectonic_strategy.generate_full(wx, wy);
+                    let tect = tect_sample.boundary_distance;
+                    let pid = tect_sample.plate_id;
                     let raw_peaks = raw_peaks_strategy.generate(wx, wy, detail_level);
                     let light = light_level_strategy.generate(wx, wy, detail_level);
                     let rock = rock_hardness_strategy.generate(wx, wy, detail_level);
@@ -848,7 +854,7 @@ impl BiomeMap {
 
                     // Phase 2: Derived layers
                     let peaks = derived::derive_peaks_valleys(raw_peaks, tect, rock);
-                    let volc = derived::derive_volcanism(tect);
+                    let volc = tect_sample.volcanism;
                     let hm = derived::derive_heightmap(cont, tect, peaks);
                     let temp = derived::derive_temperature(light, hm, humid);
                     let eros = derived::derive_erosion(hm, rock, humid);
@@ -1036,23 +1042,27 @@ impl BiomeMap {
         progress.increment(LayerId::RockHardness, total_pixels);
 
         let continentalness: Vec<f64> = layers.continentalness.iter().map(|&v| v as f64).collect();
-        let gpu_tectonic: Vec<f64> = layers.tectonic.iter().map(|&v| v as f64).collect();
         let raw_peaks: Vec<f64> = layers.peaks_valleys.iter().map(|&v| v as f64).collect();
         let gpu_light_level: Vec<f64> = layers.light_level.iter().map(|&v| v as f64).collect();
         let gpu_rock_hardness: Vec<f64> = layers.rock_hardness.iter().map(|&v| v as f64).collect();
         let gpu_humidity: Vec<f64> = layers.humidity.iter().map(|&v| v as f64).collect();
 
+        // Tectonic computed on CPU (too complex for GPU shader)
         let tectonic_strategy = TectonicPlatesStrategy::new(seed.wrapping_add(2));
-        let tectonic_plate_ids: Vec<f64> = (0..total_pixels)
+        let tectonic_data: Vec<_> = (0..total_pixels)
             .into_par_iter()
             .map(|idx| {
                 let px = idx % output_size;
                 let py = idx / output_size;
                 let wx = world_x + (px as f64 * scale);
                 let wy = world_y + (py as f64 * scale);
-                tectonic_strategy.plate_id(wx, wy)
+                tectonic_strategy.generate_full(wx, wy)
             })
             .collect();
+
+        let gpu_tectonic: Vec<f64> = tectonic_data.iter().map(|s| s.boundary_distance).collect();
+        let tectonic_plate_ids: Vec<f64> = tectonic_data.iter().map(|s| s.plate_id).collect();
+        let tectonic_volcanism: Vec<f64> = tectonic_data.iter().map(|s| s.volcanism).collect();
 
         progress.increment(LayerId::PeaksValleys, total_pixels);
         progress.increment(LayerId::Humidity, total_pixels);
@@ -1069,7 +1079,7 @@ impl BiomeMap {
                 let humid = gpu_humidity[idx];
 
                 let peaks = derived::derive_peaks_valleys(raw_peaks[idx], tect, rock);
-                let volc = derived::derive_volcanism(tect);
+                let volc = tectonic_volcanism[idx];
                 let hm = derived::derive_heightmap(cont, tect, peaks);
                 let temp = derived::derive_temperature(light, hm, humid);
                 let eros = derived::derive_erosion(hm, rock, humid);

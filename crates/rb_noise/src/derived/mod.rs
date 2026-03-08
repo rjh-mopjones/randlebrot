@@ -50,20 +50,6 @@ pub fn derive_peaks_valleys(base_pv: f64, tectonic: f64, rock_hardness: f64) -> 
     (base_pv * tectonic_amp * hardness_sustain).clamp(-1.0, 1.0)
 }
 
-/// Volcanism concentrated at plate boundaries.
-///
-/// On a tidally locked world, tidal flexing intensifies volcanic activity.
-/// Only significant very close to plate boundaries (tectonic < ~0.15).
-/// - tectonic: boundary distance [0, 1] where 0 = boundary
-/// Output: [0, 1] where 1.0 = highly volcanic
-pub fn derive_volcanism(tectonic: f64) -> f64 {
-    // Sharp falloff: only the closest ~15% to boundaries get significant volcanism
-    let proximity = (1.0 - tectonic).max(0.0);
-    // Remap [0.85, 1.0] proximity to [0, 1], everything below 0.85 is zero
-    let remapped = ((proximity - 0.85) / 0.15).clamp(0.0, 1.0);
-    remapped.powf(2.0)
-}
-
 /// Aridity from temperature and humidity.
 ///
 /// This is where the tidal-lock drying effect lives. High temperature + low humidity = arid.
@@ -228,16 +214,6 @@ mod tests {
         let at_boundary = derive_heightmap(0.1, 0.0, 0.0);
         let at_center = derive_heightmap(0.1, 1.0, 0.0);
         assert!(at_boundary > at_center, "Boundary ({}) should have more uplift than center ({})", at_boundary, at_center);
-    }
-
-    #[test]
-    fn volcanism_at_boundaries() {
-        let at_boundary = derive_volcanism(0.0); // tectonic = 0 means at boundary
-        let at_center = derive_volcanism(1.0);   // tectonic = 1 means plate center
-        let mid = derive_volcanism(0.5);         // mid-plate
-        assert!(at_boundary > at_center, "Boundary volcanism ({}) should exceed center ({})", at_boundary, at_center);
-        assert!(at_boundary > 0.5, "Boundary volcanism ({}) should be significant", at_boundary);
-        assert!(mid < 0.01, "Mid-plate volcanism ({}) should be near zero", mid);
     }
 
     #[test]
