@@ -263,6 +263,10 @@ fn start_generation(
     task_res.biome_map = Some(biome_map.clone());
     println!("  Resources: {} cells with deposits", biome_map.resources.cells_with_resources());
 
+    // Save debug layer images
+    let debug_path = std::path::Path::new("debug_layers");
+    biome_map.save_debug_layers(debug_path);
+
     // Generate civilization
     println!("Generating civilization...");
     let civ_config = CivilizationConfig {
@@ -594,6 +598,10 @@ fn regenerate_world(
     // Generate new biome map with all layers
     let biome_map = Arc::new(BiomeMap::generate_with_backend(world_def.seed, world_def.width, world_def.height, backend));
     println!("  Resources: {} cells with deposits", biome_map.resources.cells_with_resources());
+
+    // Save debug layer images
+    let debug_path = std::path::Path::new("debug_layers");
+    biome_map.save_debug_layers(debug_path);
 
     // Generate image for current layer
     let image_data = biome_map.to_layer_image(current_layer.0);

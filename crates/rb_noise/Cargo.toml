@@ -10,6 +10,7 @@ gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster", "dep:rand", "dep:rand_xorshif
 [dependencies]
 rb_core.workspace = true
 noise.workspace = true
+image.workspace = true
 bevy.workspace = true
 rayon = "1.10"
 smallvec = "1.13"
@@ -27,3 +28,7 @@ bevy.workspace = true
 [[example]]
 name = "noise_preview"
 path = "examples/noise_preview.rs"
+
+[[example]]
+name = "save_debug_layers"
+path = "examples/save_debug_layers.rs"

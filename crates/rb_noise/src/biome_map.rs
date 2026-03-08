@@ -467,6 +467,45 @@ impl BiomeMap {
         self.to_layer_image(NoiseLayer::Continentalness)
     }
 
+    /// Save all noise layers as PNG files to `debug_layers/` directory.
+    /// Creates the directory if it doesn't exist.
+    pub fn save_debug_layers(&self, base_path: &std::path::Path) {
+        use image::{ImageBuffer, Rgba};
+
+        if let Err(e) = std::fs::create_dir_all(base_path) {
+            eprintln!("Failed to create debug_layers dir: {e}");
+            return;
+        }
+
+        let layers = [
+            (NoiseLayer::Aggregate, "aggregate"),
+            (NoiseLayer::Continentalness, "continentalness"),
+            (NoiseLayer::Temperature, "temperature"),
+            (NoiseLayer::Tectonic, "tectonic"),
+            (NoiseLayer::Erosion, "erosion"),
+            (NoiseLayer::PeaksValleys, "peaks_valleys"),
+            (NoiseLayer::Humidity, "humidity"),
+            (NoiseLayer::Rivers, "rivers"),
+        ];
+
+        for (layer, name) in &layers {
+            let rgba_data = self.to_layer_image(*layer);
+            let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(
+                self.width as u32,
+                self.height as u32,
+                rgba_data,
+            )
+            .expect("image buffer size mismatch");
+
+            let path = base_path.join(format!("{name}.png"));
+            if let Err(e) = img.save(&path) {
+                eprintln!("Failed to save {}: {e}", path.display());
+            } else {
+                println!("  Saved debug layer: {}", path.display());
+            }
+        }
+    }
+
     /// Get biome at specific coordinates.
     pub fn get_biome(&self, x: usize, y: usize) -> Option<TileType> {
         if x < self.width && y < self.height {

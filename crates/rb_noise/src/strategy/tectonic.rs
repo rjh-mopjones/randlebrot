@@ -1,36 +1,48 @@
 use noise::{NoiseFn, OpenSimplex};
 use rb_core::NoiseStrategy;
 
-/// Generates tectonic plate boundaries using Voronoi cells.
+/// Generates tectonic plate boundaries using Voronoi cells with domain warping.
 ///
 /// Output range: [0.0, 1.0] where 0 = on plate boundary, 1 = center of plate
-/// Uses Voronoi noise for distinct plates with visible boundaries.
+/// Uses domain-warped Voronoi noise for natural, organic plate shapes with
+/// varied sizes and irregular boundaries.
 pub struct TectonicPlatesStrategy {
     seed: u32,
-    noise: OpenSimplex,
-    plate_scale: f64, // Controls plate size
+    /// Low-frequency noise for large-scale domain warping (organic plate shapes)
+    warp_noise_x: OpenSimplex,
+    warp_noise_y: OpenSimplex,
+    /// Higher-frequency noise for boundary roughness (small wiggles)
+    boundary_noise: OpenSimplex,
+    plate_scale: f64,
+    /// How much domain warping to apply (in cell units). Higher = more organic.
+    warp_strength: f64,
 }
 
 impl TectonicPlatesStrategy {
     pub fn new(seed: u32) -> Self {
         Self {
             seed,
-            noise: OpenSimplex::new(seed),
-            plate_scale: 0.004, // Creates ~8-12 plates across typical world
+            warp_noise_x: OpenSimplex::new(seed.wrapping_add(100)),
+            warp_noise_y: OpenSimplex::new(seed.wrapping_add(200)),
+            boundary_noise: OpenSimplex::new(seed.wrapping_add(300)),
+            plate_scale: 0.004,
+            warp_strength: 1.5, // Warp by up to 1.5 cell widths
         }
     }
 
     pub fn with_scale(seed: u32, plate_scale: f64) -> Self {
         Self {
             seed,
-            noise: OpenSimplex::new(seed),
+            warp_noise_x: OpenSimplex::new(seed.wrapping_add(100)),
+            warp_noise_y: OpenSimplex::new(seed.wrapping_add(200)),
+            boundary_noise: OpenSimplex::new(seed.wrapping_add(300)),
             plate_scale,
+            warp_strength: 1.5,
         }
     }
 
     /// Hash function to generate pseudo-random cell center offsets.
     fn hash(&self, ix: i32, iy: i32) -> (f64, f64) {
-        // Use seed to create different plate layouts per world
         let n = (ix.wrapping_mul(374761393) as u32)
             .wrapping_add((iy.wrapping_mul(668265263)) as u32)
             .wrapping_add(self.seed);
@@ -38,7 +50,6 @@ impl TectonicPlatesStrategy {
         let n1 = n.wrapping_mul(1103515245).wrapping_add(12345);
         let n2 = n1.wrapping_mul(1103515245).wrapping_add(12345);
 
-        // Convert to 0-1 range for cell center offset
         let x = (n1 & 0x7FFFFFFF) as f64 / 0x7FFFFFFF as f64;
         let y = (n2 & 0x7FFFFFFF) as f64 / 0x7FFFFFFF as f64;
 
@@ -54,38 +65,57 @@ impl TectonicPlatesStrategy {
         (n & 0xFF) as f64 / 255.0
     }
 
-    /// Generate tectonic value using Voronoi cells.
-    /// Returns boundary distance: 0 = at boundary, 1 = center of plate
-    pub fn generate_voronoi(&self, x: f64, y: f64) -> (f64, f64) {
-        // Scale coordinates for plate size
-        let sx = x * self.plate_scale;
-        let sy = y * self.plate_scale;
+    /// Apply domain warping: distort input coordinates with low-frequency noise
+    /// to create organic, natural-looking plate shapes instead of geometric Voronoi.
+    fn warp_coordinates(&self, x: f64, y: f64) -> (f64, f64) {
+        // Use low frequency for large-scale warping (plate-scale distortion)
+        let warp_freq = self.plate_scale * 0.8;
 
-        // Get integer cell coordinates
+        // Two octaves of warping for more natural shapes
+        let wx1 = self.warp_noise_x.get([x * warp_freq, y * warp_freq]);
+        let wy1 = self.warp_noise_y.get([x * warp_freq, y * warp_freq]);
+
+        // Second octave at double frequency, half amplitude
+        let wx2 = self.warp_noise_x.get([x * warp_freq * 2.3 + 50.0, y * warp_freq * 2.3 + 50.0]);
+        let wy2 = self.warp_noise_y.get([x * warp_freq * 2.3 + 50.0, y * warp_freq * 2.3 + 50.0]);
+
+        let warp_x = (wx1 + wx2 * 0.5) * self.warp_strength;
+        let warp_y = (wy1 + wy2 * 0.5) * self.warp_strength;
+
+        // Apply warp in scaled (cell) space
+        let sx = x * self.plate_scale + warp_x;
+        let sy = y * self.plate_scale + warp_y;
+
+        (sx, sy)
+    }
+
+    /// Generate tectonic value using domain-warped Voronoi cells.
+    /// Returns (plate_id, boundary_distance) where boundary_distance:
+    /// 0 = at boundary, 1 = center of plate
+    pub fn generate_voronoi(&self, x: f64, y: f64) -> (f64, f64) {
+        // Apply domain warping for organic plate shapes
+        let (sx, sy) = self.warp_coordinates(x, y);
+
         let ix = sx.floor() as i32;
         let iy = sy.floor() as i32;
 
-        // Find distances to nearest cell centers
         let mut min_dist = f64::MAX;
         let mut second_dist = f64::MAX;
         let mut nearest_cell = (0i32, 0i32);
 
-        // Check 3x3 grid of cells
-        for dx in -1..=1 {
-            for dy in -1..=1 {
+        // Check 5x5 grid — larger neighborhood needed because domain warping
+        // can shift points across cell boundaries
+        for dx in -2..=2 {
+            for dy in -2..=2 {
                 let cell_x = ix + dx;
                 let cell_y = iy + dy;
 
-                // Get cell center offset (0-1 within cell)
                 let (ox, oy) = self.hash(cell_x, cell_y);
 
-                // Cell center in scaled coordinates
                 let cx = cell_x as f64 + ox;
                 let cy = cell_y as f64 + oy;
 
-                // Distance from point to this cell center
-                let dist_sq = (sx - cx).powi(2) + (sy - cy).powi(2);
-                let dist = dist_sq.sqrt();
+                let dist = ((sx - cx).powi(2) + (sy - cy).powi(2)).sqrt();
 
                 if dist < min_dist {
                     second_dist = min_dist;
@@ -97,24 +127,20 @@ impl TectonicPlatesStrategy {
             }
         }
 
-        // Boundary distance: how close are we to being equidistant from two cells?
-        // At boundary: min_dist ≈ second_dist → ratio ≈ 1 → boundary_dist ≈ 0
-        // At center: min_dist << second_dist → ratio ≈ 0 → boundary_dist ≈ 1
+        // Boundary distance from ratio of nearest to second-nearest
         let ratio = if second_dist > 0.001 {
             min_dist / second_dist
         } else {
             0.0
         };
 
-        // Transform ratio to boundary distance (0 = boundary, 1 = center)
-        // ratio near 1.0 means we're near boundary, near 0.0 means center
         let boundary_dist = (1.0 - ratio).clamp(0.0, 1.0);
 
-        // Add some noise to make boundaries less perfectly straight
-        let roughness = self.noise.get([x * 0.02, y * 0.02]) * 0.1;
+        // Add higher-frequency noise for boundary roughness (small wiggles)
+        let roughness = self.boundary_noise.get([x * 0.015, y * 0.015]) * 0.08
+            + self.boundary_noise.get([x * 0.04, y * 0.04]) * 0.04;
         let adjusted_boundary = (boundary_dist + roughness).clamp(0.0, 1.0);
 
-        // Get plate ID for coloring
         let plate_id = self.plate_id_hash(nearest_cell.0, nearest_cell.1);
 
         (plate_id, adjusted_boundary)
