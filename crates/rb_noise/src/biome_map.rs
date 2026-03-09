@@ -207,9 +207,9 @@ impl BiomeMap {
             biomes.push(biome);
         }
 
-        // Phase 3: Generate rivers using D8 flow accumulation
+        // Phase 3: Generate rivers using D8 flow accumulation with climate awareness
         let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, width, height);
-        let rivers = river_gen.generate(&heightmap_vec, width, height);
+        let rivers = river_gen.generate_climate_aware(&heightmap_vec, &light_level, &humidity, width, height);
 
         // Override biomes where rivers flow - only in habitable climate zones
         for idx in 0..total_pixels {
@@ -360,9 +360,9 @@ impl BiomeMap {
             biomes.push(biome);
         }
 
-        // Rivers
+        // Rivers with climate awareness
         let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, width, height);
-        let rivers = river_gen.generate(&heightmap_vec, width, height);
+        let rivers = river_gen.generate_climate_aware(&heightmap_vec, &gpu_light_level, &gpu_humidity, width, height);
 
         for idx in 0..total_pixels {
             if rivers[idx] > 0.0
@@ -930,10 +930,10 @@ impl BiomeMap {
             );
         }
 
-        // Rivers (use carved heightmap for D8 routing)
+        // Rivers (use carved heightmap for D8 routing) with climate awareness
         let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, output_size, output_size);
         let rivers = if let Some(macro_map) = macro_map {
-            river_gen.generate_with_macro_flow(
+            river_gen.generate_with_macro_flow_climate(
                 &carved_heightmap,
                 output_size,
                 output_size,
@@ -943,9 +943,11 @@ impl BiomeMap {
                 world_x,
                 world_y,
                 world_size,
+                &light_level,
+                &humidity,
             )
         } else {
-            river_gen.generate(&heightmap_vec, output_size, output_size)
+            river_gen.generate_climate_aware(&heightmap_vec, &light_level, &humidity, output_size, output_size)
         };
 
         for idx in 0..total_pixels {
@@ -1143,16 +1145,17 @@ impl BiomeMap {
             );
         }
 
-        // Rivers (use carved heightmap for D8 routing)
+        // Rivers (use carved heightmap for D8 routing) with climate awareness
         let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, output_size, output_size);
         let rivers = if let Some(macro_map) = macro_map {
-            river_gen.generate_with_macro_flow(
+            river_gen.generate_with_macro_flow_climate(
                 &carved_heightmap, output_size, output_size,
                 &macro_map.rivers, macro_map.width, macro_map.height,
                 world_x, world_y, world_size,
+                &gpu_light_level, &gpu_humidity,
             )
         } else {
-            river_gen.generate(&heightmap_vec, output_size, output_size)
+            river_gen.generate_climate_aware(&heightmap_vec, &gpu_light_level, &gpu_humidity, output_size, output_size)
         };
 
         for idx in 0..total_pixels {

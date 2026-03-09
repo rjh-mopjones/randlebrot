@@ -254,12 +254,13 @@ pub fn humidity_to_rgba(humidity: f64) -> [u8; 4] {
 
 /// Convert river flow to RGBA.
 /// Higher flow = brighter blue rivers.
+/// Lower threshold (0.02) to show graduated-width river edges.
 pub fn river_to_rgba(flow: f64) -> [u8; 4] {
-    if flow < 0.05 {
+    if flow < 0.02 {
         [30, 30, 30, 255] // No river - dark background
     } else {
-        // Blue intensity scales with flow
-        let intensity = (flow.min(1.0) * 200.0) as u8;
+        // sqrt intensity for brighter midrange
+        let intensity = (flow.sqrt().min(1.0) * 220.0) as u8;
         [40, 80 + intensity / 2, 180 + intensity / 3, 255]
     }
 }

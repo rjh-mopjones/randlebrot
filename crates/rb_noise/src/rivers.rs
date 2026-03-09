@@ -232,6 +232,12 @@ impl RiverNetwork {
             seg.character = RiverCharacter::classify(light, humid, temp);
         }
 
+        // Step 5.5: Smooth paths to remove D8 staircase
+        for seg in &mut segments {
+            seg.path = chaikin_smooth(&seg.path, 2);
+            seg.meander_offsets = vec![0.0; seg.path.len()];
+        }
+
         // Step 6: Apply meandering
         for seg in &mut segments {
             apply_meandering(seg, heightmap, peaks_valleys, width, height);
@@ -241,10 +247,11 @@ impl RiverNetwork {
         let deltas = generate_deltas(&segments, continentalness, width, height, sea_level);
         let delta_start = segments.len();
         segments.extend(deltas);
-        // Link delta segments to their parent
-        for _i in delta_start..segments.len() {
-            // Delta segments have downstream = None (they terminate at ocean)
-            // and their path starts near the parent's mouth
+
+        // Smooth delta paths too
+        for seg in &mut segments[delta_start..] {
+            seg.path = chaikin_smooth(&seg.path, 2);
+            seg.meander_offsets = vec![0.0; seg.path.len()];
         }
 
         // Step 8: Build spatial index
@@ -323,53 +330,61 @@ impl RiverNetwork {
     }
 
     /// Convert the river network to a flat flow grid (backward compatibility).
-    /// Returns values in [0, 1] where higher = larger river (log normalized).
+    /// Returns values in [0, 1] where higher = larger river.
+    /// Uses smooth rasterisation with graduated width per segment.
     pub fn to_flow_grid(&self, width: usize, height: usize) -> Vec<f64> {
         let total = width * height;
         let mut grid = vec![0.0f64; total];
 
-        // Find max drainage for normalization
         let max_drainage = self.segments.iter()
             .map(|s| s.drainage_area)
             .max()
-            .unwrap_or(1) as f64;
-        let log_max = max_drainage.ln().max(1.0);
+            .unwrap_or(1);
 
         for seg in &self.segments {
             if seg.character == RiverCharacter::BuriedIce {
                 continue;
             }
-            for (i, &(px, py)) in seg.path.iter().enumerate() {
-                // Apply meander offset for position
-                let offset = seg.meander_offsets.get(i).copied().unwrap_or(0.0);
 
-                // Compute flow direction for perpendicular offset
-                let (next_x, next_y) = if i + 1 < seg.path.len() {
-                    seg.path[i + 1]
-                } else if i > 0 {
-                    // Use same direction as previous
-                    let (prev_x, prev_y) = seg.path[i - 1];
-                    (px + (px - prev_x), py + (py - prev_y))
-                } else {
-                    (px, py + 1.0)
-                };
+            // Build effective path by applying meander offsets
+            let effective_path: Vec<(f64, f64)> = seg.path.iter()
+                .enumerate()
+                .map(|(i, &(px, py))| {
+                    let offset = seg.meander_offsets.get(i).copied().unwrap_or(0.0);
+                    if offset.abs() < 0.001 {
+                        return (px, py);
+                    }
+                    // Compute perpendicular direction
+                    let (next_x, next_y) = if i + 1 < seg.path.len() {
+                        seg.path[i + 1]
+                    } else if i > 0 {
+                        let (prev_x, prev_y) = seg.path[i - 1];
+                        (px + (px - prev_x), py + (py - prev_y))
+                    } else {
+                        (px, py + 1.0)
+                    };
+                    let flow_dx = next_x - px;
+                    let flow_dy = next_y - py;
+                    let flow_len = (flow_dx * flow_dx + flow_dy * flow_dy).sqrt().max(0.001);
+                    let perp_x = -flow_dy / flow_len;
+                    let perp_y = flow_dx / flow_len;
+                    (px + offset * perp_x, py + offset * perp_y)
+                })
+                .collect();
 
-                let flow_dx = next_x - px;
-                let flow_dy = next_y - py;
-                let flow_len = (flow_dx * flow_dx + flow_dy * flow_dy).sqrt().max(0.001);
-                let perp_x = -flow_dy / flow_len;
-                let perp_y = flow_dx / flow_len;
-
-                let final_x = (px + offset * perp_x).round() as i64;
-                let final_y = (py + offset * perp_y).round() as i64;
-
-                if final_x >= 0 && final_x < width as i64 && final_y >= 0 && final_y < height as i64 {
-                    let idx = final_y as usize * width + final_x as usize;
-                    let log_val = (seg.drainage_area as f64).ln();
-                    let normalized = (log_val / log_max).clamp(0.0, 1.0);
-                    grid[idx] = grid[idx].max(normalized);
-                }
+            if effective_path.len() < 2 {
+                continue;
             }
+
+            // Uniform drainage along this segment (it's constant per segment)
+            let drainage_per_point = vec![seg.drainage_area; effective_path.len()];
+            let max_half_width = 3.0 * seg.character.width_multiplier();
+
+            rasterise_smooth_line(
+                &mut grid, width, height,
+                &effective_path, &drainage_per_point,
+                max_drainage, max_half_width,
+            );
         }
 
         grid
@@ -906,6 +921,252 @@ fn deterministic_hash(seg_id: usize, point_idx: usize) -> f64 {
     (n & 0xFFFF) as f64 / 0xFFFF as f64 * std::f64::consts::TAU
 }
 
+// ─── Path Smoothing & Graduated Rendering ───────────────────────────────────
+
+/// Chaikin corner-cutting subdivision to smooth D8 staircase paths.
+/// Preserves first and last points exactly.
+fn chaikin_smooth(path: &[(f64, f64)], passes: usize) -> Vec<(f64, f64)> {
+    if path.len() < 3 {
+        return path.to_vec();
+    }
+
+    let mut current = path.to_vec();
+    for _ in 0..passes {
+        let n = current.len();
+        if n < 3 {
+            break;
+        }
+        let mut smoothed = Vec::with_capacity(n * 2);
+        smoothed.push(current[0]); // preserve first
+
+        for i in 0..n - 1 {
+            let (ax, ay) = current[i];
+            let (bx, by) = current[i + 1];
+            // Skip endpoints: first point already added, last will be added
+            if i > 0 {
+                smoothed.push((0.75 * ax + 0.25 * bx, 0.75 * ay + 0.25 * by));
+            }
+            if i + 1 < n - 1 {
+                smoothed.push((0.25 * ax + 0.75 * bx, 0.25 * ay + 0.75 * by));
+            }
+        }
+
+        smoothed.push(current[n - 1]); // preserve last
+        current = smoothed;
+    }
+
+    current
+}
+
+/// Trace connected river paths from flow direction and accumulation grids.
+/// Returns (path_coords, drainage_at_each_point) per path.
+fn trace_river_paths(
+    flow_dir: &[u8],
+    accumulation: &[u32],
+    width: usize,
+    height: usize,
+    min_accumulation: u32,
+    climate_threshold: Option<&[u32]>,
+) -> Vec<(Vec<(f64, f64)>, Vec<u32>)> {
+    let total = width * height;
+
+    // Mark river cells using per-cell threshold
+    let is_river: Vec<bool> = (0..total)
+        .map(|idx| {
+            let threshold = climate_threshold
+                .map(|ct| ct[idx])
+                .unwrap_or(min_accumulation);
+            accumulation[idx] >= threshold
+        })
+        .collect();
+
+    // Count river-cell inflows (same logic as build_river_tree)
+    let mut river_inflow_count = vec![0u32; total];
+    for idx in 0..total {
+        if !is_river[idx] || flow_dir[idx] == NO_FLOW {
+            continue;
+        }
+        let x = idx % width;
+        let y = idx / width;
+        let (dx, dy) = D8_OFFSETS[flow_dir[idx] as usize];
+        let nx = x as i32 + dx;
+        let ny = y as i32 + dy;
+        if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
+            let nidx = ny as usize * width + nx as usize;
+            if is_river[nidx] {
+                river_inflow_count[nidx] += 1;
+            }
+        }
+    }
+
+    // Find start points: headwaters (inflow=0) and confluences (inflow>=2)
+    let mut starts: Vec<usize> = Vec::new();
+    for idx in 0..total {
+        if !is_river[idx] {
+            continue;
+        }
+        if river_inflow_count[idx] == 0 || river_inflow_count[idx] >= 2 {
+            starts.push(idx);
+        }
+    }
+    starts.sort_unstable();
+    starts.dedup();
+
+    let mut visited = vec![false; total];
+    let mut result = Vec::new();
+
+    for &start in &starts {
+        if visited[start] && river_inflow_count[start] == 0 {
+            continue;
+        }
+
+        let mut path = Vec::new();
+        let mut drainage = Vec::new();
+        let mut current = start;
+
+        loop {
+            if current != start && visited[current] {
+                break;
+            }
+            if current != start && river_inflow_count[current] >= 2 {
+                break;
+            }
+
+            path.push(((current % width) as f64, (current / width) as f64));
+            drainage.push(accumulation[current]);
+            visited[current] = true;
+
+            if flow_dir[current] == NO_FLOW {
+                break;
+            }
+
+            let x = current % width;
+            let y = current / width;
+            let (dx, dy) = D8_OFFSETS[flow_dir[current] as usize];
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+
+            if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
+                break;
+            }
+
+            let next = ny as usize * width + nx as usize;
+
+            // Once tracing has started, continue even if per-cell threshold rises,
+            // but stop if below absolute floor min_accumulation.
+            if accumulation[next] < min_accumulation {
+                break;
+            }
+
+            current = next;
+        }
+
+        if path.len() >= 3 {
+            result.push((path, drainage));
+        }
+    }
+
+    result
+}
+
+/// Rasterise a smooth line with graduated width onto a grid.
+fn rasterise_smooth_line(
+    grid: &mut [f64],
+    width: usize,
+    height: usize,
+    path: &[(f64, f64)],
+    drainage_per_point: &[u32],
+    max_drainage: u32,
+    max_half_width: f64,
+) {
+    if path.len() < 2 || max_drainage == 0 {
+        return;
+    }
+    let max_drain_f = max_drainage as f64;
+
+    for i in 0..path.len() - 1 {
+        let (x0, y0) = path[i];
+        let (x1, y1) = path[i + 1];
+        let d0 = drainage_per_point[i] as f64;
+        let d1 = drainage_per_point[i + 1] as f64;
+
+        let seg_dx = x1 - x0;
+        let seg_dy = y1 - y0;
+        let seg_len = (seg_dx * seg_dx + seg_dy * seg_dy).sqrt();
+        if seg_len < 0.001 {
+            continue;
+        }
+
+        // Perpendicular direction
+        let perp_x = -seg_dy / seg_len;
+        let perp_y = seg_dx / seg_len;
+
+        // Step along at 0.5-pixel increments
+        let steps = (seg_len / 0.5).ceil() as usize;
+        for s in 0..=steps {
+            let t = s as f64 / steps as f64;
+            let cx = x0 + seg_dx * t;
+            let cy = y0 + seg_dy * t;
+            let drainage = d0 + (d1 - d0) * t;
+
+            let norm_drain = (drainage / max_drain_f).sqrt();
+            let half_width = norm_drain * max_half_width;
+            let value = norm_drain;
+
+            let hw_ceil = half_width.ceil() as i32;
+            let px_center = cx.round() as i32;
+            let py_center = cy.round() as i32;
+
+            for dy in -hw_ceil..=hw_ceil {
+                for dx in -hw_ceil..=hw_ceil {
+                    let px = px_center + dx;
+                    let py = py_center + dy;
+
+                    if px < 0 || px >= width as i32 || py < 0 || py >= height as i32 {
+                        continue;
+                    }
+
+                    // Perpendicular distance to line
+                    let rel_x = px as f64 - cx;
+                    let rel_y = py as f64 - cy;
+                    let perp_dist = (rel_x * perp_x + rel_y * perp_y).abs();
+
+                    if perp_dist > half_width || half_width < 0.001 {
+                        continue;
+                    }
+
+                    let falloff = (1.0 - (perp_dist / half_width)).powi(2);
+                    let pixel_value = value * falloff;
+
+                    let idx = py as usize * width + px as usize;
+                    grid[idx] = grid[idx].max(pixel_value);
+                }
+            }
+        }
+    }
+}
+
+/// Interpolate drainage values to match a new path length (from smoothing).
+fn interpolate_drainage(original: &[u32], new_len: usize) -> Vec<u32> {
+    if original.len() == new_len || original.is_empty() {
+        return original.to_vec();
+    }
+    if original.len() == 1 {
+        return vec![original[0]; new_len];
+    }
+    let mut result = Vec::with_capacity(new_len);
+    let scale = (original.len() - 1) as f64 / (new_len - 1).max(1) as f64;
+    for i in 0..new_len {
+        let t = i as f64 * scale;
+        let lo = (t as usize).min(original.len() - 1);
+        let hi = (lo + 1).min(original.len() - 1);
+        let frac = t - lo as f64;
+        let val = original[lo] as f64 * (1.0 - frac) + original[hi] as f64 * frac;
+        result.push(val as u32);
+    }
+    result
+}
+
 // ─── Delta Generation ────────────────────────────────────────────────────────
 
 /// Generate deltas at major river mouths where they meet the coast.
@@ -1157,11 +1418,152 @@ impl RiverGenerator {
     /// Used by macro-level generation where we don't have per-pixel geological data
     /// separately (it's baked into the heightmap).
     pub fn generate(&self, elevation: &[f64], width: usize, height: usize) -> Vec<f64> {
-        // Use the simple path: fill depressions, basic D8, accumulate, extract
         let filled = fill_depressions(elevation, width, height, self.sea_level);
         let flow_dir = self.compute_flow_directions_simple(&filled, width, height);
         let accumulation = compute_flow_accumulation(&flow_dir, &filled, width, height);
-        self.extract_rivers(&accumulation, width, height)
+        self.generate_smooth_rivers(&flow_dir, &accumulation, width, height, None)
+    }
+
+    /// Generate rivers with climate-aware thresholds.
+    /// Desert areas require more accumulation to form visible rivers.
+    pub fn generate_climate_aware(
+        &self,
+        elevation: &[f64],
+        light_level: &[f64],
+        humidity: &[f64],
+        width: usize,
+        height: usize,
+    ) -> Vec<f64> {
+        let filled = fill_depressions(elevation, width, height, self.sea_level);
+        let flow_dir = self.compute_flow_directions_simple(&filled, width, height);
+        let accumulation = compute_flow_accumulation(&flow_dir, &filled, width, height);
+        let climate_threshold = self.compute_climate_threshold(light_level, humidity, width * height);
+        self.generate_smooth_rivers(&flow_dir, &accumulation, width, height, Some(&climate_threshold))
+    }
+
+    /// Generate rivers with macro flow seeding and climate-aware thresholds.
+    pub fn generate_with_macro_flow_climate(
+        &self,
+        elevation: &[f64],
+        width: usize,
+        height: usize,
+        macro_rivers: &[f64],
+        macro_width: usize,
+        macro_height: usize,
+        world_x: f64,
+        world_y: f64,
+        world_size: f64,
+        light_level: &[f64],
+        humidity: &[f64],
+    ) -> Vec<f64> {
+        let filled = fill_depressions(elevation, width, height, self.sea_level);
+        let flow_dir = self.compute_flow_directions_simple(&filled, width, height);
+
+        let total = width * height;
+        let mut accumulation = vec![1u32; total];
+
+        // Seed macro river pixels with upstream accumulation
+        let scale = world_size / width as f64;
+        let macro_total = (macro_width * macro_height) as f64;
+
+        for y in 0..height {
+            for x in 0..width {
+                let wx = world_x + x as f64 * scale;
+                let wy = world_y + y as f64 * scale;
+                let mx = wx as i64;
+                let my = wy as i64;
+
+                if mx >= 0 && mx < macro_width as i64
+                    && my >= 0 && my < macro_height as i64
+                {
+                    let macro_flow = macro_rivers[my as usize * macro_width + mx as usize];
+                    if macro_flow > 0.0 {
+                        let boost = (macro_flow * macro_total * 0.08) as u32;
+                        let idx = y * width + x;
+                        accumulation[idx] = accumulation[idx].saturating_add(boost);
+                    }
+                }
+            }
+        }
+
+        // Topological sort: propagate flow from highest to lowest elevation
+        let mut sorted_indices: Vec<usize> = (0..total).collect();
+        sorted_indices.sort_by(|&a, &b| {
+            filled[b]
+                .partial_cmp(&filled[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        for &idx in &sorted_indices {
+            if flow_dir[idx] == NO_FLOW {
+                continue;
+            }
+
+            let x = idx % width;
+            let y = idx / width;
+            let (dx, dy) = D8_OFFSETS[flow_dir[idx] as usize];
+            let nx = (x as i32 + dx) as usize;
+            let ny = (y as i32 + dy) as usize;
+
+            if nx < width && ny < height {
+                let target_idx = ny * width + nx;
+                accumulation[target_idx] =
+                    accumulation[target_idx].saturating_add(accumulation[idx]);
+            }
+        }
+
+        let climate_threshold = self.compute_climate_threshold(light_level, humidity, total);
+        self.generate_smooth_rivers(&flow_dir, &accumulation, width, height, Some(&climate_threshold))
+    }
+
+    /// Compute per-cell climate threshold for river visibility.
+    fn compute_climate_threshold(&self, light_level: &[f64], humidity: &[f64], total: usize) -> Vec<u32> {
+        (0..total)
+            .map(|idx| {
+                let aridity = (light_level[idx] / 0.7).clamp(0.0, 1.0)
+                    * (1.0 - humidity[idx]).clamp(0.0, 1.0);
+                (self.min_accumulation as f64 * (1.0 + aridity * 8.0)) as u32
+            })
+            .collect()
+    }
+
+    /// Generate smooth, graduated-width rivers from flow data.
+    fn generate_smooth_rivers(
+        &self,
+        flow_dir: &[u8],
+        accumulation: &[u32],
+        width: usize,
+        height: usize,
+        climate_threshold: Option<&[u32]>,
+    ) -> Vec<f64> {
+        let paths = trace_river_paths(
+            flow_dir, accumulation, width, height, self.min_accumulation, climate_threshold,
+        );
+
+        // Smooth each path and find max drainage
+        let smoothed: Vec<(Vec<(f64, f64)>, Vec<u32>)> = paths
+            .into_iter()
+            .map(|(path, drainage)| {
+                let smooth = chaikin_smooth(&path, 2);
+                // Interpolate drainage values to match smoothed path length
+                let interp_drainage = interpolate_drainage(&drainage, smooth.len());
+                (smooth, interp_drainage)
+            })
+            .collect();
+
+        let max_drainage = smoothed.iter()
+            .flat_map(|(_, d)| d.iter())
+            .copied()
+            .max()
+            .unwrap_or(1);
+
+        let mut grid = vec![0.0f64; width * height];
+
+        for (path, drainage) in &smoothed {
+            rasterise_smooth_line(&mut grid, width, height, path, drainage, max_drainage, 3.0);
+        }
+
+        grid
     }
 
     /// Generate rivers with full geological awareness.
@@ -1208,8 +1610,6 @@ impl RiverGenerator {
         let mut accumulation = vec![1u32; total];
 
         // Seed ALL macro river pixels with upstream accumulation.
-        // Previously only an edge band was seeded; now every meso pixel overlapping
-        // a macro river gets a proportional boost so interior rivers don't vanish.
         let scale = world_size / width as f64;
         let macro_total = (macro_width * macro_height) as f64;
 
@@ -1259,7 +1659,7 @@ impl RiverGenerator {
             }
         }
 
-        self.extract_rivers(&accumulation, width, height)
+        self.generate_smooth_rivers(&flow_dir, &accumulation, width, height, None)
     }
 
     /// Simple D8 flow direction (no geological bias).
@@ -1302,24 +1702,6 @@ impl RiverGenerator {
         flow_dir
     }
 
-    /// Extract rivers from accumulation map (legacy format).
-    fn extract_rivers(&self, accumulation: &[u32], width: usize, height: usize) -> Vec<f64> {
-        let total = width * height;
-        let mut rivers = vec![0.0; total];
-
-        let max_accum = *accumulation.iter().max().unwrap_or(&1) as f64;
-        let log_max = max_accum.ln();
-
-        for idx in 0..total {
-            if accumulation[idx] >= self.min_accumulation {
-                let log_val = (accumulation[idx] as f64).ln();
-                let log_threshold = (self.min_accumulation as f64).ln();
-                rivers[idx] = ((log_val - log_threshold) / (log_max - log_threshold)).clamp(0.0, 1.0);
-            }
-        }
-
-        rivers
-    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -1416,18 +1798,21 @@ mod tests {
     }
 
     #[test]
-    fn test_river_extraction_threshold() {
-        let mut gen = RiverGenerator::default();
-        gen.min_accumulation = 5;
+    fn test_river_generation_produces_output() {
+        let gen = RiverGenerator::default();
+        let width = 16;
+        let height = 8;
 
-        let accumulation = vec![1, 2, 5, 10, 100];
-        let rivers = gen.extract_rivers(&accumulation, 5, 1);
+        // Simple slope
+        let mut elevation = vec![0.0; width * height];
+        for y in 0..height {
+            for x in 0..width {
+                elevation[y * width + x] = 0.3 - x as f64 * 0.03;
+            }
+        }
 
-        assert_eq!(rivers[0], 0.0);
-        assert_eq!(rivers[1], 0.0);
-        assert!(rivers[3] > rivers[2]);
-        assert!(rivers[4] > rivers[3]);
-        assert!(rivers[4] > 0.0);
+        let rivers = gen.generate(&elevation, width, height);
+        assert_eq!(rivers.len(), width * height);
     }
 
     #[test]
@@ -1605,5 +1990,79 @@ mod tests {
         // Some offsets should be nonzero on flat terrain
         let has_meander = seg.meander_offsets.iter().any(|&o| o.abs() > 0.01);
         assert!(has_meander, "Flat terrain should produce meanders");
+    }
+
+    #[test]
+    fn test_chaikin_preserves_endpoints() {
+        let path = vec![(0.0, 0.0), (1.0, 1.0), (2.0, 0.0), (3.0, 1.0), (4.0, 0.0)];
+        let smoothed = chaikin_smooth(&path, 2);
+        assert_eq!(smoothed.first(), Some(&(0.0, 0.0)));
+        assert_eq!(smoothed.last(), Some(&(4.0, 0.0)));
+        assert!(smoothed.len() > path.len(), "Smoothing should add points");
+    }
+
+    #[test]
+    fn test_chaikin_short_path_unchanged() {
+        let path1 = vec![(0.0, 0.0)];
+        assert_eq!(chaikin_smooth(&path1, 2), path1);
+
+        let path2 = vec![(0.0, 0.0), (1.0, 1.0)];
+        assert_eq!(chaikin_smooth(&path2, 2), path2);
+    }
+
+    #[test]
+    fn test_graduated_width_increases_downstream() {
+        let width = 20;
+        let height = 5;
+        let mut grid = vec![0.0; width * height];
+
+        // Straight horizontal path with increasing drainage
+        let path: Vec<(f64, f64)> = (0..width).map(|x| (x as f64, 2.0)).collect();
+        let drainage: Vec<u32> = (0..width).map(|x| (x as u32 + 1) * 50).collect();
+        let max_drainage = *drainage.last().unwrap();
+
+        rasterise_smooth_line(&mut grid, width, height, &path, &drainage, max_drainage, 3.0);
+
+        // Count non-zero pixels in left half vs right half
+        let left_count = grid.iter().take(width * height / 2).filter(|&&v| v > 0.0).count();
+        let right_count = grid.iter().skip(width * height / 2).filter(|&&v| v > 0.0).count();
+        // More drainage downstream = wider rendering = more non-zero pixels
+        assert!(right_count >= left_count,
+            "Downstream (right={}) should have >= pixels than upstream (left={})",
+            right_count, left_count);
+    }
+
+    #[test]
+    fn test_climate_threshold_suppresses_desert_rivers() {
+        let width = 32;
+        let height = 16;
+        let sea_level = -0.025;
+
+        // Gentle slope
+        let mut elevation = vec![0.0; width * height];
+        for y in 0..height {
+            for x in 0..width {
+                elevation[y * width + x] = 0.3 - x as f64 * 0.015;
+            }
+        }
+
+        let gen = RiverGenerator::new(sea_level);
+
+        // Wet climate: low light, high humidity
+        let light_wet = vec![0.2; width * height];
+        let humid_wet = vec![0.7; width * height];
+        let rivers_wet = gen.generate_climate_aware(&elevation, &light_wet, &humid_wet, width, height);
+
+        // Dry climate: high light, low humidity
+        let light_dry = vec![0.9; width * height];
+        let humid_dry = vec![0.1; width * height];
+        let rivers_dry = gen.generate_climate_aware(&elevation, &light_dry, &humid_dry, width, height);
+
+        let wet_count = rivers_wet.iter().filter(|&&v| v > 0.0).count();
+        let dry_count = rivers_dry.iter().filter(|&&v| v > 0.0).count();
+
+        assert!(wet_count >= dry_count,
+            "Wet climate should have >= river pixels ({}) than dry ({})",
+            wet_count, dry_count);
     }
 }
