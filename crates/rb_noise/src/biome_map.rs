@@ -918,11 +918,23 @@ impl BiomeMap {
             biomes.push(biome);
         }
 
-        // Rivers
+        // Carve macro river channels into meso heightmap before D8 flow
+        let mut carved_heightmap = heightmap_vec.clone();
+        if let Some(macro_map) = macro_map {
+            crate::rivers::carve_river_channels(
+                &mut carved_heightmap,
+                output_size, output_size,
+                &macro_map.rivers, macro_map.width, macro_map.height,
+                world_x, world_y, world_size,
+                SEA_LEVEL,
+            );
+        }
+
+        // Rivers (use carved heightmap for D8 routing)
         let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, output_size, output_size);
         let rivers = if let Some(macro_map) = macro_map {
             river_gen.generate_with_macro_flow(
-                &heightmap_vec,
+                &carved_heightmap,
                 output_size,
                 output_size,
                 &macro_map.rivers,
@@ -1119,11 +1131,23 @@ impl BiomeMap {
 
         progress.increment(LayerId::Derivation, total_pixels);
 
-        // Rivers
+        // Carve macro river channels into meso heightmap before D8 flow
+        let mut carved_heightmap = heightmap_vec.clone();
+        if let Some(macro_map) = macro_map {
+            crate::rivers::carve_river_channels(
+                &mut carved_heightmap,
+                output_size, output_size,
+                &macro_map.rivers, macro_map.width, macro_map.height,
+                world_x, world_y, world_size,
+                SEA_LEVEL,
+            );
+        }
+
+        // Rivers (use carved heightmap for D8 routing)
         let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, output_size, output_size);
         let rivers = if let Some(macro_map) = macro_map {
             river_gen.generate_with_macro_flow(
-                &heightmap_vec, output_size, output_size,
+                &carved_heightmap, output_size, output_size,
                 &macro_map.rivers, macro_map.width, macro_map.height,
                 world_x, world_y, world_size,
             )

@@ -42,8 +42,9 @@ randlebrot/
 │   │       │                          #   CPU and GPU paths, layer-to-RGBA conversion
 │   │       ├── biome_splines.rs       # Spline-based biome classification from 6 noise inputs
 │   │       ├── chunk_hierarchy.rs     # MacroChunk/MesoChunk/MicroChunk with LRU caching
-│   │       ├── rivers.rs             # D8 flow accumulation, depression filling,
-│   │       │                          #   macro-seeded meso river generation
+│   │       ├── rivers.rs             # Two-tier river system: RiverNetwork (global immutable,
+│   │       │                          #   geology-aware D8, lake detection, meandering, deltas,
+│   │       │                          #   climate-aware character classification) + legacy API
 │   │       ├── resource_map.rs        # Sparse resource storage per tile
 │   │       ├── resource.rs            # Resource distribution logic
 │   │       ├── progress.rs            # Per-layer progress tracking for UI bars
