@@ -126,35 +126,51 @@ impl TradeGood {
     pub fn from_biome(biome: TileType) -> Vec<TradeGood> {
         match biome {
             // Water
-            TileType::Sea => vec![TradeGood::Fish],
-            TileType::OceanTrench => vec![TradeGood::Fish],
+            TileType::Sea | TileType::ShallowSea | TileType::ContinentalShelf => vec![TradeGood::Fish],
+            TileType::OceanTrench | TileType::DeepOcean => vec![TradeGood::Fish],
+            TileType::OceanRidge => vec![TradeGood::Fish, TradeGood::Ore],
+            TileType::CoralReef => vec![TradeGood::Fish, TradeGood::Luxury],
             TileType::River => vec![TradeGood::Fish, TradeGood::Food],
 
             // Coastal
             TileType::Beach => vec![TradeGood::Fish, TradeGood::Salt],
+            TileType::RockyCoast | TileType::SeaCliff => vec![TradeGood::Fish, TradeGood::Salt],
+            TileType::Mangrove => vec![TradeGood::Fish, TradeGood::Timber],
 
             // Frozen
-            TileType::White => vec![TradeGood::Fish, TradeGood::Furs],
+            TileType::White | TileType::IceSheet => vec![TradeGood::Fish, TradeGood::Furs],
             TileType::Glacier => vec![TradeGood::Furs],
             TileType::Snow => vec![TradeGood::Furs],
+            TileType::FrozenBog => vec![TradeGood::Furs],
             TileType::Tundra => vec![TradeGood::Furs],
             TileType::Taiga => vec![TradeGood::Timber, TradeGood::Furs],
+            TileType::AlpineMeadow => vec![TradeGood::Food, TradeGood::Furs],
 
             // Temperate
-            TileType::Plains => vec![TradeGood::Food, TradeGood::Textiles],
-            TileType::Forest => vec![TradeGood::Timber, TradeGood::Furs],
+            TileType::Plains | TileType::Meadow => vec![TradeGood::Food, TradeGood::Textiles],
+            TileType::Forest | TileType::DeciduousForest => vec![TradeGood::Timber, TradeGood::Furs],
+            TileType::TemperateRainforest => vec![TradeGood::Timber, TradeGood::Luxury],
+            TileType::Woodland | TileType::DryWoodland => vec![TradeGood::Timber, TradeGood::Food],
+            TileType::Scrubland | TileType::Thornland => vec![TradeGood::Furs],
             TileType::Marsh => vec![TradeGood::Fish, TradeGood::Food],
             TileType::Steppe => vec![TradeGood::Food, TradeGood::Furs],
             TileType::Mountain => vec![TradeGood::Ore, TradeGood::Weapons],
             TileType::Plateau => vec![TradeGood::Ore, TradeGood::Food],
 
+            // Warm/subtropical
+            TileType::SubtropicalForest | TileType::CloudForest => vec![TradeGood::Timber, TradeGood::Luxury],
+            TileType::HighlandSavanna => vec![TradeGood::Food, TradeGood::Furs],
+
             // Hot
             TileType::Savanna => vec![TradeGood::Food, TradeGood::Furs],
             TileType::Jungle => vec![TradeGood::Timber, TradeGood::Luxury],
-            TileType::Desert => vec![TradeGood::Salt, TradeGood::Luxury],
-            TileType::Sahara => vec![TradeGood::Luxury],
-            TileType::Badlands => vec![TradeGood::Ore],
-            TileType::Volcanic => vec![TradeGood::Ore, TradeGood::Luxury],
+            TileType::Desert | TileType::Erg => vec![TradeGood::Salt, TradeGood::Luxury],
+            TileType::Sahara | TileType::Hamada => vec![TradeGood::Luxury],
+            TileType::SaltFlat => vec![TradeGood::Salt],
+            TileType::Badlands | TileType::ScorchedRock => vec![TradeGood::Ore],
+            TileType::Oasis => vec![TradeGood::Food, TradeGood::Luxury],
+            TileType::Volcanic | TileType::LavaField => vec![TradeGood::Ore, TradeGood::Luxury],
+            TileType::MoltenWaste => vec![TradeGood::Ore],
         }
     }
 }
@@ -204,28 +220,37 @@ impl TradeRoute {
 pub fn terrain_movement_cost(biome: TileType) -> f64 {
     match biome {
         // Impassable by land
-        TileType::Sea | TileType::OceanTrench | TileType::White | TileType::Glacier => {
+        TileType::Sea | TileType::OceanTrench | TileType::White | TileType::Glacier
+        | TileType::ShallowSea | TileType::ContinentalShelf | TileType::DeepOcean
+        | TileType::OceanRidge | TileType::CoralReef | TileType::IceSheet => {
             f64::INFINITY
         }
-        TileType::Volcanic => 10.0, // Dangerous
+        TileType::Volcanic | TileType::MoltenWaste => 10.0,
+        TileType::LavaField => 8.0,
 
         // Difficult terrain
         TileType::Mountain => 8.0,
-        TileType::Snow | TileType::Tundra => 6.0,
-        TileType::Badlands => 5.5,
+        TileType::Snow | TileType::Tundra | TileType::FrozenBog => 6.0,
+        TileType::SeaCliff => 6.0,
+        TileType::Badlands | TileType::ScorchedRock => 5.5,
         TileType::Plateau => 5.0,
-        TileType::Jungle | TileType::Marsh => 4.5,
-        TileType::Desert | TileType::Sahara => 4.0,
-        TileType::Taiga => 3.5,
+        TileType::Jungle | TileType::Marsh | TileType::Mangrove
+        | TileType::TemperateRainforest => 4.5,
+        TileType::Desert | TileType::Sahara | TileType::Erg
+        | TileType::SaltFlat | TileType::Hamada => 4.0,
+        TileType::Taiga | TileType::CloudForest => 3.5,
 
         // Moderate terrain
-        TileType::Forest => 3.0,
-        TileType::Steppe | TileType::Savanna => 1.5,
-        TileType::Beach => 1.5,
-        TileType::River => 2.0, // Need to ford or build bridges
+        TileType::Forest | TileType::DeciduousForest | TileType::SubtropicalForest => 3.0,
+        TileType::Thornland | TileType::Scrubland => 2.5,
+        TileType::Woodland | TileType::DryWoodland => 2.0,
+        TileType::River => 2.0,
+        TileType::Steppe | TileType::Savanna | TileType::HighlandSavanna => 1.5,
+        TileType::Beach | TileType::RockyCoast => 1.5,
+        TileType::AlpineMeadow => 1.5,
 
         // Easy terrain
-        TileType::Plains => 1.0, // Ideal for roads
+        TileType::Plains | TileType::Meadow | TileType::Oasis => 1.0,
     }
 }
 
@@ -234,6 +259,8 @@ pub fn is_passable(biome: TileType) -> bool {
     !matches!(
         biome,
         TileType::Sea | TileType::OceanTrench | TileType::White | TileType::Glacier
+            | TileType::ShallowSea | TileType::ContinentalShelf | TileType::DeepOcean
+            | TileType::OceanRidge | TileType::CoralReef | TileType::IceSheet
     )
 }
 

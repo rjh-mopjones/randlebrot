@@ -122,10 +122,12 @@ struct ChunkHighlight;
 struct CursorWorldPos(Vec2);
 
 /// Current detail level being displayed.
+/// Meso is the only active view; Macro data is kept for grouping/rivers.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
 enum ViewLevel {
+    Macro, // Kept for macro BiomeMap data, not used as a view
     #[default]
-    Macro,
     Meso,
 }
 
@@ -187,9 +189,6 @@ struct GenerationTask {
 
 /// Size of macro chunks in pixels (for highlighting grid).
 const CHUNK_SIZE: f32 = 64.0;
-
-/// Zoom threshold for switching to meso view.
-const MESO_ZOOM_THRESHOLD: f32 = 0.5;
 
 /// Size of meso map in pixels (per tile).
 const MESO_MAP_SIZE: usize = 512;
@@ -673,7 +672,6 @@ fn update_cursor_world_pos(
 fn update_chunk_highlight(
     cursor_pos: Res<CursorWorldPos>,
     world_def: Res<WorldDefinition>,
-    view_level: Res<ViewLevel>,
     mut highlight_query: Query<(&mut Transform, &mut Sprite), With<ChunkHighlight>>,
     mut contexts: EguiContexts,
 ) {
@@ -685,11 +683,8 @@ fn update_chunk_highlight(
         return;
     }
 
-    // Adjust highlight size based on view level
-    let chunk_size = match *view_level {
-        ViewLevel::Macro => CHUNK_SIZE,
-        ViewLevel::Meso => CHUNK_SIZE / 8.0, // Smaller grid at meso level
-    };
+    // Highlight at meso grid scale
+    let chunk_size = CHUNK_SIZE / 8.0;
     highlight_sprite.custom_size = Some(Vec2::splat(chunk_size));
 
     // Convert world position to map coordinates
@@ -759,46 +754,33 @@ fn calculate_visible_chunks(
         .min((world_def.height as f32 / CHUNK_SIZE).ceil() as i32 - 1);
 }
 
-/// Simple view level transition - just tracks zoom threshold.
+/// View level is always Meso now — no transition needed.
+/// Kept as a no-op system to avoid changing the system schedule.
 fn handle_view_level_transition(
-    camera_query: Query<&OrthographicProjection, With<Camera2d>>,
     mut view_level: ResMut<ViewLevel>,
 ) {
-    let Ok(projection) = camera_query.get_single() else { return };
-
-    let target_level = if projection.scale <= MESO_ZOOM_THRESHOLD {
-        ViewLevel::Meso
-    } else {
-        ViewLevel::Macro
-    };
-
-    if *view_level != target_level {
-        *view_level = target_level;
-        println!("View level: {:?}", target_level);
+    // Always force Meso view — macro data is kept for rivers/grouping only
+    if *view_level != ViewLevel::Meso {
+        *view_level = ViewLevel::Meso;
     }
 }
 
 /// Manage meso tile sprites - spawn/despawn based on viewport.
-/// Uses pre-cached textures for instant display.
+/// Meso is always the active view. Uses pre-cached textures for instant display.
 fn manage_meso_tiles(
     mut commands: Commands,
-    view_level: Res<ViewLevel>,
     visible_range: Res<VisibleChunkRange>,
     mut loaded_tiles: ResMut<LoadedMesoTiles>,
     cache: Res<MesoTileCache>,
     world_def: Res<WorldDefinition>,
-    tiles_query: Query<(Entity, &MesoTile)>,
+    mut macro_query: Query<&mut Visibility, With<WorldMapSprite>>,
 ) {
     let half_map_width = world_def.width as f32 / 2.0;
     let half_map_height = world_def.height as f32 / 2.0;
 
-    if *view_level != ViewLevel::Meso {
-        // Despawn all meso tile sprites when at macro level
-        for (entity, _) in &tiles_query {
-            commands.entity(entity).despawn();
-        }
-        loaded_tiles.tiles.clear();
-        return;
+    // Hide the macro map sprite — meso tiles are the only view
+    for mut vis in &mut macro_query {
+        *vis = Visibility::Hidden;
     }
 
     // Collect currently needed tiles

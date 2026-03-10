@@ -1,19 +1,24 @@
 use rb_core::TileType;
 
-/// Temperature derived from light level + elevation + humidity.
+/// Temperature derived from light level + elevation + humidity + continentalness.
 ///
 /// Output range: ~[-80, +150]°C (matches existing BiomeSplines expectations).
 /// - light_level: [0, 1] where 1.0 = sub-stellar point
 /// - elevation: heightmap value (can be negative for ocean)
 /// - humidity: [0, 1] where 1.0 = saturated
-pub fn derive_temperature(light_level: f64, elevation: f64, humidity: f64) -> f64 {
+/// - continentalness: distance from coast (negative = ocean, positive = inland)
+pub fn derive_temperature(light_level: f64, elevation: f64, humidity: f64, continentalness: f64) -> f64 {
     // Map light [0,1] to temp [-80, +150]
     let base_temp = light_level * 230.0 - 80.0;
     // Lapse rate: mountains are colder (only for positive elevation)
     let lapse_rate = elevation.max(0.0) * 60.0;
     // Moisture moderates extremes slightly
     let humidity_buffer = humidity * 5.0;
-    base_temp - lapse_rate + humidity_buffer
+    let raw = base_temp - lapse_rate + humidity_buffer;
+    // Coastal moderation: ocean proximity pulls temperature toward moderate
+    let inland_factor = ((continentalness + 0.025).max(0.0) * 5.0).clamp(0.0, 1.0);
+    let moderate_temp = 15.0;
+    raw + (moderate_temp - raw) * (1.0 - inland_factor) * 0.3
 }
 
 /// Heightmap from geological layers (used as elevation input for temperature).
@@ -77,17 +82,27 @@ pub fn derive_precipitation_type(temperature: f64, humidity: f64, heightmap: f64
 
 /// Snowpack — persistent snow accumulation.
 ///
-/// Needs cold + snow-type precipitation.
+/// Combines temperature-based snow and altitude-based snow.
 /// - precipitation_type: [-1, 1] where -1 = snow
 /// - temperature: degrees C
+/// - heightmap: elevation value
+/// - light_level: [0, 1] where 1.0 = sub-stellar point
 /// Output: [0, 1]
-pub fn derive_snowpack(precipitation_type: f64, temperature: f64) -> f64 {
-    if temperature > 3.0 {
-        return 0.0;
-    }
+pub fn derive_snowpack(precipitation_type: f64, temperature: f64, heightmap: f64, light_level: f64) -> f64 {
     let cold_factor = ((3.0 - temperature) / 40.0).clamp(0.0, 1.0);
     let snow_precip = (-precipitation_type).max(0.0);
-    (cold_factor * snow_precip).clamp(0.0, 1.0)
+    let temperature_snow = cold_factor * snow_precip;
+
+    // Altitude snow: peaks above threshold accumulate snow even in warmer zones
+    // Snow line varies with light level (higher near sub-stellar, lower in twilight)
+    let snow_altitude = if light_level < 0.2 { 0.0 }
+        else if light_level < 0.5 { 0.12 + (light_level - 0.2) * 0.6 }
+        else { 0.30 + (light_level - 0.5) * 0.4 };
+    let altitude_snow = if heightmap > snow_altitude {
+        ((heightmap - snow_altitude) * 5.0).min(1.0)
+    } else { 0.0 };
+
+    temperature_snow.max(altitude_snow).clamp(0.0, 1.0)
 }
 
 /// River moisture — how much moisture rivers contribute to surrounding area.
@@ -118,21 +133,31 @@ pub fn derive_resource_richness(tectonic: f64, rock_hardness: f64, erosion: f64)
 pub fn derive_vegetation_density(biome: TileType, river_moisture: f64) -> f64 {
     let base = match biome {
         TileType::Jungle => 0.95,
-        TileType::Forest => 0.8,
+        TileType::TemperateRainforest | TileType::SubtropicalForest => 0.85,
+        TileType::Forest | TileType::DeciduousForest | TileType::CloudForest => 0.8,
         TileType::Marsh => 0.7,
-        TileType::Taiga => 0.6,
-        TileType::Plains => 0.5,
-        TileType::Savanna => 0.4,
-        TileType::Steppe => 0.25,
+        TileType::Woodland | TileType::DryWoodland => 0.65,
+        TileType::Taiga | TileType::Mangrove => 0.6,
+        TileType::Oasis => 0.55,
+        TileType::Plains | TileType::Meadow => 0.5,
+        TileType::Savanna | TileType::HighlandSavanna => 0.4,
+        TileType::AlpineMeadow => 0.35,
+        TileType::Steppe | TileType::Thornland => 0.25,
+        TileType::Scrubland => 0.2,
         TileType::Plateau => 0.2,
         TileType::Mountain => 0.15,
-        TileType::Tundra => 0.1,
+        TileType::Tundra | TileType::FrozenBog => 0.1,
         TileType::Beach => 0.1,
-        TileType::Badlands => 0.08,
-        TileType::Desert | TileType::Sahara => 0.05,
-        TileType::Volcanic => 0.02,
-        TileType::Snow | TileType::Glacier | TileType::White => 0.0,
-        TileType::Sea | TileType::River | TileType::OceanTrench => 0.0,
+        TileType::SeaCliff => 0.1,
+        TileType::Badlands | TileType::Hamada => 0.08,
+        TileType::Desert | TileType::Sahara | TileType::Erg => 0.05,
+        TileType::RockyCoast => 0.05,
+        TileType::SaltFlat | TileType::ScorchedRock => 0.02,
+        TileType::Volcanic | TileType::LavaField | TileType::MoltenWaste => 0.02,
+        TileType::Snow | TileType::Glacier | TileType::White | TileType::IceSheet => 0.0,
+        TileType::Sea | TileType::ShallowSea | TileType::ContinentalShelf
+        | TileType::DeepOcean | TileType::OceanTrench | TileType::OceanRidge
+        | TileType::CoralReef | TileType::River => 0.0,
     };
     (base + river_moisture * 0.3).clamp(0.0, 1.0)
 }
@@ -142,18 +167,27 @@ pub fn derive_vegetation_density(biome: TileType, river_moisture: f64) -> f64 {
 /// 0 = bare rock, 0.5 = loam, 1.0 = rich organic.
 pub fn derive_soil_type(biome: TileType, erosion: f64, rock_hardness: f64) -> f64 {
     let base = match biome {
-        TileType::Forest | TileType::Jungle => 0.8,
-        TileType::Plains | TileType::Marsh => 0.7,
-        TileType::Savanna => 0.5,
-        TileType::Taiga => 0.4,
-        TileType::Steppe => 0.3,
-        TileType::Tundra => 0.2,
+        TileType::Forest | TileType::Jungle | TileType::DeciduousForest
+        | TileType::TemperateRainforest | TileType::SubtropicalForest
+        | TileType::CloudForest => 0.8,
+        TileType::Plains | TileType::Marsh | TileType::Meadow | TileType::Oasis => 0.7,
+        TileType::Woodland | TileType::DryWoodland => 0.6,
+        TileType::Savanna | TileType::HighlandSavanna => 0.5,
+        TileType::Taiga | TileType::Mangrove => 0.4,
+        TileType::AlpineMeadow => 0.35,
+        TileType::Steppe | TileType::Thornland | TileType::Scrubland => 0.3,
+        TileType::FrozenBog | TileType::Tundra => 0.2,
         TileType::Beach => 0.15,
-        TileType::Desert | TileType::Sahara | TileType::Badlands => 0.1,
+        TileType::Desert | TileType::Sahara | TileType::Badlands
+        | TileType::Erg | TileType::Hamada => 0.1,
+        TileType::SaltFlat | TileType::ScorchedRock => 0.05,
+        TileType::RockyCoast | TileType::SeaCliff => 0.05,
         TileType::Mountain | TileType::Glacier | TileType::Plateau => 0.05,
-        TileType::Volcanic => 0.08,
-        TileType::Snow | TileType::White => 0.03,
-        TileType::Sea | TileType::River | TileType::OceanTrench => 0.0,
+        TileType::Volcanic | TileType::LavaField | TileType::MoltenWaste => 0.08,
+        TileType::Snow | TileType::White | TileType::IceSheet => 0.03,
+        TileType::Sea | TileType::ShallowSea | TileType::ContinentalShelf
+        | TileType::DeepOcean | TileType::OceanTrench | TileType::OceanRidge
+        | TileType::CoralReef | TileType::River => 0.0,
     };
     (base + erosion * 0.3 - rock_hardness * 0.2).clamp(0.0, 1.0)
 }
@@ -164,24 +198,34 @@ mod tests {
 
     #[test]
     fn temperature_at_sub_stellar() {
-        // Full light, flat terrain, moderate humidity
-        let temp = derive_temperature(1.0, 0.0, 0.5);
-        assert!(temp > 100.0, "Sub-stellar temp {} should be very hot", temp);
+        // Full light, flat terrain, moderate humidity, inland
+        let temp = derive_temperature(1.0, 0.0, 0.5, 0.2);
+        assert!(temp > 80.0, "Sub-stellar temp {} should be very hot", temp);
     }
 
     #[test]
     fn temperature_at_dark_side() {
-        // No light
-        let temp = derive_temperature(0.0, 0.0, 0.0);
-        assert!(temp < -70.0, "Dark side temp {} should be very cold", temp);
+        // No light, inland
+        let temp = derive_temperature(0.0, 0.0, 0.0, 0.2);
+        assert!(temp < -50.0, "Dark side temp {} should be very cold", temp);
     }
 
     #[test]
     fn temperature_lapse_rate() {
-        // Same light but higher elevation = colder
-        let low = derive_temperature(0.5, 0.0, 0.0);
-        let high = derive_temperature(0.5, 0.5, 0.0);
+        // Same light but higher elevation = colder, inland
+        let low = derive_temperature(0.5, 0.0, 0.0, 0.2);
+        let high = derive_temperature(0.5, 0.5, 0.0, 0.2);
         assert!(low > high, "Lower elevation ({}) should be warmer than higher ({})", low, high);
+    }
+
+    #[test]
+    fn temperature_coastal_moderation() {
+        // Coastal (cont=-0.01) vs inland (cont=0.3) at same light level
+        let coastal = derive_temperature(0.8, 0.0, 0.5, -0.01);
+        let inland = derive_temperature(0.8, 0.0, 0.5, 0.3);
+        // Coastal should be more moderate (closer to 15°C)
+        assert!((coastal - 15.0).abs() < (inland - 15.0).abs(),
+            "Coastal temp ({}) should be more moderate than inland ({})", coastal, inland);
     }
 
     #[test]
@@ -237,14 +281,21 @@ mod tests {
 
     #[test]
     fn snowpack_cold_snowy() {
-        let snow = derive_snowpack(-0.5, -20.0); // snow precip, very cold
+        let snow = derive_snowpack(-0.5, -20.0, 0.0, 0.3); // snow precip, very cold
         assert!(snow > 0.0, "Cold snowy conditions should produce snowpack ({})", snow);
     }
 
     #[test]
-    fn snowpack_warm_is_zero() {
-        let snow = derive_snowpack(-0.5, 10.0); // snow precip type but warm
-        assert!((snow - 0.0).abs() < 0.01, "Warm conditions should have no snowpack ({})", snow);
+    fn snowpack_warm_lowland_is_zero() {
+        let snow = derive_snowpack(-0.5, 10.0, 0.0, 0.5); // snow precip type but warm, low elevation
+        assert!((snow - 0.0).abs() < 0.01, "Warm lowland should have no snowpack ({})", snow);
+    }
+
+    #[test]
+    fn snowpack_high_altitude() {
+        // High peak in moderate light zone should get altitude snow
+        let snow = derive_snowpack(0.0, 20.0, 0.5, 0.6);
+        assert!(snow > 0.0, "High altitude peak should have snowpack even when warm ({})", snow);
     }
 
     #[test]

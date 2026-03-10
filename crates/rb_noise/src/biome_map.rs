@@ -4,12 +4,14 @@ use std::sync::Arc;
 
 use crate::biome_splines::BiomeSplines;
 use crate::progress::{LayerId, LayerProgress};
-use crate::rivers::RiverGenerator;
+use crate::resource_map::ResourceMap;
+use crate::rivers::{RiverGenerator, RiverNetwork};
 use crate::derived;
 use crate::strategy::{
     ContinentalnessStrategy, HumidityStrategy, LightLevelStrategy,
     PeaksAndValleysStrategy, RockHardnessStrategy,
     TectonicPlatesStrategy,
+    wind::{WindField, advect_moisture},
 };
 use crate::visualization::{
     aridity_to_rgba, grayscale_to_rgba, heightmap_to_rgba, humidity_to_rgba,
@@ -79,6 +81,7 @@ pub struct BiomeMap {
     pub biomes: Vec<TileType>,
     pub vegetation_density: Vec<f64>,
     pub soil_type: Vec<f64>,
+    pub resource_map: Option<ResourceMap>,
 }
 
 impl BiomeMap {
@@ -147,35 +150,47 @@ impl BiomeMap {
             })
             .collect();
 
-        // Phase 2: Derive all per-pixel layers
-        let splines = BiomeSplines::new(SEA_LEVEL);
-
-        let phase2_data: Vec<_> = base_data
-            .par_iter()
-            .map(|&(cont, tect, _, raw_peaks, light, rock, humid, volc)| {
-                let peaks = derived::derive_peaks_valleys(raw_peaks, tect, rock);
-                let hm = derived::derive_heightmap(cont, tect, peaks);
-                let temp = derived::derive_temperature(light, hm, humid);
-                let eros = derived::derive_erosion(hm, rock, humid);
-                let arid = derived::derive_aridity(temp, humid);
-                let precip = derived::derive_precipitation_type(temp, humid, hm);
-                let res = derived::derive_resource_richness(tect, rock, eros);
-                let snow = derived::derive_snowpack(precip, temp);
-                let biome = splines.evaluate(cont, temp, tect, eros, peaks, humid, arid);
-
-                (peaks, volc, hm, temp, eros, arid, precip, res, snow, biome)
-            })
-            .collect();
-
-        // Unpack into separate vectors
+        // Unpack base data into separate vectors
         let mut continentalness = Vec::with_capacity(total_pixels);
         let mut tectonic = Vec::with_capacity(total_pixels);
         let mut tectonic_plate_ids = Vec::with_capacity(total_pixels);
         let mut humidity = Vec::with_capacity(total_pixels);
         let mut rock_hardness = Vec::with_capacity(total_pixels);
         let mut light_level = Vec::with_capacity(total_pixels);
-        let mut peaks_valleys = Vec::with_capacity(total_pixels);
+        let mut raw_peaks_vec = Vec::with_capacity(total_pixels);
         let mut volcanism = Vec::with_capacity(total_pixels);
+
+        for &(cont, tect, pid, raw_peaks, light, rock, humid, volc) in &base_data {
+            continentalness.push(cont);
+            tectonic.push(tect);
+            tectonic_plate_ids.push(pid);
+            humidity.push(humid);
+            rock_hardness.push(rock);
+            light_level.push(light);
+            raw_peaks_vec.push(raw_peaks);
+            volcanism.push(volc);
+        }
+
+        // Phase 1.5: Wind-driven moisture advection
+        // Compute quick heightmap for wind blocking
+        let quick_heightmap: Vec<f64> = (0..total_pixels).map(|i| {
+            let peaks = derived::derive_peaks_valleys(raw_peaks_vec[i], tectonic[i], rock_hardness[i]);
+            derived::derive_heightmap(continentalness[i], tectonic[i], peaks)
+        }).collect();
+
+        let wind = WindField::generate(
+            &light_level, &quick_heightmap, width, height,
+            (sub_stellar_x, sub_stellar_y),
+        );
+        advect_moisture(
+            &mut humidity, &wind, &quick_heightmap, &continentalness,
+            width, height, SEA_LEVEL, 4,
+        );
+
+        // Phase 2: Derive all per-pixel layers (using wind-modified humidity)
+        let splines = BiomeSplines::new(SEA_LEVEL);
+
+        let mut peaks_valleys = Vec::with_capacity(total_pixels);
         let mut heightmap_vec = Vec::with_capacity(total_pixels);
         let mut temperature = Vec::with_capacity(total_pixels);
         let mut erosion = Vec::with_capacity(total_pixels);
@@ -185,18 +200,26 @@ impl BiomeMap {
         let mut snowpack = Vec::with_capacity(total_pixels);
         let mut biomes = Vec::with_capacity(total_pixels);
 
-        for (base, p2) in base_data.iter().zip(phase2_data.iter()) {
-            let (cont, tect, pid, _raw_peaks, light, rock, humid, _volc_from_base) = *base;
-            let (peaks, volc, hm, temp, eros, arid, precip, res, snow, biome) = *p2;
+        for idx in 0..total_pixels {
+            let cont = continentalness[idx];
+            let tect = tectonic[idx];
+            let light = light_level[idx];
+            let rock = rock_hardness[idx];
+            let humid = humidity[idx];
+            let px = idx % width;
+            let py = idx / width;
 
-            continentalness.push(cont);
-            tectonic.push(tect);
-            tectonic_plate_ids.push(pid);
-            humidity.push(humid);
-            rock_hardness.push(rock);
-            light_level.push(light);
+            let peaks = derived::derive_peaks_valleys(raw_peaks_vec[idx], tect, rock);
+            let hm = derived::derive_heightmap(cont, tect, peaks);
+            let temp = derived::derive_temperature(light, hm, humid, cont);
+            let eros = derived::derive_erosion(hm, rock, humid);
+            let arid = derived::derive_aridity(temp, humid);
+            let precip = derived::derive_precipitation_type(temp, humid, hm);
+            let res = derived::derive_resource_richness(tect, rock, eros);
+            let snow = derived::derive_snowpack(precip, temp, hm, light);
+            let biome = splines.evaluate_dithered(cont, temp, tect, eros, peaks, humid, arid, rock, px, py);
+
             peaks_valleys.push(peaks);
-            volcanism.push(volc);
             heightmap_vec.push(hm);
             temperature.push(temp);
             erosion.push(eros);
@@ -207,9 +230,35 @@ impl BiomeMap {
             biomes.push(biome);
         }
 
-        // Phase 3: Generate rivers using D8 flow accumulation with climate awareness
-        let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, width, height);
-        let rivers = river_gen.generate_climate_aware(&heightmap_vec, &light_level, &humidity, width, height);
+        // Phase 3: Generate rivers
+        // Use geology-aware RiverNetwork for large maps, fast RiverGenerator for small ones
+        let rivers = if total_pixels >= 256 * 128 {
+            let tectonic_stress: Vec<f64> = tectonic.iter().map(|&t| 1.0 - t).collect();
+            let river_network = RiverNetwork::generate(
+                &heightmap_vec, &rock_hardness, &tectonic_stress, &continentalness,
+                &light_level, &humidity, &temperature, &peaks_valleys,
+                width, height, SEA_LEVEL,
+            );
+            river_network.to_flow_grid(width, height)
+        } else {
+            let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, width, height);
+            river_gen.generate_climate_aware(&heightmap_vec, &light_level, &humidity, width, height)
+        };
+
+        // Erosion feedback: carve terrain along rivers and eroded areas
+        for idx in 0..total_pixels {
+            if continentalness[idx] < SEA_LEVEL { continue; }
+            heightmap_vec[idx] -= erosion[idx] * 0.03;
+            if rivers[idx] > 0.0 {
+                heightmap_vec[idx] -= rivers[idx] * 0.02;
+            }
+        }
+        // Recompute temperature with modified heightmap
+        for idx in 0..total_pixels {
+            temperature[idx] = derived::derive_temperature(
+                light_level[idx], heightmap_vec[idx], humidity[idx], continentalness[idx],
+            );
+        }
 
         // Override biomes where rivers flow - only in habitable climate zones
         for idx in 0..total_pixels {
@@ -224,6 +273,22 @@ impl BiomeMap {
 
         // Post-river derivation: river_moisture, vegetation, soil
         let river_moisture: Vec<f64> = rivers.iter().map(|&r| derived::derive_river_moisture(r)).collect();
+
+        // Oasis override: desert biomes near rivers become oases
+        for idx in 0..total_pixels {
+            if river_moisture[idx] > 0.4 && continentalness[idx] >= SEA_LEVEL {
+                match biomes[idx] {
+                    TileType::Desert | TileType::Sahara | TileType::Erg | TileType::Hamada => {
+                        biomes[idx] = TileType::Oasis;
+                    }
+                    TileType::Steppe | TileType::Scrubland => {
+                        biomes[idx] = TileType::Meadow;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         let vegetation_density: Vec<f64> = biomes.iter().zip(river_moisture.iter())
             .map(|(&b, &rm)| derived::derive_vegetation_density(b, rm)).collect();
         let soil_type: Vec<f64> = biomes.iter().zip(erosion.iter()).zip(rock_hardness.iter())
@@ -231,10 +296,27 @@ impl BiomeMap {
 
         // Volcanism post-process: override biome for high volcanism on land
         for idx in 0..total_pixels {
-            if volcanism[idx] > 0.8 && continentalness[idx] >= SEA_LEVEL {
-                biomes[idx] = TileType::Volcanic;
+            if continentalness[idx] >= SEA_LEVEL {
+                if volcanism[idx] > 0.92 {
+                    biomes[idx] = TileType::Volcanic;
+                } else if volcanism[idx] > 0.7 {
+                    match biomes[idx] {
+                        TileType::Desert | TileType::Sahara | TileType::Erg | TileType::Hamada
+                        | TileType::SaltFlat | TileType::Badlands | TileType::ScorchedRock
+                        | TileType::MoltenWaste | TileType::Tundra | TileType::Snow
+                        | TileType::IceSheet | TileType::Steppe | TileType::Mountain => {
+                            biomes[idx] = TileType::LavaField;
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
+
+        // Phase 4: Generate per-type resource distribution
+        let resource_map = Self::generate_resource_map(
+            seed, width, height, &continentalness, &tectonic, &biomes,
+        );
 
         Self {
             width,
@@ -259,6 +341,7 @@ impl BiomeMap {
             biomes,
             vegetation_density,
             soil_type,
+            resource_map: Some(resource_map),
         }
     }
 
@@ -308,7 +391,15 @@ impl BiomeMap {
         let tectonic_volcanism: Vec<f64> = tectonic_data.iter().map(|s| s.volcanism).collect();
 
         // Humidity from GPU is pure base (fBm + water distance, no light drying)
-        let gpu_humidity: Vec<f64> = layers.humidity.iter().map(|&v| v as f64).collect();
+        let mut gpu_humidity: Vec<f64> = layers.humidity.iter().map(|&v| v as f64).collect();
+
+        // Wind-driven moisture advection
+        let quick_heightmap: Vec<f64> = (0..total_pixels).map(|i| {
+            let peaks = derived::derive_peaks_valleys(raw_peaks[i], gpu_tectonic[i], gpu_rock_hardness[i]);
+            derived::derive_heightmap(continentalness[i], gpu_tectonic[i], peaks)
+        }).collect();
+        let wind = WindField::generate(&gpu_light_level, &quick_heightmap, width, height, (0.5, 1.0));
+        advect_moisture(&mut gpu_humidity, &wind, &quick_heightmap, &continentalness, width, height, SEA_LEVEL, 4);
 
         // Derive all layers on CPU in parallel
         let splines = BiomeSplines::new(SEA_LEVEL);
@@ -321,16 +412,18 @@ impl BiomeMap {
                 let rock = gpu_rock_hardness[idx];
                 let humid = gpu_humidity[idx];
 
+                let px = idx % width;
+                let py = idx / width;
                 let peaks = derived::derive_peaks_valleys(raw_peaks[idx], tect, rock);
                 let volc = tectonic_volcanism[idx];
                 let hm = derived::derive_heightmap(cont, tect, peaks);
-                let temp = derived::derive_temperature(light, hm, humid);
+                let temp = derived::derive_temperature(light, hm, humid, cont);
                 let eros = derived::derive_erosion(hm, rock, humid);
                 let arid = derived::derive_aridity(temp, humid);
                 let precip = derived::derive_precipitation_type(temp, humid, hm);
                 let res = derived::derive_resource_richness(tect, rock, eros);
-                let snow = derived::derive_snowpack(precip, temp);
-                let biome = splines.evaluate(cont, temp, tect, eros, peaks, humid, arid);
+                let snow = derived::derive_snowpack(precip, temp, hm, light);
+                let biome = splines.evaluate_dithered(cont, temp, tect, eros, peaks, humid, arid, rock, px, py);
 
                 (peaks, volc, hm, temp, eros, arid, precip, res, snow, biome)
             })
@@ -360,9 +453,33 @@ impl BiomeMap {
             biomes.push(biome);
         }
 
-        // Rivers with climate awareness
-        let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, width, height);
-        let rivers = river_gen.generate_climate_aware(&heightmap_vec, &gpu_light_level, &gpu_humidity, width, height);
+        // Rivers: geology-aware RiverNetwork for large maps, fast fallback for small
+        let rivers = if total_pixels >= 256 * 128 {
+            let tectonic_stress: Vec<f64> = gpu_tectonic.iter().map(|&t| 1.0 - t).collect();
+            let river_network = RiverNetwork::generate(
+                &heightmap_vec, &gpu_rock_hardness, &tectonic_stress, &continentalness,
+                &gpu_light_level, &gpu_humidity, &temperature, &peaks_valleys,
+                width, height, SEA_LEVEL,
+            );
+            river_network.to_flow_grid(width, height)
+        } else {
+            let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, width, height);
+            river_gen.generate_climate_aware(&heightmap_vec, &gpu_light_level, &gpu_humidity, width, height)
+        };
+
+        // Erosion feedback: carve terrain along rivers and eroded areas
+        for idx in 0..total_pixels {
+            if continentalness[idx] < SEA_LEVEL { continue; }
+            heightmap_vec[idx] -= erosion[idx] * 0.03;
+            if rivers[idx] > 0.0 {
+                heightmap_vec[idx] -= rivers[idx] * 0.02;
+            }
+        }
+        for idx in 0..total_pixels {
+            temperature[idx] = derived::derive_temperature(
+                gpu_light_level[idx], heightmap_vec[idx], gpu_humidity[idx], continentalness[idx],
+            );
+        }
 
         for idx in 0..total_pixels {
             if rivers[idx] > 0.0
@@ -382,8 +499,20 @@ impl BiomeMap {
 
         // Volcanism post-process
         for idx in 0..total_pixels {
-            if volcanism[idx] > 0.8 && continentalness[idx] >= SEA_LEVEL {
-                biomes[idx] = TileType::Volcanic;
+            if continentalness[idx] >= SEA_LEVEL {
+                if volcanism[idx] > 0.92 {
+                    biomes[idx] = TileType::Volcanic;
+                } else if volcanism[idx] > 0.7 {
+                    match biomes[idx] {
+                        TileType::Desert | TileType::Sahara | TileType::Erg | TileType::Hamada
+                        | TileType::SaltFlat | TileType::Badlands | TileType::ScorchedRock
+                        | TileType::MoltenWaste | TileType::Tundra | TileType::Snow
+                        | TileType::IceSheet | TileType::Steppe | TileType::Mountain => {
+                            biomes[idx] = TileType::LavaField;
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 
@@ -410,6 +539,7 @@ impl BiomeMap {
             biomes,
             vegetation_density,
             soil_type,
+            resource_map: None,
         }
     }
 
@@ -609,6 +739,47 @@ impl BiomeMap {
         }
     }
 
+    /// Generate per-type resource map using geology-aware strategies.
+    fn generate_resource_map(
+        seed: u32,
+        width: usize,
+        height: usize,
+        continentalness: &[f64],
+        tectonic: &[f64],
+        biomes: &[TileType],
+    ) -> ResourceMap {
+        use crate::strategy::{ResourceNoiseStrategy, ResourceContext};
+        use rb_core::ResourceType;
+
+        let mut resource_map = ResourceMap::new(width, height);
+
+        for &resource_type in ResourceType::all() {
+            let strategy = ResourceNoiseStrategy::new(seed, resource_type);
+
+            for y in 0..height {
+                for x in 0..width {
+                    let idx = y * width + x;
+                    let cont = continentalness[idx];
+                    let tect = tectonic[idx];
+                    // Approximate water distance from continentalness
+                    let water_dist = ((cont + 0.025).max(0.0) * 10.0).min(1.0);
+
+                    let context = ResourceContext {
+                        continentalness: cont,
+                        tectonic_boundary_distance: tect,
+                        water_distance: water_dist,
+                        biome: biomes[idx],
+                    };
+
+                    let abundance = strategy.generate_with_context(x as f64, y as f64, 0, &context);
+                    resource_map.set(x, y, resource_type, abundance as f32);
+                }
+            }
+        }
+
+        resource_map
+    }
+
     /// Generate a meso-level (zoomed in) biome map for a specific world region.
     pub fn generate_region(
         seed: u32,
@@ -684,13 +855,13 @@ impl BiomeMap {
                 let peaks = derived::derive_peaks_valleys(raw_peaks, tect, rock);
                 let volc = tect_sample.volcanism;
                 let hm = derived::derive_heightmap(cont, tect, peaks);
-                let temp = derived::derive_temperature(light, hm, humid);
+                let temp = derived::derive_temperature(light, hm, humid, cont);
                 let eros = derived::derive_erosion(hm, rock, humid);
                 let arid = derived::derive_aridity(temp, humid);
                 let precip = derived::derive_precipitation_type(temp, humid, hm);
                 let res = derived::derive_resource_richness(tect, rock, eros);
-                let snow = derived::derive_snowpack(precip, temp);
-                let biome = splines.evaluate(cont, temp, tect, eros, peaks, humid, arid);
+                let snow = derived::derive_snowpack(precip, temp, hm, light);
+                let biome = splines.evaluate_dithered(cont, temp, tect, eros, peaks, humid, arid, rock, px, py);
 
                 continentalness.push(cont);
                 tectonic.push(tect);
@@ -726,14 +897,42 @@ impl BiomeMap {
         }
 
         let river_moisture: Vec<f64> = rivers.iter().map(|&r| derived::derive_river_moisture(r)).collect();
+
+        // Oasis override: desert biomes near rivers become oases
+        for idx in 0..total_pixels {
+            if river_moisture[idx] > 0.4 && continentalness[idx] >= SEA_LEVEL {
+                match biomes[idx] {
+                    TileType::Desert | TileType::Sahara | TileType::Erg | TileType::Hamada => {
+                        biomes[idx] = TileType::Oasis;
+                    }
+                    TileType::Steppe | TileType::Scrubland => {
+                        biomes[idx] = TileType::Meadow;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         let vegetation_density: Vec<f64> = biomes.iter().zip(river_moisture.iter())
             .map(|(&b, &rm)| derived::derive_vegetation_density(b, rm)).collect();
         let soil_type: Vec<f64> = biomes.iter().zip(erosion.iter()).zip(rock_hardness.iter())
             .map(|((&b, &e), &r)| derived::derive_soil_type(b, e, r)).collect();
 
         for idx in 0..total_pixels {
-            if volcanism[idx] > 0.8 && continentalness[idx] >= SEA_LEVEL {
-                biomes[idx] = TileType::Volcanic;
+            if continentalness[idx] >= SEA_LEVEL {
+                if volcanism[idx] > 0.92 {
+                    biomes[idx] = TileType::Volcanic;
+                } else if volcanism[idx] > 0.7 {
+                    match biomes[idx] {
+                        TileType::Desert | TileType::Sahara | TileType::Erg | TileType::Hamada
+                        | TileType::SaltFlat | TileType::Badlands | TileType::ScorchedRock
+                        | TileType::MoltenWaste | TileType::Tundra | TileType::Snow
+                        | TileType::IceSheet | TileType::Steppe | TileType::Mountain => {
+                            biomes[idx] = TileType::LavaField;
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 
@@ -760,6 +959,7 @@ impl BiomeMap {
             biomes,
             vegetation_density,
             soil_type,
+            resource_map: None,
         }
     }
 
@@ -791,7 +991,7 @@ impl BiomeMap {
 
                 let cont = cont_strategy.generate(wx, wy, detail_level);
                 let light = light_strategy.generate(wx, wy, detail_level);
-                let temp = derived::derive_temperature(light, cont.max(0.0), 0.3);
+                let temp = derived::derive_temperature(light, cont.max(0.0), 0.3, cont);
                 let biome = TileType::from_climate(cont, temp, SEA_LEVEL);
 
                 image_data.extend_from_slice(&biome.color());
@@ -856,13 +1056,13 @@ impl BiomeMap {
                     let peaks = derived::derive_peaks_valleys(raw_peaks, tect, rock);
                     let volc = tect_sample.volcanism;
                     let hm = derived::derive_heightmap(cont, tect, peaks);
-                    let temp = derived::derive_temperature(light, hm, humid);
+                    let temp = derived::derive_temperature(light, hm, humid, cont);
                     let eros = derived::derive_erosion(hm, rock, humid);
                     let arid = derived::derive_aridity(temp, humid);
                     let precip = derived::derive_precipitation_type(temp, humid, hm);
                     let res = derived::derive_resource_richness(tect, rock, eros);
-                    let snow = derived::derive_snowpack(precip, temp);
-                    let biome = splines.evaluate(cont, temp, tect, eros, peaks, humid, arid);
+                    let snow = derived::derive_snowpack(precip, temp, hm, light);
+                    let biome = splines.evaluate_dithered(cont, temp, tect, eros, peaks, humid, arid, rock, px, py);
 
                     results.push((cont, temp, tect, pid, peaks, volc, hm, eros, humid, light, rock, arid, precip, res, snow, biome));
                 }
@@ -961,14 +1161,42 @@ impl BiomeMap {
         }
 
         let river_moisture: Vec<f64> = rivers.iter().map(|&r| derived::derive_river_moisture(r)).collect();
+
+        // Oasis override: desert biomes near rivers become oases
+        for idx in 0..total_pixels {
+            if river_moisture[idx] > 0.4 && continentalness[idx] >= SEA_LEVEL {
+                match biomes[idx] {
+                    TileType::Desert | TileType::Sahara | TileType::Erg | TileType::Hamada => {
+                        biomes[idx] = TileType::Oasis;
+                    }
+                    TileType::Steppe | TileType::Scrubland => {
+                        biomes[idx] = TileType::Meadow;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         let vegetation_density: Vec<f64> = biomes.iter().zip(river_moisture.iter())
             .map(|(&b, &rm)| derived::derive_vegetation_density(b, rm)).collect();
         let soil_type: Vec<f64> = biomes.iter().zip(erosion.iter()).zip(rock_hardness.iter())
             .map(|((&b, &e), &r)| derived::derive_soil_type(b, e, r)).collect();
 
         for idx in 0..total_pixels {
-            if volcanism[idx] > 0.8 && continentalness[idx] >= SEA_LEVEL {
-                biomes[idx] = TileType::Volcanic;
+            if continentalness[idx] >= SEA_LEVEL {
+                if volcanism[idx] > 0.92 {
+                    biomes[idx] = TileType::Volcanic;
+                } else if volcanism[idx] > 0.7 {
+                    match biomes[idx] {
+                        TileType::Desert | TileType::Sahara | TileType::Erg | TileType::Hamada
+                        | TileType::SaltFlat | TileType::Badlands | TileType::ScorchedRock
+                        | TileType::MoltenWaste | TileType::Tundra | TileType::Snow
+                        | TileType::IceSheet | TileType::Steppe | TileType::Mountain => {
+                            biomes[idx] = TileType::LavaField;
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 
@@ -995,6 +1223,7 @@ impl BiomeMap {
             biomes,
             vegetation_density,
             soil_type,
+            resource_map: None,
         }
     }
 
@@ -1092,16 +1321,18 @@ impl BiomeMap {
                 let rock = gpu_rock_hardness[idx];
                 let humid = gpu_humidity[idx];
 
+                let px = idx % output_size;
+                let py = idx / output_size;
                 let peaks = derived::derive_peaks_valleys(raw_peaks[idx], tect, rock);
                 let volc = tectonic_volcanism[idx];
                 let hm = derived::derive_heightmap(cont, tect, peaks);
-                let temp = derived::derive_temperature(light, hm, humid);
+                let temp = derived::derive_temperature(light, hm, humid, cont);
                 let eros = derived::derive_erosion(hm, rock, humid);
                 let arid = derived::derive_aridity(temp, humid);
                 let precip = derived::derive_precipitation_type(temp, humid, hm);
                 let res = derived::derive_resource_richness(tect, rock, eros);
-                let snow = derived::derive_snowpack(precip, temp);
-                let biome = splines.evaluate(cont, temp, tect, eros, peaks, humid, arid);
+                let snow = derived::derive_snowpack(precip, temp, hm, light);
+                let biome = splines.evaluate_dithered(cont, temp, tect, eros, peaks, humid, arid, rock, px, py);
 
                 (peaks, volc, hm, temp, eros, arid, precip, res, snow, biome)
             })
@@ -1175,8 +1406,20 @@ impl BiomeMap {
             .map(|((&b, &e), &r)| derived::derive_soil_type(b, e, r)).collect();
 
         for idx in 0..total_pixels {
-            if volcanism[idx] > 0.8 && continentalness[idx] >= SEA_LEVEL {
-                biomes[idx] = TileType::Volcanic;
+            if continentalness[idx] >= SEA_LEVEL {
+                if volcanism[idx] > 0.92 {
+                    biomes[idx] = TileType::Volcanic;
+                } else if volcanism[idx] > 0.7 {
+                    match biomes[idx] {
+                        TileType::Desert | TileType::Sahara | TileType::Erg | TileType::Hamada
+                        | TileType::SaltFlat | TileType::Badlands | TileType::ScorchedRock
+                        | TileType::MoltenWaste | TileType::Tundra | TileType::Snow
+                        | TileType::IceSheet | TileType::Steppe | TileType::Mountain => {
+                            biomes[idx] = TileType::LavaField;
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 
@@ -1203,6 +1446,7 @@ impl BiomeMap {
             biomes,
             vegetation_density,
             soil_type,
+            resource_map: None,
         }
     }
 

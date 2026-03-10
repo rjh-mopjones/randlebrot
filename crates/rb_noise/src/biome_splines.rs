@@ -139,6 +139,7 @@ impl BiomeSplines {
         peaks_valleys: f64,
         humidity: f64,
         aridity: f64,
+        rock_hardness: f64,
     ) -> TileType {
         // Step 1: Compute effective elevation with tectonic amplification
         let elevation = self.compute_elevation(continentalness, peaks_valleys, erosion, tectonic);
@@ -172,15 +173,27 @@ impl BiomeSplines {
             }
         }
 
-        // Step 6: Check for special cases (volcanic, beach)
-        // Coastal beach check
+        // Step 6: Check for special cases (volcanic, beach, coastal detail)
+        // Coastal zone
         if above_sea < 0.02 {
             return match climate {
                 ClimateClass::Frozen => TileType::Glacier,
                 ClimateClass::Cold => TileType::Snow,
-                ClimateClass::Scorching => TileType::Sahara,
+                ClimateClass::Scorching => TileType::SaltFlat,
+                ClimateClass::Warm | ClimateClass::Hot
+                    if matches!(moisture, MoistureClass::Humid | MoistureClass::Saturated) =>
+                {
+                    TileType::Mangrove
+                }
+                _ if rock_hardness > 0.7 && peaks_valleys.abs() > 0.2 => TileType::SeaCliff,
+                _ if peaks_valleys.abs() > 0.3 || rock_hardness > 0.6 => TileType::RockyCoast,
                 _ => TileType::Beach,
             };
+        }
+
+        // Sea cliff: rugged terrain just above coastal zone
+        if above_sea >= 0.02 && above_sea < 0.05 && terrain == TerrainClass::Rugged {
+            return TileType::SeaCliff;
         }
 
         // Step 7: Land biome selection
@@ -220,17 +233,42 @@ impl BiomeSplines {
         cont + peak_height - valley_depth - trench
     }
 
-    /// Determine ocean biome based on temperature and tectonic activity.
-    fn ocean_biome(&self, _elevation: f64, temp: f64, _tectonic: f64) -> TileType {
+    /// Determine ocean biome based on depth, temperature, and tectonic activity.
+    fn ocean_biome(&self, elevation: f64, temp: f64, tectonic: f64) -> TileType {
         // Temperature extremes take priority - frozen or evaporated ocean
         if temp < -15.0 {
             return TileType::White; // Frozen ocean
         }
         if temp > 80.0 {
-            return TileType::Sahara; // Evaporated - salt flats
+            return TileType::SaltFlat; // Evaporated - salt flats
         }
 
-        TileType::Sea
+        let depth = self.sea_level - elevation;
+
+        // Coral reef: warm shallow water away from plate boundaries
+        if depth < 0.05 && temp > 20.0 && temp < 35.0 && tectonic > 0.5 {
+            return TileType::CoralReef;
+        }
+
+        // Ocean trench at plate boundaries with significant depth
+        if tectonic < 0.2 && depth > 0.3 {
+            return TileType::OceanTrench;
+        }
+        // Mid-ocean ridge near divergent boundaries
+        if tectonic < 0.3 && depth > 0.1 {
+            return TileType::OceanRidge;
+        }
+
+        // Depth-based classification
+        if depth < 0.05 {
+            TileType::ShallowSea
+        } else if depth < 0.15 {
+            TileType::ContinentalShelf
+        } else if depth > 0.25 {
+            TileType::DeepOcean
+        } else {
+            TileType::Sea
+        }
     }
 
     /// Adjust temperature based on elevation (lapse rate) and tectonic heat.
@@ -256,6 +294,47 @@ impl BiomeSplines {
         (humidity - rain_shadow).clamp(0.0, 1.0)
     }
 
+    /// Biome evaluation with spatial dithering at biome boundaries.
+    ///
+    /// Produces fuzzy transitions between biomes by perturbing inputs near
+    /// classification boundaries and using a position-based hash as threshold.
+    pub fn evaluate_dithered(
+        &self,
+        continentalness: f64,
+        temperature: f64,
+        tectonic: f64,
+        erosion: f64,
+        peaks_valleys: f64,
+        humidity: f64,
+        aridity: f64,
+        rock_hardness: f64,
+        px: usize,
+        py: usize,
+    ) -> TileType {
+        let base = self.evaluate(continentalness, temperature, tectonic, erosion, peaks_valleys, humidity, aridity, rock_hardness);
+
+        // Position hash for deterministic spatial noise
+        let hash = (((px.wrapping_mul(374761393)) ^ (py.wrapping_mul(668265263))) & 0xFFFF) as f64 / 65535.0;
+
+        // Try small perturbations to detect boundary proximity
+        let alt = self.evaluate(
+            continentalness + (hash - 0.5) * 0.02,
+            temperature + (hash - 0.5) * 4.0,
+            tectonic,
+            erosion,
+            peaks_valleys,
+            humidity + (hash - 0.5) * 0.06,
+            aridity,
+            rock_hardness,
+        );
+
+        if alt != base && hash > 0.5 {
+            alt
+        } else {
+            base
+        }
+    }
+
     /// Multi-axis land biome selection using Whittaker-style classification.
     fn land_biome(
         &self,
@@ -271,54 +350,91 @@ impl BiomeSplines {
 
         match climate {
             // Frozen zone (dark side of tidally locked planet)
-            Frozen => match moisture {
-                Arid | Dry => TileType::Glacier,
-                _ => TileType::Snow,
+            Frozen => match (moisture, elevation) {
+                (_, Alpine) => TileType::Glacier,
+                (Arid | Dry, Highland) => TileType::Glacier,
+                (Arid | Dry, _) => TileType::IceSheet,
+                (Saturated, Lowland | Coastal) => TileType::FrozenBog,
+                (_, _) => TileType::Snow,
             },
 
             // Cold zone (transition from dark side)
-            Cold => match (moisture, elevation) {
-                (Arid | Dry, _) => TileType::Tundra,
-                (_, Highland | Alpine) => TileType::Snow,
-                (Moderate | Humid | Saturated, _) => TileType::Taiga,
+            Cold => match (moisture, elevation, terrain) {
+                (_, Alpine, _) => TileType::Snow,
+                (_, Highland, Rugged) => TileType::Mountain,
+                (_, Highland, _) => TileType::AlpineMeadow,
+                (Arid | Dry, _, _) => TileType::Tundra,
+                (Saturated, Lowland | Coastal, _) => TileType::FrozenBog,
+                (Humid | Saturated, _, _) => TileType::Taiga,
+                (Moderate, _, _) => TileType::Tundra,
             },
 
             // Temperate zone (habitable terminator band)
             Temperate => match (moisture, elevation, terrain) {
                 (_, Alpine, _) => TileType::Mountain,
                 (_, Highland, Rugged) => TileType::Mountain,
+                (Humid | Saturated, Highland, _) => TileType::Plateau,
                 (_, Highland, _) => TileType::Plateau,
+                (Arid, _, Rugged) => TileType::Scrubland,
                 (Arid, _, _) => TileType::Steppe,
+                (Dry, _, Rugged) => TileType::Scrubland,
+                (Dry, Upland, _) => TileType::Woodland,
                 (Dry, _, _) => TileType::Steppe,
                 (Saturated, Lowland | Coastal, _) => TileType::Marsh,
-                (Humid | Saturated, _, _) => TileType::Forest,
+                (Saturated, _, _) => TileType::TemperateRainforest,
+                (Humid, Lowland, Flat) => TileType::Meadow,
+                (Humid, Lowland | Coastal, _) => TileType::DeciduousForest,
+                (Humid, _, _) => TileType::DeciduousForest,
+                (Moderate, Lowland, Flat) => TileType::Meadow,
+                (Moderate, Lowland, _) => TileType::Plains,
+                (Moderate, Upland, _) => TileType::Woodland,
                 (Moderate, _, _) => TileType::Plains,
             },
 
             // Warm zone (transition toward sun side)
             Warm => match (moisture, elevation, terrain) {
-                (_, Alpine | Highland, _) => TileType::Mountain,
+                (_, Alpine, _) => TileType::Mountain,
+                (_, Highland, Rugged) => TileType::Mountain,
+                (Humid | Saturated, Highland, _) => TileType::CloudForest,
+                (Moderate | Dry, Highland, _) => TileType::HighlandSavanna,
+                (Arid, Highland, _) => TileType::Badlands,
                 (Arid, _, Rugged) => TileType::Badlands,
                 (Arid, _, _) => TileType::Desert,
+                (Dry, _, Rugged) => TileType::Thornland,
+                (Dry, Upland, _) => TileType::DryWoodland,
                 (Dry, _, _) => TileType::Savanna,
                 (Saturated, Lowland | Coastal, _) => TileType::Marsh,
-                (Humid | Saturated, _, _) => TileType::Forest,
+                (Saturated, _, _) => TileType::SubtropicalForest,
+                (Humid, Lowland | Coastal, _) => TileType::SubtropicalForest,
+                (Humid, _, _) => TileType::SubtropicalForest,
+                (Moderate, Upland, _) => TileType::DryWoodland,
                 (Moderate, _, _) => TileType::Savanna,
             },
 
             // Hot zone (approaching sun side)
-            Hot => match (moisture, terrain) {
-                (Arid, Rugged) => TileType::Badlands,
-                (Arid, _) => TileType::Sahara,
-                (Dry, _) => TileType::Desert,
-                (Moderate, _) => TileType::Savanna,
-                (Humid | Saturated, _) => TileType::Jungle,
+            Hot => match (moisture, elevation, terrain) {
+                (Humid | Saturated, Highland | Alpine, _) => TileType::CloudForest,
+                (Moderate, Highland | Alpine, _) => TileType::HighlandSavanna,
+                (_, Alpine, _) => TileType::Mountain,
+                (Arid, Highland, Rugged) => TileType::Badlands,
+                (Arid, _, Rugged) => TileType::Badlands,
+                (Arid, _, Flat) => TileType::Erg,
+                (Arid, _, _) => TileType::Sahara,
+                (Dry, _, Rugged) => TileType::Hamada,
+                (Dry, _, _) => TileType::Desert,
+                (Moderate, _, _) => TileType::Savanna,
+                (Humid | Saturated, _, _) => TileType::Jungle,
             },
 
             // Scorching zone (sun side of tidally locked planet)
-            Scorching => match moisture {
-                Arid => TileType::Sahara,
-                _ => TileType::Desert,
+            Scorching => match (moisture, elevation, terrain) {
+                (_, Alpine | Highland, _) => TileType::ScorchedRock,
+                (Arid, _, Flat) => TileType::SaltFlat,
+                (Arid, _, Rugged) => TileType::MoltenWaste,
+                (Arid, _, _) => TileType::Sahara,
+                (Dry, _, Rugged) => TileType::Hamada,
+                (Dry, _, _) => TileType::Erg,
+                (_, _, _) => TileType::Desert,
             },
         }
     }
@@ -335,67 +451,77 @@ mod tests {
     #[test]
     fn ocean_is_sea() {
         let s = splines();
-        let biome = s.evaluate(-0.5, 20.0, 0.5, 0.5, 0.0, 0.5, 0.3);
+        // Medium depth (0.175), far from plate boundary → regular Sea
+        let biome = s.evaluate(-0.2, 20.0, 0.5, 0.5, 0.0, 0.5, 0.3, 0.5);
         assert_eq!(biome, TileType::Sea);
+    }
+
+    #[test]
+    fn continental_shelf_at_moderate_depth() {
+        let s = splines();
+        // Depth 0.125 (between 0.05 and 0.15) → ContinentalShelf
+        let biome = s.evaluate(-0.15, 20.0, 0.5, 0.5, 0.0, 0.5, 0.3, 0.5);
+        assert_eq!(biome, TileType::ContinentalShelf);
     }
 
     #[test]
     fn frozen_ocean_is_white() {
         let s = splines();
-        let biome = s.evaluate(-0.5, -30.0, 0.5, 0.5, 0.0, 0.5, 0.3);
+        let biome = s.evaluate(-0.15, -30.0, 0.5, 0.5, 0.0, 0.5, 0.3, 0.5);
         assert_eq!(biome, TileType::White);
     }
 
     #[test]
-    fn deep_ocean_is_sea() {
+    fn deep_ocean_at_boundary_is_trench() {
         let s = splines();
-        let biome = s.evaluate(-0.6, 20.0, 0.0, 0.5, 0.0, 0.5, 0.3);
-        assert_eq!(biome, TileType::Sea);
+        let biome = s.evaluate(-0.6, 20.0, 0.0, 0.5, 0.0, 0.5, 0.3, 0.5);
+        assert_eq!(biome, TileType::OceanTrench);
     }
 
     #[test]
     fn coastal_is_beach() {
         let s = splines();
-        let biome = s.evaluate(-0.01, 25.0, 0.5, 0.5, 0.0, 0.5, 0.3);
+        // Low rock_hardness + low peaks = beach
+        let biome = s.evaluate(-0.01, 25.0, 0.5, 0.5, 0.0, 0.5, 0.3, 0.3);
         assert_eq!(biome, TileType::Beach);
     }
 
     #[test]
-    fn frozen_land_is_glacier_or_snow() {
+    fn frozen_land_is_ice_sheet_or_snow() {
         let s = splines();
-        // Frozen + dry = glacier
-        let biome = s.evaluate(0.1, -40.0, 0.5, 0.5, 0.0, 0.1, 0.3);
-        assert_eq!(biome, TileType::Glacier);
+        // Frozen + dry = ice sheet (not alpine)
+        let biome = s.evaluate(0.1, -40.0, 0.5, 0.5, 0.0, 0.1, 0.3, 0.5);
+        assert_eq!(biome, TileType::IceSheet);
         // Frozen + humid = snow
-        let biome2 = s.evaluate(0.1, -40.0, 0.5, 0.5, 0.0, 0.7, 0.3);
+        let biome2 = s.evaluate(0.1, -40.0, 0.5, 0.5, 0.0, 0.7, 0.3, 0.5);
         assert_eq!(biome2, TileType::Snow);
     }
 
     #[test]
     fn cold_dry_is_tundra() {
         let s = splines();
-        let biome = s.evaluate(0.1, -10.0, 0.5, 0.5, 0.0, 0.1, 0.3);
+        let biome = s.evaluate(0.1, -10.0, 0.5, 0.5, 0.0, 0.1, 0.3, 0.5);
         assert_eq!(biome, TileType::Tundra);
     }
 
     #[test]
     fn cold_wet_is_taiga() {
         let s = splines();
-        let biome = s.evaluate(0.1, -10.0, 0.5, 0.5, 0.0, 0.6, 0.3);
+        let biome = s.evaluate(0.1, -10.0, 0.5, 0.5, 0.0, 0.6, 0.3, 0.5);
         assert_eq!(biome, TileType::Taiga);
     }
 
     #[test]
     fn temperate_dry_is_steppe() {
         let s = splines();
-        let biome = s.evaluate(0.1, 20.0, 0.5, 0.5, 0.0, 0.15, 0.3);
+        let biome = s.evaluate(0.1, 20.0, 0.5, 0.5, 0.0, 0.15, 0.3, 0.5);
         assert_eq!(biome, TileType::Steppe);
     }
 
     #[test]
     fn temperate_wet_lowland_is_marsh() {
         let s = splines();
-        let biome = s.evaluate(0.02, 20.0, 0.5, 0.5, 0.0, 0.9, 0.3);
+        let biome = s.evaluate(0.02, 20.0, 0.5, 0.5, 0.0, 0.9, 0.3, 0.5);
         assert_eq!(biome, TileType::Marsh);
     }
 
@@ -403,32 +529,33 @@ mod tests {
     fn hot_dry_rugged_is_badlands() {
         let s = splines();
         // Hot + arid + rugged terrain (low erosion)
-        let biome = s.evaluate(0.1, 65.0, 0.5, 0.1, 0.0, 0.1, 0.3);
+        let biome = s.evaluate(0.1, 65.0, 0.5, 0.1, 0.0, 0.1, 0.3, 0.5);
         assert_eq!(biome, TileType::Badlands);
     }
 
     #[test]
     fn hot_humid_is_jungle() {
         let s = splines();
-        let biome = s.evaluate(0.1, 65.0, 0.5, 0.5, 0.0, 0.7, 0.3);
+        let biome = s.evaluate(0.1, 65.0, 0.5, 0.5, 0.0, 0.7, 0.3, 0.5);
         assert_eq!(biome, TileType::Jungle);
     }
 
     #[test]
-    fn warm_moderate_is_savanna() {
+    fn warm_moderate_lowland_is_savanna() {
         let s = splines();
-        let biome = s.evaluate(0.1, 45.0, 0.5, 0.5, 0.0, 0.5, 0.3);
+        // Lower continentalness for lowland
+        let biome = s.evaluate(0.05, 45.0, 0.5, 0.5, 0.0, 0.5, 0.3, 0.5);
         assert_eq!(biome, TileType::Savanna);
     }
 
     #[test]
     fn scorching_is_sahara_or_desert() {
         let s = splines();
-        // Scorching + arid = sahara
-        let biome = s.evaluate(0.1, 100.0, 0.5, 0.5, 0.0, 0.1, 0.3);
+        // Scorching + arid = sahara (rolling terrain)
+        let biome = s.evaluate(0.1, 100.0, 0.5, 0.5, 0.0, 0.1, 0.3, 0.5);
         assert_eq!(biome, TileType::Sahara);
         // Scorching + some moisture = desert
-        let biome2 = s.evaluate(0.1, 100.0, 0.5, 0.5, 0.0, 0.4, 0.3);
+        let biome2 = s.evaluate(0.1, 100.0, 0.5, 0.5, 0.0, 0.4, 0.3, 0.5);
         assert_eq!(biome2, TileType::Desert);
     }
 
@@ -436,7 +563,7 @@ mod tests {
     fn mountains_at_high_peaks() {
         let s = splines();
         // High peaks with moderate erosion should create mountains
-        let biome = s.evaluate(0.2, 50.0, 0.5, 0.2, 0.8, 0.5, 0.3);
+        let biome = s.evaluate(0.2, 50.0, 0.5, 0.2, 0.8, 0.5, 0.3, 0.5);
         assert_eq!(biome, TileType::Mountain);
     }
 
@@ -444,7 +571,7 @@ mod tests {
     fn high_aridity_forces_arid() {
         let s = splines();
         // Temperate + moderate humidity but very high aridity => should force arid moisture class
-        let biome = s.evaluate(0.1, 20.0, 0.5, 0.5, 0.0, 0.5, 0.9);
+        let biome = s.evaluate(0.1, 20.0, 0.5, 0.5, 0.0, 0.5, 0.9, 0.5);
         assert_eq!(biome, TileType::Steppe, "High aridity should override moisture to Arid");
     }
 
@@ -458,6 +585,186 @@ mod tests {
             "High elevation humidity {} should be less than low {}",
             humid_high,
             humid_low
+        );
+    }
+
+    // --- New biome variant tests ---
+
+    #[test]
+    fn frozen_dry_lowland_is_ice_sheet() {
+        let s = splines();
+        let biome = s.evaluate(0.05, -40.0, 0.5, 0.5, 0.0, 0.15, 0.3, 0.5);
+        assert_eq!(biome, TileType::IceSheet);
+    }
+
+    #[test]
+    fn frozen_saturated_lowland_is_frozen_bog() {
+        let s = splines();
+        let biome = s.evaluate(0.02, -40.0, 0.5, 0.5, 0.0, 0.9, 0.3, 0.5);
+        assert_eq!(biome, TileType::FrozenBog);
+    }
+
+    #[test]
+    fn cold_highland_is_alpine_meadow() {
+        let s = splines();
+        // Cold zone, highland, rolling terrain
+        // Need temp to stay Cold (-20 to 3) after lapse rate of ~16.5°C
+        let biome = s.evaluate(0.25, 10.0, 0.5, 0.5, 0.0, 0.5, 0.3, 0.5);
+        assert_eq!(biome, TileType::AlpineMeadow);
+    }
+
+    #[test]
+    fn temperate_humid_lowland_flat_is_meadow() {
+        let s = splines();
+        // Temperate, humid, lowland, flat (high erosion)
+        let biome = s.evaluate(0.05, 20.0, 0.5, 0.8, 0.0, 0.7, 0.3, 0.5);
+        assert_eq!(biome, TileType::Meadow);
+    }
+
+    #[test]
+    fn temperate_humid_is_deciduous_forest() {
+        let s = splines();
+        // Temperate, humid, lowland, rolling
+        let biome = s.evaluate(0.05, 20.0, 0.5, 0.5, 0.0, 0.7, 0.3, 0.5);
+        assert_eq!(biome, TileType::DeciduousForest);
+    }
+
+    #[test]
+    fn temperate_saturated_upland_is_rainforest() {
+        let s = splines();
+        let biome = s.evaluate(0.12, 20.0, 0.5, 0.5, 0.0, 0.9, 0.3, 0.5);
+        assert_eq!(biome, TileType::TemperateRainforest);
+    }
+
+    #[test]
+    fn temperate_dry_upland_is_woodland() {
+        let s = splines();
+        let biome = s.evaluate(0.12, 20.0, 0.5, 0.5, 0.0, 0.3, 0.3, 0.5);
+        assert_eq!(biome, TileType::Woodland);
+    }
+
+    #[test]
+    fn temperate_arid_rugged_is_scrubland() {
+        let s = splines();
+        let biome = s.evaluate(0.1, 20.0, 0.5, 0.1, 0.0, 0.1, 0.3, 0.5);
+        assert_eq!(biome, TileType::Scrubland);
+    }
+
+    #[test]
+    fn warm_humid_highland_is_cloud_forest() {
+        let s = splines();
+        // Very high humidity to survive rain shadow at highland
+        let biome = s.evaluate(0.25, 55.0, 0.5, 0.5, 0.0, 0.95, 0.3, 0.5);
+        assert_eq!(biome, TileType::CloudForest);
+    }
+
+    #[test]
+    fn warm_dry_highland_is_highland_savanna() {
+        let s = splines();
+        // Humidity 0.6 → after rain shadow (~0.31) = Dry → HighlandSavanna
+        let biome = s.evaluate(0.25, 55.0, 0.5, 0.5, 0.0, 0.6, 0.3, 0.5);
+        assert_eq!(biome, TileType::HighlandSavanna);
+    }
+
+    #[test]
+    fn warm_humid_is_subtropical_forest() {
+        let s = splines();
+        let biome = s.evaluate(0.05, 45.0, 0.5, 0.5, 0.0, 0.7, 0.3, 0.5);
+        assert_eq!(biome, TileType::SubtropicalForest);
+    }
+
+    #[test]
+    fn warm_dry_rugged_is_thornland() {
+        let s = splines();
+        let biome = s.evaluate(0.1, 45.0, 0.5, 0.1, 0.0, 0.3, 0.3, 0.5);
+        assert_eq!(biome, TileType::Thornland);
+    }
+
+    #[test]
+    fn warm_dry_upland_is_dry_woodland() {
+        let s = splines();
+        let biome = s.evaluate(0.12, 45.0, 0.5, 0.5, 0.0, 0.3, 0.3, 0.5);
+        assert_eq!(biome, TileType::DryWoodland);
+    }
+
+    #[test]
+    fn hot_arid_flat_is_erg() {
+        let s = splines();
+        // Hot, arid, flat (high erosion)
+        let biome = s.evaluate(0.1, 65.0, 0.5, 0.8, 0.0, 0.1, 0.3, 0.5);
+        assert_eq!(biome, TileType::Erg);
+    }
+
+    #[test]
+    fn hot_dry_rugged_is_hamada() {
+        let s = splines();
+        let biome = s.evaluate(0.1, 65.0, 0.5, 0.1, 0.0, 0.3, 0.3, 0.5);
+        assert_eq!(biome, TileType::Hamada);
+    }
+
+    #[test]
+    fn scorching_highland_is_scorched_rock() {
+        let s = splines();
+        let biome = s.evaluate(0.25, 100.0, 0.5, 0.5, 0.0, 0.1, 0.3, 0.5);
+        assert_eq!(biome, TileType::ScorchedRock);
+    }
+
+    #[test]
+    fn scorching_arid_flat_is_salt_flat() {
+        let s = splines();
+        let biome = s.evaluate(0.1, 100.0, 0.5, 0.8, 0.0, 0.1, 0.3, 0.5);
+        assert_eq!(biome, TileType::SaltFlat);
+    }
+
+    #[test]
+    fn scorching_arid_rugged_is_molten_waste() {
+        let s = splines();
+        let biome = s.evaluate(0.1, 100.0, 0.5, 0.1, 0.0, 0.1, 0.3, 0.5);
+        assert_eq!(biome, TileType::MoltenWaste);
+    }
+
+    #[test]
+    fn scorching_dry_is_erg() {
+        let s = splines();
+        let biome = s.evaluate(0.1, 100.0, 0.5, 0.5, 0.0, 0.3, 0.3, 0.5);
+        assert_eq!(biome, TileType::Erg);
+    }
+
+    #[test]
+    fn ocean_hot_is_salt_flat() {
+        let s = splines();
+        let biome = s.evaluate(-0.5, 90.0, 0.5, 0.5, 0.0, 0.5, 0.3, 0.5);
+        assert_eq!(biome, TileType::SaltFlat);
+    }
+
+    #[test]
+    fn coastal_hard_rock_is_rocky_coast() {
+        let s = splines();
+        // Coastal, temperate, hard rock
+        let biome = s.evaluate(-0.01, 25.0, 0.5, 0.5, 0.0, 0.5, 0.3, 0.8);
+        assert_eq!(biome, TileType::RockyCoast);
+    }
+
+    #[test]
+    fn many_distinct_biomes_reachable() {
+        let s = splines();
+        let mut biomes = std::collections::HashSet::new();
+        // Sweep through parameter space
+        for &cont in &[-0.5, -0.01, 0.02, 0.05, 0.1, 0.12, 0.2, 0.25, 0.35] {
+            for &temp in &[-40.0, -10.0, 10.0, 20.0, 45.0, 65.0, 100.0] {
+                for &humid in &[0.1, 0.3, 0.5, 0.7, 0.9] {
+                    for &eros in &[0.1, 0.5, 0.8] {
+                        let biome = s.evaluate(cont, temp, 0.5, eros, 0.0, humid, 0.3, 0.5);
+                        biomes.insert(biome);
+                    }
+                }
+            }
+        }
+        assert!(
+            biomes.len() >= 30,
+            "Expected 30+ distinct biomes, got {}: {:?}",
+            biomes.len(),
+            biomes
         );
     }
 }

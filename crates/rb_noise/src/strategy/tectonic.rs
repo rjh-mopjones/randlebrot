@@ -150,14 +150,14 @@ impl PlateRegistry {
             cell_to_plate.insert((ix, iy), best_plate);
         }
 
-        // Generate 3-8 hotspots in world coordinates
-        let hotspot_count = 3 + (next_f64() * 5.0) as usize;
+        // Generate 1-3 hotspots in world coordinates
+        let hotspot_count = 1 + (next_f64() * 3.0) as usize;
         let mut hotspots = Vec::with_capacity(hotspot_count);
         for _ in 0..hotspot_count {
             hotspots.push(Hotspot {
                 pos: (next_f64() * world_width, next_f64() * world_height),
-                intensity: 0.6 + next_f64() * 0.4,
-                radius: 30.0 + next_f64() * 50.0,
+                intensity: 0.4 + next_f64() * 0.3,
+                radius: 10.0 + next_f64() * 20.0,
             });
         }
 
@@ -478,7 +478,7 @@ impl TectonicPlatesStrategy {
             (base + base * texture).clamp(0.0, 1.0)
         }).sum::<f64>().min(1.0);
 
-        let volcanism = (arc_volcanism + rift_volcanism * 0.5 + hotspot_volcanism * 0.9)
+        let volcanism = (arc_volcanism + rift_volcanism * 0.5 + hotspot_volcanism * 0.5)
             .clamp(0.0, 1.0);
 
         TectonicSample {

@@ -7,6 +7,7 @@ pub mod resource;
 mod rock_hardness;
 mod tectonic;
 mod temperature;
+pub mod wind;
 
 pub use continentalness::ContinentalnessStrategy;
 pub use erosion::ErosionStrategy;

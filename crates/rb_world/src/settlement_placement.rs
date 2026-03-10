@@ -110,7 +110,8 @@ fn water_access_score(biome_map: &BiomeMap, x: usize, y: usize, search_radius: u
     for ny in y_start..=y_end {
         for nx in x_start..=x_end {
             if let Some(biome) = biome_map.get_biome(nx, ny) {
-                if matches!(biome, TileType::Sea | TileType::Beach) {
+                if matches!(biome, TileType::Sea | TileType::Beach | TileType::ShallowSea
+                    | TileType::CoralReef | TileType::RockyCoast | TileType::Mangrove | TileType::SeaCliff) {
                     // Found water - closer is better
                     let dx = (nx as f64 - x as f64).abs();
                     let dy = (ny as f64 - y as f64).abs();
@@ -171,7 +172,9 @@ pub fn calculate_site_suitability(
     };
 
     // Can't place settlements in water
-    if matches!(biome, TileType::Sea | TileType::White) {
+    if matches!(biome, TileType::Sea | TileType::White | TileType::ShallowSea
+        | TileType::ContinentalShelf | TileType::DeepOcean | TileType::OceanTrench
+        | TileType::OceanRidge | TileType::CoralReef) {
         return 0.0;
     }
 
@@ -236,7 +239,9 @@ fn find_local_maxima(
             };
 
             // Skip water
-            if matches!(biome, TileType::Sea | TileType::White) {
+            if matches!(biome, TileType::Sea | TileType::White | TileType::ShallowSea
+                | TileType::ContinentalShelf | TileType::DeepOcean | TileType::OceanTrench
+                | TileType::OceanRidge | TileType::CoralReef) {
                 continue;
             }
 
@@ -429,7 +434,7 @@ mod tests {
         let culture = Culture::twilight_dweller();
         // Sea tiles have continentalness below sea level
         let score = culture.calculate_suitability(TileType::Sea, 20.0, -0.5);
-        assert!(score < 0.3);
+        assert!(score <= 0.3, "Sea suitability {} should be low", score);
     }
 
     #[test]

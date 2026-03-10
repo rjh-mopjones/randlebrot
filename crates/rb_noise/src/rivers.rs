@@ -210,7 +210,7 @@ impl RiverNetwork {
         let accumulation = compute_flow_accumulation(&flow_dir, &filled, width, height);
 
         // Step 4: Build river tree
-        let min_accumulation = ((total as f64) * 0.0005).max(25.0) as u32;
+        let min_accumulation = ((total as f64) * 0.0003).max(20.0) as u32;
         let mut segments = build_river_tree(
             &flow_dir, &accumulation, continentalness, width, height, sea_level, min_accumulation,
         );

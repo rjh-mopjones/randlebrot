@@ -223,6 +223,6 @@ mod tests {
         let forest = bias.calculate(0.0, 0.5, 0.5, TileType::Forest);
         let plains = bias.calculate(0.0, 0.5, 0.5, TileType::Plains);
         assert_eq!(forest, 1.0);
-        assert_eq!(plains, 0.1);
+        assert!((plains - 0.1).abs() < 1e-10, "Expected ~0.1, got {}", plains);
     }
 }

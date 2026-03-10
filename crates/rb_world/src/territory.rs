@@ -11,30 +11,40 @@ use serde::{Deserialize, Serialize};
 pub fn terrain_influence_decay(biome: TileType) -> f64 {
     match biome {
         // Complete barriers
-        TileType::Sea | TileType::OceanTrench | TileType::White | TileType::Glacier => 0.0,
+        TileType::Sea | TileType::OceanTrench | TileType::White | TileType::Glacier
+        | TileType::ShallowSea | TileType::ContinentalShelf | TileType::DeepOcean
+        | TileType::OceanRidge | TileType::CoralReef | TileType::IceSheet => 0.0,
 
         // Strong barriers
         TileType::Mountain => 0.3,
-        TileType::Volcanic => 0.2, // Very dangerous
+        TileType::Volcanic | TileType::MoltenWaste => 0.2,
+        TileType::LavaField => 0.25,
 
         // Moderate barriers
-        TileType::River => 0.5, // Natural boundary but crossable
+        TileType::River => 0.5,
         TileType::Plateau => 0.5,
-        TileType::Badlands => 0.5,
-        TileType::Jungle => 0.55,
-        TileType::Marsh => 0.55,
+        TileType::Badlands | TileType::ScorchedRock => 0.5,
+        TileType::Jungle | TileType::TemperateRainforest => 0.55,
+        TileType::Marsh | TileType::Mangrove | TileType::FrozenBog => 0.55,
+        TileType::CloudForest | TileType::SubtropicalForest => 0.6,
 
         // Weak barriers
         TileType::Snow | TileType::Tundra => 0.6,
         TileType::Taiga => 0.7,
-        TileType::Desert | TileType::Sahara => 0.7,
-        TileType::Forest => 0.8,
+        TileType::Desert | TileType::Sahara | TileType::Erg
+        | TileType::Hamada | TileType::SaltFlat => 0.7,
+        TileType::Forest | TileType::DeciduousForest => 0.8,
+        TileType::Thornland | TileType::Scrubland => 0.8,
+        TileType::Woodland | TileType::DryWoodland => 0.85,
         TileType::Steppe => 0.85,
-        TileType::Savanna => 0.85,
+        TileType::Savanna | TileType::HighlandSavanna => 0.85,
+        TileType::AlpineMeadow => 0.8,
 
         // Easy expansion
-        TileType::Beach => 0.9,
-        TileType::Plains => 0.95,
+        TileType::Beach | TileType::RockyCoast => 0.9,
+        TileType::Oasis => 0.9,
+        TileType::SeaCliff => 0.4,
+        TileType::Plains | TileType::Meadow => 0.95,
     }
 }
 
