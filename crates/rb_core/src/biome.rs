@@ -122,7 +122,7 @@ impl TileType {
             Self::Sahara => [255, 165, 0],      // Orange
             Self::Erg => [240, 200, 120],       // Sand sea yellow
             Self::Hamada => [180, 140, 100],    // Rocky desert tan
-            Self::SaltFlat => [245, 240, 230],  // Near-white salt
+            Self::SaltFlat => [222, 205, 165],  // Warm desert salt crust
             Self::Badlands => [178, 102, 68],   // Rust brown - eroded arid terrain
             Self::Oasis => [60, 180, 60],       // Verdant green
             Self::Volcanic => [64, 32, 32],     // Dark red-brown - active volcanic

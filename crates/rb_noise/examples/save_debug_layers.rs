@@ -73,7 +73,7 @@ fn main() {
         512,
         macro_height as f64,
         1, // detail_level = meso
-        &progress,
+        Some(&progress),
         NoiseBackend::Gpu,
         Some(&macro_map),
     );

@@ -1010,7 +1010,7 @@ impl BiomeMap {
         output_size: usize,
         world_height: f64,
         detail_level: u32,
-        progress: &Arc<LayerProgress>,
+        progress: Option<&Arc<LayerProgress>>,
         macro_map: Option<&BiomeMap>,
     ) -> Self {
         let world_width = world_height * 2.0;
@@ -1068,14 +1068,16 @@ impl BiomeMap {
                 }
 
                 // Update progress
-                let n = chunk.len();
-                progress.increment(LayerId::Continentalness, n);
-                progress.increment(LayerId::Tectonic, n);
-                progress.increment(LayerId::PeaksValleys, n);
-                progress.increment(LayerId::Humidity, n);
-                progress.increment(LayerId::LightLevel, n);
-                progress.increment(LayerId::RockHardness, n);
-                progress.increment(LayerId::Derivation, n);
+                if let Some(p) = progress {
+                    let n = chunk.len();
+                    p.increment(LayerId::Continentalness, n);
+                    p.increment(LayerId::Tectonic, n);
+                    p.increment(LayerId::PeaksValleys, n);
+                    p.increment(LayerId::Humidity, n);
+                    p.increment(LayerId::LightLevel, n);
+                    p.increment(LayerId::RockHardness, n);
+                    p.increment(LayerId::Derivation, n);
+                }
 
                 results
             })
@@ -1236,7 +1238,7 @@ impl BiomeMap {
         output_size: usize,
         world_height: f64,
         detail_level: u32,
-        progress: &Arc<LayerProgress>,
+        progress: Option<&Arc<LayerProgress>>,
         backend: NoiseBackend,
         macro_map: Option<&BiomeMap>,
     ) -> Self {
@@ -1260,7 +1262,7 @@ impl BiomeMap {
         output_size: usize,
         world_height: f64,
         detail_level: u32,
-        progress: &Arc<LayerProgress>,
+        progress: Option<&Arc<LayerProgress>>,
         macro_map: Option<&BiomeMap>,
     ) -> Self {
         use crate::gpu::GpuNoiseContext;
@@ -1279,10 +1281,12 @@ impl BiomeMap {
         );
 
         // Mark base layers as complete
-        progress.increment(LayerId::Continentalness, total_pixels);
-        progress.increment(LayerId::Tectonic, total_pixels);
-        progress.increment(LayerId::LightLevel, total_pixels);
-        progress.increment(LayerId::RockHardness, total_pixels);
+        if let Some(p) = progress {
+            p.increment(LayerId::Continentalness, total_pixels);
+            p.increment(LayerId::Tectonic, total_pixels);
+            p.increment(LayerId::LightLevel, total_pixels);
+            p.increment(LayerId::RockHardness, total_pixels);
+        }
 
         let continentalness: Vec<f64> = layers.continentalness.iter().map(|&v| v as f64).collect();
         let raw_peaks: Vec<f64> = layers.peaks_valleys.iter().map(|&v| v as f64).collect();
@@ -1307,8 +1311,10 @@ impl BiomeMap {
         let tectonic_plate_ids: Vec<f64> = tectonic_data.iter().map(|s| s.plate_id).collect();
         let tectonic_volcanism: Vec<f64> = tectonic_data.iter().map(|s| s.volcanism).collect();
 
-        progress.increment(LayerId::PeaksValleys, total_pixels);
-        progress.increment(LayerId::Humidity, total_pixels);
+        if let Some(p) = progress {
+            p.increment(LayerId::PeaksValleys, total_pixels);
+            p.increment(LayerId::Humidity, total_pixels);
+        }
 
         // Derive all per-pixel layers in parallel
         let splines = BiomeSplines::new(SEA_LEVEL);
@@ -1362,7 +1368,9 @@ impl BiomeMap {
             biomes.push(biome);
         }
 
-        progress.increment(LayerId::Derivation, total_pixels);
+        if let Some(p) = progress {
+            p.increment(LayerId::Derivation, total_pixels);
+        }
 
         // Carve macro river channels into meso heightmap before D8 flow
         let mut carved_heightmap = heightmap_vec.clone();
@@ -1460,7 +1468,7 @@ impl BiomeMap {
         output_size: usize,
         world_height: f64,
         detail_level: u32,
-        progress: &Arc<LayerProgress>,
+        progress: Option<&Arc<LayerProgress>>,
         macro_map: Option<&BiomeMap>,
     ) -> Self {
         Self::generate_meso_full(
