@@ -12,7 +12,7 @@ pub use civilization::{CivilizationConfig, CivilizationGenerator, CivilizationRe
 pub use culture::{BiomePreferences, Culture, CultureTraits, CultureType};
 pub use definition::{
     City, CityTier, Landmark, LandmarkKind, NoiseParams, Point2D, Polygon, Region,
-    SelectedChunk, WorldDefinition, WorldIdGenerator,
+    WorldDefinition, WorldIdGenerator,
 };
 pub use faction::{Faction, FactionDisposition};
 pub use roads::{Road, RoadType, TradeGood, TradeRoute};
@@ -25,7 +25,6 @@ pub struct RbWorldPlugin;
 impl Plugin for RbWorldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<WorldDefinition>()
-            .init_resource::<SelectedChunk>()
             .init_resource::<WorldIdGenerator>();
     }
 }

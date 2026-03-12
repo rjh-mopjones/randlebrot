@@ -1411,6 +1411,24 @@ impl RiverGenerator {
         }
     }
 
+    /// Create a river generator with threshold scaled by detail level.
+    /// Higher detail levels raise the accumulation threshold so that zoomed-in
+    /// views refine existing rivers instead of spawning independent networks.
+    pub fn for_map_size_with_detail(sea_level: f64, width: usize, height: usize, detail_level: u32) -> Self {
+        let total = width * height;
+        let base_threshold = ((total as f64) * 0.0005).max(25.0);
+        let detail_multiplier = match detail_level {
+            0 | 1 => 1.0,
+            2 => 3.0,
+            3 => 8.0,
+            _ => (detail_level as f64).powi(2),
+        };
+        Self {
+            sea_level,
+            min_accumulation: (base_threshold * detail_multiplier) as u32,
+        }
+    }
+
     /// Generate rivers for a map using the new geology-aware system.
     /// Falls back to simple D8 when geological layers aren't available.
     ///

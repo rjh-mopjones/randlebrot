@@ -1,5 +1,7 @@
 use bevy::prelude::*;
 use bitflags::bitflags;
+use std::collections::HashMap;
+use rb_core::TileType;
 
 bitflags! {
     /// Collision flags for tiles.
@@ -14,6 +16,27 @@ bitflags! {
 /// Tileset identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TilesetId(pub u32);
+
+/// Marker for a playable-level chunk entity.
+#[derive(Component)]
+pub struct LevelChunk {
+    pub coord: (i32, i32),
+}
+
+/// Tile data for a loaded chunk (64x64).
+#[derive(Component)]
+pub struct ChunkTiles {
+    pub tiles: Vec<TileType>,
+    pub collision: Vec<CollisionFlags>,
+    pub width: usize,
+    pub height: usize,
+}
+
+/// Tracks loaded level chunks.
+#[derive(Resource, Default)]
+pub struct LoadedChunks {
+    pub chunks: HashMap<(i32, i32), Entity>,
+}
 
 /// Tilemap plugin for Randlebrot.
 /// Manages tile storage, collision layers, tileset registry, and chunk rendering.

@@ -21,7 +21,7 @@ impl Default for CacheConfig {
 }
 
 /// A cached chunk at the micro (finest) detail level.
-/// 128×128 samples.
+/// 512×512 samples.
 #[derive(Clone)]
 pub struct MicroChunk {
     pub coord: ChunkCoord,
@@ -30,7 +30,7 @@ pub struct MicroChunk {
 }
 
 impl MicroChunk {
-    pub const SIZE: usize = 128;
+    pub const SIZE: usize = 512;
 
     pub fn new(coord: ChunkCoord, strategy: &dyn NoiseStrategy, world_offset: (f64, f64)) -> Self {
         let mut data = Vec::with_capacity(Self::SIZE * Self::SIZE);
@@ -39,7 +39,7 @@ impl MicroChunk {
             for x in 0..Self::SIZE {
                 let world_x = world_offset.0 + x as f64;
                 let world_y = world_offset.1 + y as f64;
-                let value = strategy.generate(world_x, world_y, DetailLevel::Micro.as_u32());
+                let value = strategy.generate(world_x, world_y, DetailLevel::Micro.octave_offset());
                 data.push(value);
             }
         }
@@ -106,7 +106,7 @@ impl MicroCache {
 }
 
 /// A cached chunk at the meso (medium) detail level.
-/// 64×64 samples, owns a cache of MicroChunks.
+/// 128×128 samples, owns a cache of MicroChunks.
 #[derive(Clone)]
 pub struct MesoChunk {
     pub coord: ChunkCoord,
@@ -115,7 +115,7 @@ pub struct MesoChunk {
 }
 
 impl MesoChunk {
-    pub const SIZE: usize = 64;
+    pub const SIZE: usize = 128;
 
     pub fn new(coord: ChunkCoord, strategy: &dyn NoiseStrategy, world_offset: (f64, f64)) -> Self {
         let mut data = Vec::with_capacity(Self::SIZE * Self::SIZE);
@@ -124,7 +124,7 @@ impl MesoChunk {
             for x in 0..Self::SIZE {
                 let world_x = world_offset.0 + x as f64;
                 let world_y = world_offset.1 + y as f64;
-                let value = strategy.generate(world_x, world_y, DetailLevel::Meso.as_u32());
+                let value = strategy.generate(world_x, world_y, DetailLevel::Meso.octave_offset());
                 data.push(value);
             }
         }
@@ -201,7 +201,7 @@ impl MesoCache {
 }
 
 /// A cached chunk at the macro (coarsest) detail level.
-/// 32×32 samples, owns a cache of MesoChunks.
+/// 64×64 samples, owns a cache of MesoChunks.
 #[derive(Clone)]
 pub struct MacroChunk {
     pub coord: ChunkCoord,
@@ -210,7 +210,7 @@ pub struct MacroChunk {
 }
 
 impl MacroChunk {
-    pub const SIZE: usize = 32;
+    pub const SIZE: usize = 64;
 
     pub fn new(coord: ChunkCoord, strategy: &dyn NoiseStrategy, world_offset: (f64, f64)) -> Self {
         let mut data = Vec::with_capacity(Self::SIZE * Self::SIZE);
@@ -219,7 +219,7 @@ impl MacroChunk {
             for x in 0..Self::SIZE {
                 let world_x = world_offset.0 + x as f64;
                 let world_y = world_offset.1 + y as f64;
-                let value = strategy.generate(world_x, world_y, DetailLevel::Macro.as_u32());
+                let value = strategy.generate(world_x, world_y, DetailLevel::Macro.octave_offset());
                 data.push(value);
             }
         }

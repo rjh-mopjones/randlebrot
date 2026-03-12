@@ -343,13 +343,6 @@ impl Landmark {
     }
 }
 
-/// Resource for tracking the currently selected chunk for editing.
-#[derive(Resource, Default, Debug, Clone)]
-pub struct SelectedChunk {
-    /// Chunk coordinate (if any selected).
-    pub coord: Option<(i32, i32)>,
-}
-
 /// Resource tracking the next available ID for world objects.
 #[derive(Resource, Default, Debug)]
 pub struct WorldIdGenerator {

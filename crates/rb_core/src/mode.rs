@@ -2,8 +2,8 @@ use bevy::prelude::*;
 
 /// Application mode state for the Randlebrot editor.
 ///
-/// The editor operates in one of four modes, each providing
-/// different tools and views for world creation and testing.
+/// The editor operates in one of two modes: world generation/viewing
+/// and play-testing at street level.
 #[derive(States, Default, Clone, Eq, PartialEq, Hash, Debug)]
 pub enum AppMode {
     /// Generate procedural world maps from noise parameters.
@@ -12,19 +12,9 @@ pub enum AppMode {
     #[default]
     WorldGenerator,
 
-    /// Author global world features on top of generated terrain.
-    /// Primary view: World map with overlays
-    /// Tools: Region drawing, city placement, landmark placement
-    WorldMapEditor,
-
-    /// Edit individual chunks at street level.
-    /// Primary view: 512×512 MicroMap
-    /// Tools: Tile painting, building placement, NPC spawns
-    ChunkEditor,
-
-    /// Test gameplay in the current chunk.
+    /// Test gameplay at a clicked location.
     /// Primary view: Playable chunk with player
-    /// Tools: Play/stop, teleport, debug overlays
+    /// Tools: ESC to exit, debug overlays
     LevelLauncher,
 }
 
@@ -33,8 +23,6 @@ impl AppMode {
     pub fn name(&self) -> &'static str {
         match self {
             Self::WorldGenerator => "Generator",
-            Self::WorldMapEditor => "Map Editor",
-            Self::ChunkEditor => "Chunk Editor",
             Self::LevelLauncher => "Launcher",
         }
     }
@@ -43,8 +31,6 @@ impl AppMode {
     pub fn shortcut(&self) -> KeyCode {
         match self {
             Self::WorldGenerator => KeyCode::F1,
-            Self::WorldMapEditor => KeyCode::F2,
-            Self::ChunkEditor => KeyCode::F3,
             Self::LevelLauncher => KeyCode::F4,
         }
     }
@@ -53,8 +39,6 @@ impl AppMode {
     pub fn all() -> &'static [AppMode] {
         &[
             Self::WorldGenerator,
-            Self::WorldMapEditor,
-            Self::ChunkEditor,
             Self::LevelLauncher,
         ]
     }
@@ -67,7 +51,7 @@ pub struct ModeTransitionEvent {
     pub to: AppMode,
 }
 
-/// System that handles F1-F4 key presses to switch modes.
+/// System that handles F1/F4 key presses to switch modes.
 pub fn handle_mode_shortcuts(
     keyboard: Res<ButtonInput<KeyCode>>,
     current_mode: Res<State<AppMode>>,

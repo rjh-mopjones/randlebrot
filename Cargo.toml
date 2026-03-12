@@ -42,6 +42,7 @@ gpu = ["rb_noise/gpu"]
 [dependencies]
 bevy.workspace = true
 bevy_egui.workspace = true
+image.workspace = true
 rayon = "1.10"
 rb_core.workspace = true
 rb_noise.workspace = true
