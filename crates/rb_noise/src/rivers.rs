@@ -14,7 +14,8 @@
 //! Chunks call `RiverNetwork::query_chunk()` which returns segments filtered
 //! by a drainage threshold that varies with LOD level.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, BinaryHeap, VecDeque};
+use std::cmp::Ordering;
 
 // ─── D8 Constants ────────────────────────────────────────────────────────────
 
@@ -201,11 +202,18 @@ impl RiverNetwork {
     ) -> Self {
         let total = width * height;
 
-        // Step 1: Identify natural lakes (diff pre-fill vs post-fill)
-        let filled = fill_depressions(heightmap, width, height, sea_level);
+        // Step 0: Condition heightmap for better drainage structure
+        // Adds subtle distance-to-ocean bias + tectonic ridges + valley carving.
+        // Used ONLY for flow routing; original heightmap preserved for biomes etc.
+        let conditioned = condition_heightmap_for_drainage(
+            heightmap, continentalness, tectonic_stress, width, height, sea_level,
+        );
+
+        // Step 1: Identify natural lakes (diff pre-fill vs post-fill, using ORIGINAL heightmap)
+        let filled = fill_depressions(&conditioned, width, height, sea_level);
         let lakes = identify_lakes(heightmap, &filled, continentalness, light_level, width, height, sea_level);
 
-        // Step 2: Geology-aware D8 flow direction
+        // Step 2: Geology-aware D8 flow direction (on conditioned + filled heightmap)
         let flow_dir = compute_geology_aware_flow(
             &filled, rock_hardness, tectonic_stress, width, height, sea_level,
         );
@@ -525,9 +533,10 @@ pub fn rasterize_from_network(
         return grid;
     }
 
-    // Find max drainage for normalization
-    let max_drainage = constraints.iter()
-        .map(|c| c.drainage_area)
+    // Use global max drainage for consistent normalization across all tiles.
+    // This prevents small rivers from being crushed in tiles that also contain large ones.
+    let global_max = network.segments.iter()
+        .map(|s| s.drainage_area)
         .max()
         .unwrap_or(1);
 
@@ -559,12 +568,14 @@ pub fn rasterize_from_network(
         }
 
         let drainage_per_point = vec![constraint.drainage_area; pixel_path.len()];
-        let max_half_width = 3.0 * constraint.character.width_multiplier();
+        // Scale river width with tile resolution so rivers have consistent world-space width.
+        // Base width ~3 world units for the largest river, scaled to pixel space.
+        let max_half_width = 3.0 * scale * constraint.character.width_multiplier();
 
         rasterise_smooth_line(
             &mut grid, output_size, output_size,
             &pixel_path, &drainage_per_point,
-            max_drainage, max_half_width,
+            global_max, max_half_width,
         );
     }
 
@@ -584,68 +595,189 @@ fn compute_river_depth(drainage_area: u32) -> f64 {
     (drainage_area as f64).log10().max(0.0) * 0.5
 }
 
-// ─── Depression Filling ──────────────────────────────────────────────────────
+// ─── Depression Filling (Priority-Flood) ─────────────────────────────────────
 
-/// Fill depressions using a simplified Planchon-Darboux algorithm.
-/// This ensures all land cells can drain to the ocean.
+/// Min-heap entry for Priority-Flood algorithm.
+#[derive(Clone, Copy)]
+struct FloodCell {
+    elevation: f64,
+    index: usize,
+}
+
+impl PartialEq for FloodCell {
+    fn eq(&self, other: &Self) -> bool { self.index == other.index }
+}
+impl Eq for FloodCell {}
+impl PartialOrd for FloodCell {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+impl Ord for FloodCell {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Reverse order for min-heap (BinaryHeap is max-heap by default)
+        other.elevation.partial_cmp(&self.elevation).unwrap_or(Ordering::Equal)
+    }
+}
+
+/// Fill depressions using the Priority-Flood algorithm (Barnes et al. 2014).
+/// O(n log n), guaranteed convergence in a single pass.
+/// Naturally assigns monotonically increasing elevations through filled areas,
+/// giving D8 flow clear drainage direction through flats.
 fn fill_depressions(elevation: &[f64], width: usize, height: usize, sea_level: f64) -> Vec<f64> {
+    let total = width * height;
+    let epsilon = 1e-4;
     let mut filled = elevation.to_vec();
-    let epsilon = 1e-5;
+    let mut resolved = vec![false; total];
+    let mut heap = BinaryHeap::new();
 
-    // Initialize: ocean cells keep their elevation, land cells start at infinity
+    // Seed the heap with all ocean cells and grid-boundary cells
     for y in 0..height {
         for x in 0..width {
             let idx = y * width + x;
-            if elevation[idx] <= sea_level {
-                filled[idx] = elevation[idx];
-            } else if x == 0 || x == width - 1 || y == 0 || y == height - 1 {
-                filled[idx] = elevation[idx];
+            let is_boundary = x == 0 || x == width - 1 || y == 0 || y == height - 1;
+            if elevation[idx] <= sea_level || is_boundary {
+                heap.push(FloodCell { elevation: elevation[idx], index: idx });
+                resolved[idx] = true;
+            }
+        }
+    }
+
+    // Process cells in elevation order (lowest first)
+    while let Some(cell) = heap.pop() {
+        let x = cell.index % width;
+        let y = cell.index / width;
+
+        for &(dx, dy) in &D8_OFFSETS {
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+            if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
+                continue;
+            }
+            let nidx = ny as usize * width + nx as usize;
+            if resolved[nidx] {
+                continue;
+            }
+            resolved[nidx] = true;
+
+            // If neighbor is lower than current cell, it's in a depression — raise it
+            let new_elev = if elevation[nidx] <= filled[cell.index] {
+                filled[cell.index] + epsilon
             } else {
-                filled[idx] = f64::MAX;
-            }
+                elevation[nidx]
+            };
+            filled[nidx] = new_elev;
+            heap.push(FloodCell { elevation: new_elev, index: nidx });
         }
-    }
-
-    // Iteratively lower cells until stable
-    let mut changed = true;
-    let mut iterations = 0;
-    let max_iterations = 5000;
-
-    while changed && iterations < max_iterations {
-        changed = false;
-        iterations += 1;
-
-        for y in 1..height - 1 {
-            for x in 1..width - 1 {
-                let idx = y * width + x;
-
-                if filled[idx] <= elevation[idx] {
-                    continue;
-                }
-
-                let mut min_neighbor = f64::MAX;
-                for (dx, dy) in D8_OFFSETS {
-                    let nx = (x as i32 + dx) as usize;
-                    let ny = (y as i32 + dy) as usize;
-                    let nidx = ny * width + nx;
-                    min_neighbor = min_neighbor.min(filled[nidx]);
-                }
-
-                let new_height = (min_neighbor + epsilon).max(elevation[idx]);
-                if new_height < filled[idx] {
-                    filled[idx] = new_height;
-                    changed = true;
-                }
-            }
-        }
-    }
-
-    let unfilled = filled.iter().filter(|&&v| v >= f64::MAX / 2.0).count();
-    if unfilled > 0 || iterations >= max_iterations {
-        println!("fill_depressions: {iterations} iterations, converged={}, unfilled={unfilled}", !changed);
     }
 
     filled
+}
+
+// ─── Heightmap Drainage Conditioning ─────────────────────────────────────────
+
+/// Condition the heightmap to create coherent drainage basins before D8 flow.
+///
+/// Noise-based terrain lacks large-scale drainage gradients: each local hill
+/// drains independently to its nearest coast, producing many small fragmented
+/// basins. D8 flow only looks at adjacent cells, so smooth global biases
+/// are invisible — instead we blend the heightmap with a heavily smoothed
+/// version of itself to eliminate high-frequency noise while preserving
+/// large-scale terrain structure.
+///
+/// The conditioned heightmap is used ONLY for D8 flow routing — the original
+/// heightmap is preserved for all other layers (biome, temperature, etc.).
+fn condition_heightmap_for_drainage(
+    heightmap: &[f64],
+    continentalness: &[f64],
+    tectonic_stress: &[f64],
+    width: usize,
+    height: usize,
+    sea_level: f64,
+) -> Vec<f64> {
+    let total = width * height;
+
+    // Step 1: Create a heavily smoothed heightmap that shows only large-scale terrain.
+    // D8 flow on this surface follows macro-scale gradients (highlands → coast)
+    // rather than chasing every noise wiggle.
+    let smoothed = box_blur(heightmap, width, height, 32);
+
+    // Step 2: Blend original and smoothed heightmaps.
+    // The smoothed version controls large-scale flow direction;
+    // the original adds local variation for natural-looking river courses.
+    // blend = 0.0 → pure original (fragmented), 1.0 → pure smooth (too straight)
+    let blend = 0.85;
+    let mut conditioned = Vec::with_capacity(total);
+    for idx in 0..total {
+        conditioned.push(heightmap[idx] * (1.0 - blend) + smoothed[idx] * blend);
+    }
+
+    // Step 3: Tectonic ridge enhancement on the conditioned surface.
+    // Plate boundaries (high stress) get elevation boost → act as watershed divides.
+    let beta = 0.05;
+    for idx in 0..total {
+        if continentalness[idx] > sea_level {
+            conditioned[idx] += tectonic_stress[idx] * beta;
+        }
+    }
+
+    conditioned
+}
+
+/// Simple separable box blur for a 2D grid.
+fn box_blur(data: &[f64], width: usize, height: usize, radius: usize) -> Vec<f64> {
+    let mut temp = data.to_vec();
+    let mut output = data.to_vec();
+    let diameter = radius * 2 + 1;
+
+    // Horizontal pass
+    for y in 0..height {
+        let mut sum = 0.0;
+        let mut count = 0;
+        // Initial window
+        for x in 0..=radius.min(width - 1) {
+            sum += data[y * width + x];
+            count += 1;
+        }
+        for x in 0..width {
+            temp[y * width + x] = sum / count as f64;
+            // Add right edge
+            let right = x + radius + 1;
+            if right < width {
+                sum += data[y * width + right];
+                count += 1;
+            }
+            // Remove left edge
+            if x >= radius {
+                let left = x - radius;
+                sum -= data[y * width + left];
+                count -= 1;
+            }
+        }
+    }
+
+    // Vertical pass
+    for x in 0..width {
+        let mut sum = 0.0;
+        let mut count = 0;
+        for y in 0..=radius.min(height - 1) {
+            sum += temp[y * width + x];
+            count += 1;
+        }
+        for y in 0..height {
+            output[y * width + x] = sum / count as f64;
+            let bottom = y + radius + 1;
+            if bottom < height {
+                sum += temp[bottom * width + x];
+                count += 1;
+            }
+            if y >= radius {
+                let top = y - radius;
+                sum -= temp[top * width + x];
+                count -= 1;
+            }
+        }
+    }
+
+    output
 }
 
 // ─── Lake Identification ─────────────────────────────────────────────────────
@@ -1291,8 +1423,8 @@ pub fn rasterise_smooth_line(
             let drainage = d0 + (d1 - d0) * t;
 
             let norm_drain = (drainage / max_drain_f).sqrt();
-            let half_width = norm_drain * max_half_width;
-            let value = norm_drain;
+            let half_width = (norm_drain * max_half_width).max(0.7); // min ~1.4px wide
+            let value = norm_drain.max(0.15); // min brightness so thin rivers are visible
 
             let hw_ceil = half_width.ceil() as i32;
             let px_center = cx.round() as i32;

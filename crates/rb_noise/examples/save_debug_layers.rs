@@ -33,6 +33,25 @@ fn main() {
     let macro_map = BiomeMap::generate(seed, world_width as usize, world_height as usize);
     println!("Macro map done.");
 
+    // Save macro-level river flow (global RiverNetwork) for debugging
+    {
+        let out_dir = Path::new("debug_layers");
+        std::fs::create_dir_all(out_dir).ok();
+        let river_data = macro_map.to_layer_image(NoiseLayer::RiverFlow);
+        let river_img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(
+            world_width as u32, world_height as u32, river_data,
+        ).expect("river image size mismatch");
+        river_img.save(out_dir.join("macro_river_flow.png")).expect("save failed");
+        println!("Saved macro-level river flow.");
+
+        let biome_data = macro_map.to_layer_image(NoiseLayer::Biome);
+        let biome_img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(
+            world_width as u32, world_height as u32, biome_data,
+        ).expect("biome image size mismatch");
+        biome_img.save(out_dir.join("macro_biome.png")).expect("save failed");
+        println!("Saved macro-level biome.");
+    }
+
     // Generate all meso tiles
     println!(
         "Generating {total_tiles} meso tiles ({tiles_x}x{tiles_y}, {meso_world_size}x{meso_world_size} world units each at {tile_px}px) -> {full_w}x{full_h}..."
@@ -61,7 +80,7 @@ fn main() {
                 Some(&progress),
                 NoiseBackend::Gpu,
                 Some(&macro_map),
-                None, // no global river network in standalone example
+                macro_map.river_network.as_ref(),
             );
             meso_tiles.push(tile);
         }
