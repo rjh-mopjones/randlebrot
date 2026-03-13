@@ -11,6 +11,7 @@ pub mod resource;
 pub mod resource_map;
 pub mod rivers;
 pub mod strategy;
+pub mod terrain_render;
 pub mod tidally_locked;
 pub mod visualization;
 

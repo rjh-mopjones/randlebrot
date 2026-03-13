@@ -589,6 +589,11 @@ impl BiomeMap {
 
     /// Convert any layer to RGBA image bytes.
     pub fn to_layer_image(&self, layer: NoiseLayer) -> Vec<u8> {
+        // Composited terrain render for Biome layer when full data is available
+        if layer == NoiseLayer::Biome && !self.is_shrunk() {
+            return crate::terrain_render::render_terrain(self);
+        }
+
         let mut data = Vec::with_capacity(self.width * self.height * 4);
 
         for y in 0..self.height {
