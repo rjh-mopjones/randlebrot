@@ -4,8 +4,8 @@ use bevy_egui::{egui, EguiContexts};
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use rb_core::{AppMode, ModeTransitionEvent, PlayableLevel, SelectedChunk, SelectedMesoTile, WorldPos, handle_mode_shortcuts};
-use rb_editor::{CurrentLayer, GenerateMesoRequest, GeneratorUiState, LaunchLevelRequest, LauncherPhase, RegenerationRequest};
+use rb_core::{AppMode, ModeTransitionEvent, PlayableLevel, SelectedChunk, SelectedMesoTile, SelectedMicroTile, WorldPos, handle_mode_shortcuts};
+use rb_editor::{CurrentLayer, GenerateMesoRequest, GeneratorUiState, LaunchLevelRequest, LauncherPhase, RegenerationRequest, StartPlayRequest};
 use rb_noise::{BiomeMap, NoiseBackend};
 use rb_player::Player;
 use rb_tilemap::{LevelChunk, LoadedChunks};
@@ -89,6 +89,7 @@ fn main() {
             manage_tile_sprites,
             update_cursor_world_pos,
             update_chunk_highlight,
+            update_chunk_selection_highlight,
             highlight_info_ui,
         ).run_if(in_state(AppPhase::Ready).and(in_state(AppMode::WorldGenerator))))
         // Launcher: enter/exit
@@ -127,11 +128,44 @@ fn main() {
                 .run_if(in_state(AppPhase::Ready)
                     .and(in_state(AppMode::LevelLauncher))),
         )
-        // Launcher: "Launch Level" button
+        // Launcher: "Launch Level" button (starts micro generation)
         .add_systems(Update,
             handle_launch_level_request
                 .run_if(in_state(AppPhase::Ready)
                     .and(resource_exists::<LaunchLevelRequest>)),
+        )
+        // Launcher: micro generation + progress UI
+        .add_systems(Update, (
+            dispatch_micro_pregen,
+            poll_micro_pregen,
+            micro_pregen_progress_ui,
+        ).run_if(in_state(AppPhase::Ready)
+            .and(resource_exists::<MicroPregenState>)))
+        // Launcher: micro view interactions
+        .add_systems(Update, (
+            launcher_camera_zoom,
+            click_to_select_micro_tile,
+            update_micro_highlight,
+        ).run_if(in_state(AppPhase::Ready)
+            .and(in_state(AppMode::LevelLauncher))
+            .and(|phase: Option<Res<LauncherPhase>>| phase.map_or(false, |p| *p == LauncherPhase::MicroView))))
+        // Launcher: ESC from MicroView → MesoView
+        .add_systems(Update,
+            escape_micro_view
+                .run_if(in_state(AppPhase::Ready)
+                    .and(in_state(AppMode::LevelLauncher))),
+        )
+        // Launcher: "Play" button
+        .add_systems(Update,
+            handle_start_play_request
+                .run_if(in_state(AppPhase::Ready)
+                    .and(resource_exists::<StartPlayRequest>)),
+        )
+        // Launcher: re-show micro grid when ESC returns from Playing
+        .add_systems(Update,
+            reshow_micro_on_return
+                .run_if(in_state(AppPhase::Ready)
+                    .and(in_state(AppMode::LevelLauncher))),
         )
         // Hide world map when play mode starts
         .add_systems(Update,
@@ -183,6 +217,12 @@ const POLL_BUDGET: usize = 16;
 /// Micro tile covers this many world units (0.25×0.25 area at 512×512 pixels).
 const MICRO_WORLD_SIZE: f64 = 0.25;
 
+/// Number of micro tiles per meso tile edge (8.0/0.25 = 32).
+const MICRO_GRID_SIZE: i32 = 32;
+
+/// Display size of each micro tile in the launcher grid.
+const MICRO_TILE_DISPLAY_PX: f32 = 16.0;
+
 // ─── Resources ───────────────────────────────────────────────────────────────
 
 /// Marker resource to trigger generation start.
@@ -211,9 +251,13 @@ struct MacroBiomeData {
     biome_map: Arc<BiomeMap>,
 }
 
-/// Marker component for the chunk highlight overlay.
+/// Marker component for the chunk highlight overlay (follows cursor).
 #[derive(Component)]
 struct ChunkHighlight;
+
+/// Marker component for the persistent selection overlay (shows selected chunk).
+#[derive(Component)]
+struct ChunkSelectionHighlight;
 
 /// Info about the currently highlighted tile, displayed in the UI.
 #[derive(Resource, Default)]
@@ -343,6 +387,41 @@ struct MesoInFlightTile {
     task: Task<((i32, i32), Arc<BiomeMap>)>,
 }
 
+// ─── Micro Launcher Types ─────────────────────────────────────────────────────
+
+/// Marker for micro tile sprites in the launcher grid.
+#[derive(Component)]
+struct LauncherMicroSprite;
+
+/// Marker for the micro tile highlight overlay.
+#[derive(Component)]
+struct MicroHighlight;
+
+/// Cache of generated micro tiles for the launcher.
+#[derive(Resource, Default)]
+struct MicroTileCache {
+    tiles: HashMap<(i32, i32), MicroCachedTile>,
+    sprite_entities: Vec<Entity>,
+}
+
+struct MicroCachedTile {
+    _biome_map: Arc<BiomeMap>,
+    texture: Handle<Image>,
+}
+
+/// State for async micro tile pre-generation.
+#[derive(Resource)]
+struct MicroPregenState {
+    total: usize,
+    completed: usize,
+    remaining: Vec<(i32, i32)>,
+    in_flight: Vec<MicroInFlightTile>,
+}
+
+struct MicroInFlightTile {
+    task: Task<((i32, i32), Arc<BiomeMap>)>,
+}
+
 /// Application phase - config, generating, pre-generating macro tiles, or ready.
 #[derive(States, Default, Clone, Eq, PartialEq, Hash, Debug)]
 enum AppPhase {
@@ -430,7 +509,7 @@ fn start_generation(
         biome_map,
     });
 
-    // Spawn chunk highlight
+    // Spawn chunk highlight (follows cursor)
     commands.spawn((
         Sprite {
             color: Color::srgba(1.0, 1.0, 0.8, 0.3),
@@ -439,6 +518,18 @@ fn start_generation(
         },
         Transform::from_xyz(-10000.0, -10000.0, 0.5),
         ChunkHighlight,
+    ));
+
+    // Spawn persistent selection highlight (shows selected chunk)
+    commands.spawn((
+        Sprite {
+            color: Color::srgba(0.2, 0.8, 1.0, 0.45),
+            custom_size: Some(Vec2::splat(CHUNK_SIZE)),
+            ..default()
+        },
+        Transform::from_xyz(-10000.0, -10000.0, 0.4),
+        Visibility::Hidden,
+        ChunkSelectionHighlight,
     ));
 
     // Spawn sprite pool (macro + meso)
@@ -936,12 +1027,19 @@ fn highlight_info_ui(
     mut contexts: EguiContexts,
     info: Res<HighlightInfo>,
     cursor_pos: Res<CursorWorldPos>,
+    selected_chunk: Option<Res<SelectedChunk>>,
 ) {
     egui::Window::new("Tile Info")
         .anchor(egui::Align2::RIGHT_TOP, [-8.0, 8.0])
         .resizable(false)
         .collapsible(false)
         .show(contexts.ctx_mut(), |ui| {
+            if let Some(ref sel) = selected_chunk {
+                let (sx, sy) = sel.chunk_coord;
+                ui.label(format!("Selected: ({sx}, {sy})"));
+                ui.label("Press F4 to launch");
+                ui.separator();
+            }
             if !info.active {
                 ui.label("(no tile)");
                 return;
@@ -1415,7 +1513,33 @@ fn click_to_select_chunk(
         origin,
     });
 
-    println!("Selected chunk ({}, {}) — press F4 to play", chunk_x, chunk_y);
+    println!("Selected chunk ({}, {}) — press F4 to launch", chunk_x, chunk_y);
+}
+
+/// Update the persistent selection highlight to show the selected chunk.
+fn update_chunk_selection_highlight(
+    selected: Option<Res<SelectedChunk>>,
+    world_def: Res<WorldDefinition>,
+    mut query: Query<(&mut Transform, &mut Visibility), With<ChunkSelectionHighlight>>,
+) {
+    let Ok((mut transform, mut vis)) = query.get_single_mut() else { return };
+
+    let Some(selected) = selected else {
+        *vis = Visibility::Hidden;
+        transform.translation.x = -10000.0;
+        return;
+    };
+
+    let half_width = world_def.width as f32 / 2.0;
+    let half_height = world_def.height as f32 / 2.0;
+
+    let (cx, cy) = selected.chunk_coord;
+    let sprite_x = cx as f32 * CHUNK_SIZE + CHUNK_SIZE / 2.0 - half_width;
+    let sprite_y = half_height - cy as f32 * CHUNK_SIZE - CHUNK_SIZE / 2.0;
+
+    transform.translation.x = sprite_x;
+    transform.translation.y = sprite_y;
+    *vis = Visibility::Inherited;
 }
 
 // ─── Launcher Systems ────────────────────────────────────────────────────────
@@ -1427,7 +1551,8 @@ fn enter_launcher_macro_view(
     tile_cache: Option<Res<TileCache>>,
     mut camera_query: Query<(&mut Transform, &mut OrthographicProjection), With<Camera2d>>,
     mut pool_query: Query<&mut Visibility, With<PoolSlot>>,
-    mut highlight_query: Query<&mut Visibility, (With<ChunkHighlight>, Without<PoolSlot>)>,
+    mut highlight_query: Query<&mut Visibility, (With<ChunkHighlight>, Without<PoolSlot>, Without<ChunkSelectionHighlight>)>,
+    mut selection_query: Query<&mut Visibility, (With<ChunkSelectionHighlight>, Without<PoolSlot>, Without<ChunkHighlight>)>,
 ) {
     commands.insert_resource(LauncherPhase::MacroView);
 
@@ -1435,8 +1560,11 @@ fn enter_launcher_macro_view(
     for mut vis in &mut pool_query {
         *vis = Visibility::Hidden;
     }
-    // Hide chunk highlight
+    // Hide chunk highlight and selection highlight
     for mut vis in &mut highlight_query {
+        *vis = Visibility::Hidden;
+    }
+    for mut vis in &mut selection_query {
         *vis = Visibility::Hidden;
     }
 
@@ -1701,18 +1829,15 @@ fn update_meso_highlight(
     highlight_tf.translation.y = sprite_y;
 }
 
-/// Handle "Launch Level" — start micro generation at the selected meso tile.
+/// Handle "Launch Level" — start async generation of 1024 micro tiles.
 fn handle_launch_level_request(
     mut commands: Commands,
     selected_meso: Option<Res<SelectedMesoTile>>,
-    world_def: Res<WorldDefinition>,
-    selected_chunk: Option<Res<SelectedChunk>>,
     meso_sprites: Query<Entity, With<LauncherMesoSprite>>,
     meso_highlight: Query<Entity, With<MesoHighlight>>,
 ) {
     commands.remove_resource::<LaunchLevelRequest>();
     let Some(selected_meso) = selected_meso else { return };
-    let Some(selected_chunk) = selected_chunk else { return };
 
     // Hide meso grid sprites (keep cache for ESC to return)
     for entity in &meso_sprites {
@@ -1722,19 +1847,26 @@ fn handle_launch_level_request(
         commands.entity(entity).insert(Visibility::Hidden);
     }
 
-    commands.insert_resource(PlayableLevel {
-        origin: selected_meso.origin,
-        chunk_coord: selected_chunk.chunk_coord,
-        seed: world_def.seed,
-        world_height: world_def.height as f64,
+    // Queue 1024 micro tiles for generation
+    let mut remaining = Vec::with_capacity((MICRO_GRID_SIZE * MICRO_GRID_SIZE) as usize);
+    for uy in 0..MICRO_GRID_SIZE {
+        for ux in 0..MICRO_GRID_SIZE {
+            remaining.push((ux, uy));
+        }
+    }
+
+    commands.insert_resource(MicroPregenState {
+        total: remaining.len(),
+        completed: 0,
+        remaining,
+        in_flight: Vec::new(),
     });
-    commands.init_resource::<LoadedChunks>();
-    commands.insert_resource(LauncherPhase::Playing);
+    commands.insert_resource(MicroTileCache::default());
+    commands.insert_resource(LauncherPhase::GeneratingMicro);
 
     println!(
-        "Launching level at meso tile ({}, {}), world ({:.0}, {:.0})",
-        selected_meso.meso_coord.0, selected_meso.meso_coord.1,
-        selected_meso.origin.x, selected_meso.origin.y
+        "Generating 1024 micro tiles for meso tile ({}, {})",
+        selected_meso.meso_coord.0, selected_meso.meso_coord.1
     );
 }
 
@@ -1759,14 +1891,304 @@ fn reshow_meso_on_return(
     }
 }
 
+// ─── Micro Launcher Systems ──────────────────────────────────────────────────
+
+/// Dispatch async micro tile generation tasks.
+fn dispatch_micro_pregen(
+    mut pregen: ResMut<MicroPregenState>,
+    world_textures: Option<Res<MacroBiomeData>>,
+    world_def: Res<WorldDefinition>,
+    selected_meso: Option<Res<SelectedMesoTile>>,
+    ui_state: Res<GeneratorUiState>,
+) {
+    let Some(world_textures) = world_textures else { return };
+    let Some(selected_meso) = selected_meso else { return };
+
+    let seed = world_def.seed;
+    let height = world_def.height as f64;
+    let backend = ui_state.backend();
+    let meso_origin = selected_meso.origin;
+
+    while pregen.in_flight.len() < MACRO_PREGEN_CONCURRENCY {
+        let Some(coord) = pregen.remaining.pop() else { break };
+        let macro_map = world_textures.biome_map.clone();
+
+        let world_x = meso_origin.x + coord.0 as f64 * MICRO_WORLD_SIZE;
+        let world_y = meso_origin.y + coord.1 as f64 * MICRO_WORLD_SIZE;
+
+        let task = AsyncComputeTaskPool::get().spawn(async move {
+            let biome_map = BiomeMap::generate_meso_full_with_backend(
+                seed, world_x, world_y, MICRO_WORLD_SIZE, TILE_MAP_SIZE, height,
+                3, // micro detail level
+                None, backend, Some(&macro_map),
+            );
+            (coord, Arc::new(biome_map))
+        });
+
+        pregen.in_flight.push(MicroInFlightTile { task });
+    }
+}
+
+/// Poll micro tile tasks; when all done, spawn the grid and transition to MicroView.
+fn poll_micro_pregen(
+    mut commands: Commands,
+    mut pregen: ResMut<MicroPregenState>,
+    mut micro_cache: ResMut<MicroTileCache>,
+    mut images: ResMut<Assets<Image>>,
+    current_layer: Res<CurrentLayer>,
+) {
+    let mut i = 0;
+    while i < pregen.in_flight.len() {
+        if let Some(result) = block_on(poll_once(&mut pregen.in_flight[i].task)) {
+            pregen.in_flight.swap_remove(i);
+            let (coord, biome_map) = result;
+
+            let image_data = biome_map.to_layer_image(current_layer.0);
+            let image = create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, image_data);
+            let texture = images.add(image);
+
+            micro_cache.tiles.insert(coord, MicroCachedTile { _biome_map: biome_map, texture });
+            pregen.completed += 1;
+        } else {
+            i += 1;
+        }
+    }
+
+    if pregen.completed >= pregen.total {
+        println!("All {} micro tiles generated.", pregen.total);
+        commands.remove_resource::<MicroPregenState>();
+
+        // Spawn 32×32 grid of micro tile sprites
+        let grid_size = MICRO_GRID_SIZE as f32 * MICRO_TILE_DISPLAY_PX;
+        let half_grid = grid_size / 2.0;
+
+        for uy in 0..MICRO_GRID_SIZE {
+            for ux in 0..MICRO_GRID_SIZE {
+                let coord = (ux, uy);
+                let Some(cached) = micro_cache.tiles.get(&coord) else { continue };
+
+                let sprite_x = ux as f32 * MICRO_TILE_DISPLAY_PX + MICRO_TILE_DISPLAY_PX / 2.0 - half_grid;
+                let sprite_y = half_grid - uy as f32 * MICRO_TILE_DISPLAY_PX - MICRO_TILE_DISPLAY_PX / 2.0;
+
+                let entity = commands.spawn((
+                    Sprite {
+                        image: cached.texture.clone(),
+                        custom_size: Some(Vec2::splat(MICRO_TILE_DISPLAY_PX)),
+                        ..default()
+                    },
+                    Transform::from_xyz(sprite_x, sprite_y, 0.5),
+                    LauncherMicroSprite,
+                )).id();
+                micro_cache.sprite_entities.push(entity);
+            }
+        }
+
+        // Spawn micro highlight
+        commands.spawn((
+            Sprite {
+                color: Color::srgba(1.0, 0.5, 0.0, 0.3),
+                custom_size: Some(Vec2::splat(MICRO_TILE_DISPLAY_PX)),
+                ..default()
+            },
+            Transform::from_xyz(-10000.0, -10000.0, 0.8),
+            MicroHighlight,
+        ));
+
+        commands.insert_resource(LauncherPhase::MicroView);
+    }
+}
+
+/// Show progress bar during micro tile pre-generation.
+fn micro_pregen_progress_ui(
+    mut contexts: EguiContexts,
+    pregen: Res<MicroPregenState>,
+) {
+    let ctx = contexts.ctx_mut();
+    egui::Window::new("Generating Micro Tiles")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .fixed_size([300.0, 80.0])
+        .show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                let progress = pregen.completed as f32 / pregen.total as f32;
+                ui.label(format!("Generating micro tiles: {}/{}", pregen.completed, pregen.total));
+                ui.add_space(10.0);
+                ui.add(egui::ProgressBar::new(progress).show_percentage());
+            });
+        });
+}
+
+/// Click to select a micro tile in the grid.
+fn click_to_select_micro_tile(
+    mut commands: Commands,
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    selected_meso: Option<Res<SelectedMesoTile>>,
+    mut contexts: EguiContexts,
+) {
+    if !mouse.just_pressed(MouseButton::Left) { return; }
+    if contexts.ctx_mut().is_pointer_over_area() { return; }
+    let Some(selected_meso) = selected_meso else { return };
+
+    let Ok(window) = windows.get_single() else { return };
+    let Some(cursor_pos) = window.cursor_position() else { return };
+    let Ok((camera, camera_transform)) = camera_query.get_single() else { return };
+    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else { return };
+
+    let grid_size = MICRO_GRID_SIZE as f32 * MICRO_TILE_DISPLAY_PX;
+    let half_grid = grid_size / 2.0;
+
+    let ux = ((world_pos.x + half_grid) / MICRO_TILE_DISPLAY_PX).floor() as i32;
+    let uy = ((half_grid - world_pos.y) / MICRO_TILE_DISPLAY_PX).floor() as i32;
+
+    if ux < 0 || ux >= MICRO_GRID_SIZE || uy < 0 || uy >= MICRO_GRID_SIZE { return; }
+
+    let origin = WorldPos::new(
+        selected_meso.origin.x + ux as f64 * MICRO_WORLD_SIZE,
+        selected_meso.origin.y + uy as f64 * MICRO_WORLD_SIZE,
+    );
+
+    commands.insert_resource(SelectedMicroTile {
+        micro_coord: (ux, uy),
+        origin,
+    });
+
+    println!("Selected micro tile ({}, {})", ux, uy);
+}
+
+/// Update the micro highlight overlay to follow cursor.
+fn update_micro_highlight(
+    mut highlight_query: Query<&mut Transform, With<MicroHighlight>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    mut contexts: EguiContexts,
+) {
+    let Ok(mut highlight_tf) = highlight_query.get_single_mut() else { return };
+
+    if contexts.ctx_mut().is_pointer_over_area() {
+        highlight_tf.translation.x = -10000.0;
+        return;
+    }
+
+    let Ok(window) = windows.get_single() else { return };
+    let Some(cursor_screen) = window.cursor_position() else {
+        highlight_tf.translation.x = -10000.0;
+        return;
+    };
+    let Ok((camera, camera_transform)) = camera_query.get_single() else { return };
+    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_screen) else { return };
+
+    let grid_size = MICRO_GRID_SIZE as f32 * MICRO_TILE_DISPLAY_PX;
+    let half_grid = grid_size / 2.0;
+
+    let ux = ((world_pos.x + half_grid) / MICRO_TILE_DISPLAY_PX).floor() as i32;
+    let uy = ((half_grid - world_pos.y) / MICRO_TILE_DISPLAY_PX).floor() as i32;
+
+    if ux < 0 || ux >= MICRO_GRID_SIZE || uy < 0 || uy >= MICRO_GRID_SIZE {
+        highlight_tf.translation.x = -10000.0;
+        return;
+    }
+
+    let sprite_x = ux as f32 * MICRO_TILE_DISPLAY_PX + MICRO_TILE_DISPLAY_PX / 2.0 - half_grid;
+    let sprite_y = half_grid - uy as f32 * MICRO_TILE_DISPLAY_PX - MICRO_TILE_DISPLAY_PX / 2.0;
+    highlight_tf.translation.x = sprite_x;
+    highlight_tf.translation.y = sprite_y;
+}
+
+/// Handle "Play" — consume StartPlayRequest, hide micro sprites, create PlayableLevel.
+fn handle_start_play_request(
+    mut commands: Commands,
+    selected_micro: Option<Res<SelectedMicroTile>>,
+    world_def: Res<WorldDefinition>,
+    selected_chunk: Option<Res<SelectedChunk>>,
+    micro_sprites: Query<Entity, With<LauncherMicroSprite>>,
+    micro_highlight: Query<Entity, With<MicroHighlight>>,
+) {
+    commands.remove_resource::<StartPlayRequest>();
+    let Some(selected_micro) = selected_micro else { return };
+    let Some(selected_chunk) = selected_chunk else { return };
+
+    // Hide micro grid sprites (keep cache for ESC to return)
+    for entity in &micro_sprites {
+        commands.entity(entity).insert(Visibility::Hidden);
+    }
+    for entity in &micro_highlight {
+        commands.entity(entity).insert(Visibility::Hidden);
+    }
+
+    commands.insert_resource(PlayableLevel {
+        origin: selected_micro.origin,
+        chunk_coord: selected_chunk.chunk_coord,
+        seed: world_def.seed,
+        world_height: world_def.height as f64,
+    });
+    commands.init_resource::<LoadedChunks>();
+    commands.insert_resource(LauncherPhase::Playing);
+
+    println!(
+        "Playing at micro tile ({}, {}), world ({:.2}, {:.2})",
+        selected_micro.micro_coord.0, selected_micro.micro_coord.1,
+        selected_micro.origin.x, selected_micro.origin.y
+    );
+}
+
+/// ESC in MicroView: despawn micro grid, go back to MesoView.
+fn escape_micro_view(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut commands: Commands,
+    phase: Option<Res<LauncherPhase>>,
+    micro_sprites: Query<Entity, With<LauncherMicroSprite>>,
+    micro_highlight: Query<Entity, With<MicroHighlight>>,
+) {
+    if !keyboard.just_pressed(KeyCode::Escape) { return; }
+    if !phase.map_or(false, |p| *p == LauncherPhase::MicroView) { return; }
+
+    for entity in &micro_sprites {
+        commands.entity(entity).despawn();
+    }
+    for entity in &micro_highlight {
+        commands.entity(entity).despawn();
+    }
+    commands.remove_resource::<MicroTileCache>();
+    commands.remove_resource::<SelectedMicroTile>();
+    commands.insert_resource(LauncherPhase::MesoView);
+
+    println!("Returned to MesoView");
+}
+
+/// Re-show micro grid sprites when returning from Playing to MicroView (ESC).
+fn reshow_micro_on_return(
+    phase: Option<Res<LauncherPhase>>,
+    micro_sprites: Query<Entity, With<LauncherMicroSprite>>,
+    micro_highlight: Query<Entity, With<MicroHighlight>>,
+    mut commands: Commands,
+    playing: Option<Res<PlayableLevel>>,
+) {
+    let Some(phase) = phase else { return };
+    if *phase != LauncherPhase::MicroView || playing.is_some() { return; }
+    if !phase.is_changed() { return; }
+
+    for entity in &micro_sprites {
+        commands.entity(entity).insert(Visibility::Inherited);
+    }
+    for entity in &micro_highlight {
+        commands.entity(entity).insert(Visibility::Inherited);
+    }
+}
+
 /// Clean up all launcher-specific entities when leaving LevelLauncher mode.
 fn cleanup_launcher_entities(
     mut commands: Commands,
     macro_sprites: Query<Entity, With<LauncherMacroSprite>>,
     meso_sprites: Query<Entity, With<LauncherMesoSprite>>,
     meso_highlight: Query<Entity, With<MesoHighlight>>,
+    micro_sprites: Query<Entity, With<LauncherMicroSprite>>,
+    micro_highlight: Query<Entity, With<MicroHighlight>>,
     mut pool_query: Query<&mut Visibility, With<PoolSlot>>,
-    mut highlight_query: Query<&mut Visibility, (With<ChunkHighlight>, Without<PoolSlot>)>,
+    mut highlight_query: Query<&mut Visibility, (With<ChunkHighlight>, Without<PoolSlot>, Without<ChunkSelectionHighlight>)>,
+    mut selection_query: Query<&mut Visibility, (With<ChunkSelectionHighlight>, Without<PoolSlot>, Without<ChunkHighlight>)>,
 ) {
     for entity in &macro_sprites {
         commands.entity(entity).despawn();
@@ -1777,14 +2199,26 @@ fn cleanup_launcher_entities(
     for entity in &meso_highlight {
         commands.entity(entity).despawn();
     }
+    for entity in &micro_sprites {
+        commands.entity(entity).despawn();
+    }
+    for entity in &micro_highlight {
+        commands.entity(entity).despawn();
+    }
     commands.remove_resource::<MesoTileCache>();
     commands.remove_resource::<MesoPregenState>();
+    commands.remove_resource::<MicroTileCache>();
+    commands.remove_resource::<MicroPregenState>();
+    commands.remove_resource::<SelectedMicroTile>();
 
-    // Re-show world map pool sprites and highlight
+    // Re-show world map pool sprites, highlight, and selection highlight
     for mut vis in &mut pool_query {
         *vis = Visibility::Inherited;
     }
     for mut vis in &mut highlight_query {
+        *vis = Visibility::Inherited;
+    }
+    for mut vis in &mut selection_query {
         *vis = Visibility::Inherited;
     }
 }

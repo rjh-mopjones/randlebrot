@@ -1,15 +1,19 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
-use rb_core::{PlayableLevel, SelectedChunk, SelectedMesoTile};
+use rb_core::{PlayableLevel, SelectedChunk, SelectedMesoTile, SelectedMicroTile};
 use rb_tilemap::{LevelChunk, LoadedChunks};
 
 /// Signal to generate meso tiles for the selected macro chunk.
 #[derive(Resource)]
 pub struct GenerateMesoRequest;
 
-/// Signal to launch the level at the selected meso tile.
+/// Signal to launch the level at the selected meso tile (starts micro generation).
 #[derive(Resource)]
 pub struct LaunchLevelRequest;
+
+/// Signal to start playing at the selected micro tile.
+#[derive(Resource)]
+pub struct StartPlayRequest;
 
 /// Launcher phase — tracks progression through the multi-step workflow.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
@@ -20,6 +24,10 @@ pub enum LauncherPhase {
     GeneratingMeso,
     /// Displaying the 8×8 meso grid, user can select a meso tile.
     MesoView,
+    /// Generating 32×32 micro tiles asynchronously.
+    GeneratingMicro,
+    /// Displaying the 32×32 micro grid, user can select a micro tile.
+    MicroView,
     /// Playing at micro level.
     Playing,
 }
@@ -30,6 +38,7 @@ pub fn launcher_ui_system(
     mut contexts: EguiContexts,
     selected_chunk: Option<Res<SelectedChunk>>,
     selected_meso: Option<Res<SelectedMesoTile>>,
+    selected_micro: Option<Res<SelectedMicroTile>>,
     phase: Option<Res<LauncherPhase>>,
     playing: Option<Res<PlayableLevel>>,
 ) {
@@ -78,11 +87,35 @@ pub fn launcher_ui_system(
                             meso.origin.x, meso.origin.y
                         ));
                         ui.separator();
-                        if ui.button("Launch Level").clicked() {
+                        if ui.button("Generate Micromap").clicked() {
                             commands.insert_resource(LaunchLevelRequest);
                         }
                     } else {
                         ui.label("Click a meso tile to select it.");
+                    }
+                }
+                LauncherPhase::GeneratingMicro => {
+                    ui.label("Generating micro tiles...");
+                }
+                LauncherPhase::MicroView => {
+                    if let Some(ref meso) = selected_meso {
+                        let (mx, my) = meso.meso_coord;
+                        ui.label(format!("Meso tile: ({mx}, {my})"));
+                    }
+                    ui.separator();
+                    if let Some(ref micro) = selected_micro {
+                        let (ux, uy) = micro.micro_coord;
+                        ui.label(format!("Micro tile: ({ux}, {uy})"));
+                        ui.label(format!(
+                            "World: ({:.2}, {:.2})",
+                            micro.origin.x, micro.origin.y
+                        ));
+                        ui.separator();
+                        if ui.button("Play").clicked() {
+                            commands.insert_resource(StartPlayRequest);
+                        }
+                    } else {
+                        ui.label("Click a micro tile to select it.");
                     }
                 }
                 LauncherPhase::Playing => {
@@ -114,9 +147,9 @@ pub fn escape_to_stop_system(
             commands.entity(entity).despawn();
         }
 
-        // Go back to meso view if we were playing
+        // Go back to micro view if we were playing
         if phase.map_or(false, |p| *p == LauncherPhase::Playing) {
-            commands.insert_resource(LauncherPhase::MesoView);
+            commands.insert_resource(LauncherPhase::MicroView);
         }
 
         println!("Exited play mode");
@@ -129,6 +162,7 @@ pub fn cleanup_on_exit(
     existing_level: Option<Res<PlayableLevel>>,
     existing_selected: Option<Res<SelectedChunk>>,
     existing_meso: Option<Res<SelectedMesoTile>>,
+    existing_micro: Option<Res<SelectedMicroTile>>,
     level_chunks: Query<Entity, With<LevelChunk>>,
 ) {
     if existing_level.is_some() {
@@ -141,9 +175,13 @@ pub fn cleanup_on_exit(
     if existing_meso.is_some() {
         commands.remove_resource::<SelectedMesoTile>();
     }
+    if existing_micro.is_some() {
+        commands.remove_resource::<SelectedMicroTile>();
+    }
     commands.remove_resource::<LauncherPhase>();
     commands.remove_resource::<GenerateMesoRequest>();
     commands.remove_resource::<LaunchLevelRequest>();
+    commands.remove_resource::<StartPlayRequest>();
 
     for entity in &level_chunks {
         commands.entity(entity).despawn();

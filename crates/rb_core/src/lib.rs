@@ -44,6 +44,15 @@ pub struct SelectedMesoTile {
     pub origin: WorldPos,
 }
 
+/// Tracks which micro tile within a meso tile has been selected.
+#[derive(Resource, Debug, Clone)]
+pub struct SelectedMicroTile {
+    /// Position within the 32×32 micro grid (0-31, 0-31).
+    pub micro_coord: (i32, i32),
+    /// World-space origin of this micro tile (top-left).
+    pub origin: WorldPos,
+}
+
 /// Core plugin providing foundational types for Randlebrot.
 pub struct RbCorePlugin;
 

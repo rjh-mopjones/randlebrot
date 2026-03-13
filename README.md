@@ -19,8 +19,9 @@ cargo run -p rb_editor --example editor_shell    # editor UI test
 randlebrot/
 ├── Cargo.toml                          # Workspace root, feature flags (gpu enabled by default)
 ├── src/
-│   └── main.rs                         # App entry point, Bevy plugin composition, camera,
-│                                       #   generation task spawning, meso tile cache, zoom system
+│   └── main.rs                         # App entry point, plugin composition, AppPhase state machine,
+│                                       #   macro pre-generation, tile cache/sprite pool,
+│                                       #   Level Launcher systems, level chunk streaming
 ├── crates/
 │   ├── rb_core/                        # Shared types, no Bevy rendering dependency
 │   │   └── src/
@@ -85,15 +86,13 @@ randlebrot/
 │   │       ├── culture.rs            # Culture system
 │   │       └── faction.rs            # Faction system
 │   │
-│   ├── rb_editor/                      # egui editor UI for all four modes
+│   ├── rb_editor/                      # egui editor UI
 │   │   └── src/
 │   │       ├── lib.rs                 # Plugin, re-exports
 │   │       ├── generator_ui.rs        # F1: World Generator (seed, params, GPU toggle, save/load,
 │   │       │                          #   layer picker: Base / Derived)
-│   │       ├── map_editor_ui.rs       # F2: World Map Editor (city/landmark placement)
-│   │       ├── chunk_editor_ui.rs     # F3: Chunk Editor (tile/entity tools)
-│   │       ├── launcher_ui.rs         # F4: Level Launcher (play/stop, debug)
-│   │       └── world_overlay.rs       # City/landmark/region rendering on map
+│   │       └── launcher_ui.rs         # F4: Level Launcher (phase-aware side panel,
+│   │                                  #   LauncherPhase state machine, Generate/Launch buttons)
 │   │
 │   ├── rb_tilemap/                     # Tile storage and rendering
 │   │   └── src/
@@ -112,18 +111,20 @@ randlebrot/
 │           ├── lib.rs                 # Plugin, re-exports
 │           └── world_io.rs            # RON serialization, world file management
 │
-├── debug_layers/                       # Auto-generated debug PNGs
-│   ├── aggregate.png                  # Biome aggregate view
+├── debug_layers/                       # Auto-generated debug PNGs (8192×4096, stitched from
+│   │                                  #   128 pre-generated macro tiles — same data the app displays)
+│   ├── biome.png                      # Biome layer
 │   ├── base/                          # Independent noise layers
 │   │   ├── continentalness.png
 │   │   ├── tectonic.png
+│   │   ├── humidity.png
 │   │   ├── light_level.png
 │   │   └── rock_hardness.png
 │   └── derived/                       # Layers computed from base layers
 │       ├── temperature.png
 │       ├── erosion.png
 │       ├── peaks_valleys.png
-│       ├── humidity.png
+│       ├── heightmap.png
 │       └── rivers.png
 │
 └── assets/                             # Runtime assets
@@ -175,17 +176,29 @@ Authored content density follows a hierarchy:
 | F1 | World Generator | Procedural world generation, seed tweaking |
 | F2 | World Map Editor | Place cities, landmarks, draw regions |
 | F3 | Chunk Editor | Detail editing at street level |
-| F4 | Level Launcher | Test gameplay with player spawn |
+| F4 | Level Launcher | Multi-step drill-down to playable level |
+
+### Level Launcher Workflow (F4)
+
+1. **Select** a macro chunk on the world map (F1) by clicking it
+2. **Press F4** to enter the Level Launcher — shows the selected chunk enlarged
+3. **"Generate Mesomap"** — generates 64 meso tiles (8×8 grid, detail_level=2) with a progress bar
+4. **Select** a meso tile by clicking it in the grid
+5. **"Launch Level"** — starts micro-level chunk streaming (detail_level=3) around the player
+6. **ESC** returns to the meso grid view (not all the way back to the world map)
 
 ## Controls
 
-| Control | Action |
-|---------|--------|
-| Scroll wheel | Zoom in/out |
-| Left-click drag | Pan the map |
-| Arrow keys | Pan the map |
-| Space | Cycle layer view |
-| F1-F4 | Switch editor modes |
+| Control | Context | Action |
+|---------|---------|--------|
+| Scroll wheel | World map / Launcher | Zoom in/out |
+| Left-click drag | World map / Launcher | Pan the map |
+| Arrow keys | World map / Launcher | Pan the map |
+| Left-click | World map | Select macro chunk |
+| Left-click | Launcher (meso grid) | Select meso tile |
+| Space | World map | Cycle layer view |
+| F1-F4 | Any | Switch editor modes |
+| ESC | Launcher (playing) | Return to meso grid |
 
 ## License
 
