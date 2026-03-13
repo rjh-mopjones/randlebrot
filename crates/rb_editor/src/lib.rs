@@ -6,6 +6,7 @@ pub mod generator_ui;
 pub mod launcher_ui;
 
 pub use generator_ui::{CurrentLayer, GeneratorUiState, RegenerationRequest};
+pub use launcher_ui::GenerateMesoRequest;
 
 /// Editor plugin for Randlebrot.
 /// Provides egui-based authoring tools and debug overlays.
@@ -25,10 +26,10 @@ impl Plugin for RbEditorPlugin {
             // Generator UI (runs in all modes for the top bar)
             .add_systems(Update, generator_ui::generator_ui_system)
             // Launcher systems
-            .add_systems(Update,
-                launcher_ui::escape_to_stop_system
-                    .run_if(in_state(AppMode::LevelLauncher)),
-            )
+            .add_systems(Update, (
+                launcher_ui::launcher_ui_system,
+                launcher_ui::escape_to_stop_system,
+            ).run_if(in_state(AppMode::LevelLauncher)))
             .add_systems(OnExit(AppMode::LevelLauncher), launcher_ui::cleanup_on_exit);
     }
 }

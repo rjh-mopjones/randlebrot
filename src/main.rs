@@ -5,7 +5,7 @@ use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use rb_core::{AppMode, ModeTransitionEvent, PlayableLevel, SelectedChunk, WorldPos, handle_mode_shortcuts};
-use rb_editor::{CurrentLayer, GeneratorUiState, RegenerationRequest};
+use rb_editor::{CurrentLayer, GenerateMesoRequest, GeneratorUiState, RegenerationRequest};
 use rb_noise::{BiomeMap, NoiseBackend};
 use rb_player::Player;
 use rb_tilemap::{LevelChunk, LoadedChunks};
@@ -79,11 +79,11 @@ fn main() {
                     .and(in_state(AppMode::WorldGenerator))
                     .and(not(resource_exists::<PlayableLevel>))),
         )
-        // When entering LevelLauncher with a selected chunk, auto-start micro generation
+        // Generate Mesomap button pressed in launcher UI
         .add_systems(Update,
-            auto_play_on_launcher_enter
+            handle_generate_meso_request
                 .run_if(in_state(AppPhase::Ready)
-                    .and(in_state(AppMode::LevelLauncher))
+                    .and(resource_exists::<GenerateMesoRequest>)
                     .and(resource_exists::<SelectedChunk>)
                     .and(not(resource_exists::<PlayableLevel>))),
         )
@@ -92,7 +92,6 @@ fn main() {
             camera_zoom,
             camera_pan,
             calculate_visible_chunks,
-            update_view_level,
             enqueue_and_dispatch_tiles,
             poll_tile_results,
             manage_tile_sprites,
@@ -125,14 +124,8 @@ const TILE_MAP_SIZE: usize = 512;
 /// Number of pre-spawned macro pool sprites.
 const MACRO_POOL_SIZE: usize = 160;
 
-/// Number of pre-spawned meso pool sprites.
-const MESO_POOL_SIZE: usize = 24;
-
 /// Max cached macro tiles — sized to hold all 128 pre-generated tiles.
 const MACRO_CACHE_MAX: usize = 128;
-
-/// Max cached meso tiles (LRU eviction beyond this).
-const MESO_CACHE_MAX: usize = 32;
 
 /// Max concurrent async tile generation tasks (streaming).
 const MAX_CONCURRENT_TILES: usize = 16;
@@ -143,8 +136,6 @@ const MACRO_PREGEN_CONCURRENCY: usize = 12;
 /// Max tile completions to process per frame.
 const POLL_BUDGET: usize = 16;
 
-/// Meso tile covers this many world units (8×8 area at 512×512 pixels).
-const MESO_WORLD_SIZE: f64 = 8.0;
 
 /// Micro tile covers this many world units (0.25×0.25 area at 512×512 pixels).
 const MICRO_WORLD_SIZE: f64 = 0.25;
@@ -198,28 +189,10 @@ struct HighlightInfo {
 #[derive(Resource, Default)]
 struct CursorWorldPos(Vec2);
 
-/// Current zoom detail tier with hysteresis.
-#[derive(Resource)]
-struct ViewLevel {
-    current: DetailTier,
-    pending: Option<DetailTier>,
-    frames_at_pending: u8,
-}
-
-impl Default for ViewLevel {
-    fn default() -> Self {
-        Self {
-            current: DetailTier::Macro,
-            pending: None,
-            frames_at_pending: 0,
-        }
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 enum DetailTier {
     Macro,
-    Meso,
 }
 
 /// Camera viewport in chunk coordinates.
@@ -240,8 +213,6 @@ struct PoolSlot;
 struct SpritePool {
     macro_sprites: Vec<Entity>,
     macro_assigned: Vec<Option<(i32, i32)>>,
-    meso_sprites: Vec<Entity>,
-    meso_assigned: Vec<Option<(i32, i32)>>,
 }
 
 /// A cached tile with BiomeMap data and texture.
@@ -251,13 +222,11 @@ struct CachedTile {
     last_used_frame: u64,
 }
 
-/// LRU tile cache for macro and meso tiers.
+/// Tile cache for macro tiles.
 #[derive(Resource)]
 struct TileCache {
     macro_tiles: HashMap<(i32, i32), CachedTile>,
     macro_max: usize,
-    meso_tiles: HashMap<(i32, i32), CachedTile>,
-    meso_max: usize,
     frame: u64,
 }
 
@@ -266,8 +235,6 @@ impl Default for TileCache {
         Self {
             macro_tiles: HashMap::new(),
             macro_max: MACRO_CACHE_MAX,
-            meso_tiles: HashMap::new(),
-            meso_max: MESO_CACHE_MAX,
             frame: 0,
         }
     }
@@ -283,17 +250,6 @@ impl TileCache {
             }
         }
         self.macro_tiles.insert(coord, tile);
-    }
-
-    fn insert_meso(&mut self, coord: (i32, i32), tile: CachedTile) {
-        if self.meso_tiles.len() >= self.meso_max {
-            if let Some((&evict_coord, _)) = self.meso_tiles.iter()
-                .min_by_key(|(_, t)| t.last_used_frame)
-            {
-                self.meso_tiles.remove(&evict_coord);
-            }
-        }
-        self.meso_tiles.insert(coord, tile);
     }
 
 }
@@ -423,28 +379,12 @@ fn start_generation(
         macro_assigned.push(None);
     }
 
-    let mut meso_sprites = Vec::with_capacity(MESO_POOL_SIZE);
-    let mut meso_assigned = Vec::with_capacity(MESO_POOL_SIZE);
-    for _i in 0..MESO_POOL_SIZE {
-        let entity = commands.spawn((
-            Sprite { ..default() },
-            Transform::from_xyz(-10000.0, -10000.0, 0.2),
-            Visibility::Hidden,
-            PoolSlot,
-        )).id();
-        meso_sprites.push(entity);
-        meso_assigned.push(None);
-    }
-
     commands.insert_resource(SpritePool {
         macro_sprites,
         macro_assigned,
-        meso_sprites,
-        meso_assigned,
     });
     commands.insert_resource(TileCache::default());
     commands.insert_resource(TileRequestQueue::default());
-    commands.insert_resource(ViewLevel::default());
 
     // Queue all 128 macro tiles for pre-generation
     let chunks_x = (world_def.width as f32 / CHUNK_SIZE).ceil() as i32;
@@ -659,61 +599,12 @@ fn create_image(width: usize, height: usize, data: Vec<u8>) -> Image {
     image
 }
 
-// ─── View Level with Hysteresis ──────────────────────────────────────────────
-
-/// Update view level based on camera scale with hysteresis to prevent flicker.
-fn update_view_level(
-    camera_query: Query<&OrthographicProjection, With<Camera2d>>,
-    mut view_level: ResMut<ViewLevel>,
-) {
-    let Ok(projection) = camera_query.get_single() else { return };
-    let scale = projection.scale;
-
-    // Determine target tier based on scale with dead zones
-    let target = match view_level.current {
-        DetailTier::Macro => {
-            if scale < 0.4 {
-                Some(DetailTier::Meso)
-            } else {
-                None
-            }
-        }
-        DetailTier::Meso => {
-            if scale > 0.6 {
-                Some(DetailTier::Macro)
-            } else {
-                None
-            }
-        }
-    };
-
-    match target {
-        Some(tier) => {
-            if view_level.pending == Some(tier) {
-                view_level.frames_at_pending += 1;
-                if view_level.frames_at_pending >= 3 {
-                    view_level.current = tier;
-                    view_level.pending = None;
-                    view_level.frames_at_pending = 0;
-                }
-            } else {
-                view_level.pending = Some(tier);
-                view_level.frames_at_pending = 1;
-            }
-        }
-        None => {
-            view_level.pending = None;
-            view_level.frames_at_pending = 0;
-        }
-    }
-}
 
 // ─── Tile Streaming ──────────────────────────────────────────────────────────
 
 /// Enqueue tile generation tasks for visible chunks not yet cached.
 fn enqueue_and_dispatch_tiles(
     visible_range: Res<VisibleChunkRange>,
-    view_level: Res<ViewLevel>,
     tile_cache: Res<TileCache>,
     mut request_queue: ResMut<TileRequestQueue>,
     world_def: Res<WorldDefinition>,
@@ -731,93 +622,54 @@ fn enqueue_and_dispatch_tiles(
     let half_map_width = world_def.width as f32 / 2.0;
     let half_map_height = world_def.height as f32 / 2.0;
 
-    // Collect in-flight coords to avoid duplicates
-    let in_flight_coords: HashSet<((i32, i32), DetailTier)> = request_queue.in_flight.iter()
-        .map(|t| (t.coord, t.tier))
+    let in_flight_coords: HashSet<(i32, i32)> = request_queue.in_flight.iter()
+        .map(|t| t.coord)
         .collect();
 
-    // Collect needed macro tiles (always needed as base layer)
-    let mut needed: Vec<((i32, i32), DetailTier, f32)> = Vec::new();
-
-    {
-        for cy in visible_range.min_y..=visible_range.max_y {
-            for cx in visible_range.min_x..=visible_range.max_x {
-                let coord = (cx, cy);
-                if tile_cache.macro_tiles.contains_key(&coord) || in_flight_coords.contains(&(coord, DetailTier::Macro)) {
-                    continue;
-                }
-                let sprite_x = cx as f32 * CHUNK_SIZE + CHUNK_SIZE / 2.0 - half_map_width;
-                let sprite_y = half_map_height - cy as f32 * CHUNK_SIZE - CHUNK_SIZE / 2.0;
-                let dist = (camera_pos.x - sprite_x).powi(2) + (camera_pos.y - sprite_y).powi(2);
-                needed.push((coord, DetailTier::Macro, dist));
+    // Collect needed macro tiles only — meso is generated on demand in LevelLauncher
+    let mut needed: Vec<((i32, i32), f32)> = Vec::new();
+    for cy in visible_range.min_y..=visible_range.max_y {
+        for cx in visible_range.min_x..=visible_range.max_x {
+            let coord = (cx, cy);
+            if tile_cache.macro_tiles.contains_key(&coord) || in_flight_coords.contains(&coord) {
+                continue;
             }
+            let sprite_x = cx as f32 * CHUNK_SIZE + CHUNK_SIZE / 2.0 - half_map_width;
+            let sprite_y = half_map_height - cy as f32 * CHUNK_SIZE - CHUNK_SIZE / 2.0;
+            let dist = (camera_pos.x - sprite_x).powi(2) + (camera_pos.y - sprite_y).powi(2);
+            needed.push((coord, dist));
         }
     }
 
-    // Collect needed meso tiles when at meso level
-    if view_level.current == DetailTier::Meso {
-        let meso_per_chunk = (CHUNK_SIZE_I as f64 / MESO_WORLD_SIZE) as i32; // 8 meso tiles per macro chunk edge
-        for cy in visible_range.min_y..=visible_range.max_y {
-            for cx in visible_range.min_x..=visible_range.max_x {
-                for my in 0..meso_per_chunk {
-                    for mx in 0..meso_per_chunk {
-                        let meso_coord = (cx * meso_per_chunk + mx, cy * meso_per_chunk + my);
-                        if tile_cache.meso_tiles.contains_key(&meso_coord) || in_flight_coords.contains(&(meso_coord, DetailTier::Meso)) {
-                            continue;
-                        }
-                        let world_x = meso_coord.0 as f64 * MESO_WORLD_SIZE;
-                        let world_y = meso_coord.1 as f64 * MESO_WORLD_SIZE;
-                        let sprite_x = world_x as f32 + MESO_WORLD_SIZE as f32 / 2.0 - half_map_width;
-                        let sprite_y = half_map_height - world_y as f32 - MESO_WORLD_SIZE as f32 / 2.0;
-                        let dist = (camera_pos.x - sprite_x).powi(2) + (camera_pos.y - sprite_y).powi(2);
-                        needed.push((meso_coord, DetailTier::Meso, dist));
-                    }
-                }
-            }
-        }
-    }
+    needed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Sort by distance (closest first)
-    needed.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Dispatch tasks up to max concurrent
     let macro_map = world_textures.biome_map.clone();
-    for (coord, tier, _dist) in needed {
+    for (coord, _dist) in needed {
         if request_queue.in_flight.len() >= MAX_CONCURRENT_TILES {
             break;
         }
 
         let macro_map_clone = macro_map.clone();
-        let (world_x, world_y, world_size, detail_level) = match tier {
-            DetailTier::Macro => {
-                let wx = coord.0 as f64 * CHUNK_SIZE as f64;
-                let wy = coord.1 as f64 * CHUNK_SIZE as f64;
-                (wx, wy, CHUNK_SIZE as f64, 1u32)
-            }
-            DetailTier::Meso => {
-                let wx = coord.0 as f64 * MESO_WORLD_SIZE;
-                let wy = coord.1 as f64 * MESO_WORLD_SIZE;
-                (wx, wy, MESO_WORLD_SIZE, 2u32)
-            }
-        };
+        let world_x = coord.0 as f64 * CHUNK_SIZE as f64;
+        let world_y = coord.1 as f64 * CHUNK_SIZE as f64;
 
         let task = AsyncComputeTaskPool::get().spawn(async move {
             let biome_map = BiomeMap::generate_meso_full_with_backend(
                 seed,
                 world_x,
                 world_y,
-                world_size,
+                CHUNK_SIZE as f64,
                 TILE_MAP_SIZE,
                 height,
-                detail_level,
-                None, // no progress tracking for streaming tiles
+                1, // macro detail level
+                None,
                 backend,
                 Some(&macro_map_clone),
             );
             (coord, Arc::new(biome_map))
         });
 
-        request_queue.in_flight.push(InFlightTile { coord, tier, task });
+        request_queue.in_flight.push(InFlightTile { coord, tier: DetailTier::Macro, task });
     }
 }
 
@@ -835,8 +687,7 @@ fn poll_tile_results(
     let mut i = 0;
     while i < request_queue.in_flight.len() && completed < POLL_BUDGET {
         if let Some(result) = block_on(poll_once(&mut request_queue.in_flight[i].task)) {
-            let tier = request_queue.in_flight[i].tier;
-            let _in_flight = request_queue.in_flight.swap_remove(i);
+            request_queue.in_flight.swap_remove(i);
             let (coord, biome_map) = result;
 
             let image_data = biome_map.to_layer_image(current_layer.0);
@@ -849,10 +700,7 @@ fn poll_tile_results(
                 last_used_frame: frame,
             };
 
-            match tier {
-                DetailTier::Macro => tile_cache.insert_macro(coord, cached),
-                DetailTier::Meso => tile_cache.insert_meso(coord, cached),
-            }
+            tile_cache.insert_macro(coord, cached);
 
             completed += 1;
             // Don't increment i — swap_remove shifted an element into position i
@@ -866,7 +714,6 @@ fn poll_tile_results(
 
 /// Assign/unassign pool sprites based on visible tiles and cache contents.
 fn manage_tile_sprites(
-    view_level: Res<ViewLevel>,
     visible_range: Res<VisibleChunkRange>,
     mut tile_cache: ResMut<TileCache>,
     mut pool: ResMut<SpritePool>,
@@ -877,7 +724,6 @@ fn manage_tile_sprites(
     let half_map_height = world_def.height as f32 / 2.0;
     let frame = tile_cache.frame;
 
-    // --- Macro layer (always visible as base) ---
     let mut needed_macro: HashSet<(i32, i32)> = HashSet::new();
     for cy in visible_range.min_y..=visible_range.max_y {
         for cx in visible_range.min_x..=visible_range.max_x {
@@ -934,83 +780,6 @@ fn manage_tile_sprites(
             }
         }
     }
-
-    // --- Meso layer ---
-    if view_level.current != DetailTier::Meso {
-        for i in 0..pool.meso_assigned.len() {
-            if pool.meso_assigned[i].is_some() {
-                pool.meso_assigned[i] = None;
-                if let Ok((mut transform, _, mut vis)) = sprite_query.get_mut(pool.meso_sprites[i]) {
-                    *vis = Visibility::Hidden;
-                    transform.translation.x = -10000.0;
-                }
-            }
-        }
-        return;
-    }
-
-    let meso_per_chunk = (CHUNK_SIZE_I as f64 / MESO_WORLD_SIZE) as i32;
-
-    let mut needed_meso: HashSet<(i32, i32)> = HashSet::new();
-    for cy in visible_range.min_y..=visible_range.max_y {
-        for cx in visible_range.min_x..=visible_range.max_x {
-            for my in 0..meso_per_chunk {
-                for mx in 0..meso_per_chunk {
-                    needed_meso.insert((cx * meso_per_chunk + mx, cy * meso_per_chunk + my));
-                }
-            }
-        }
-    }
-
-    for i in 0..pool.meso_assigned.len() {
-        if let Some(coord) = pool.meso_assigned[i] {
-            if !needed_meso.contains(&coord) || !tile_cache.meso_tiles.contains_key(&coord) {
-                pool.meso_assigned[i] = None;
-                let entity = pool.meso_sprites[i];
-                if let Ok((mut transform, _, mut vis)) = sprite_query.get_mut(entity) {
-                    *vis = Visibility::Hidden;
-                    transform.translation.x = -10000.0;
-                }
-            }
-        }
-    }
-
-    let assigned_meso: HashSet<(i32, i32)> = pool.meso_assigned.iter()
-        .filter_map(|a| *a)
-        .collect();
-
-    for coord in &needed_meso {
-        if assigned_meso.contains(coord) { continue; }
-        let tex_handle = {
-            let Some(cached) = tile_cache.meso_tiles.get(coord) else { continue };
-            cached.texture.clone()
-        };
-
-        let Some(slot_idx) = pool.meso_assigned.iter().position(|a| a.is_none()) else { break };
-        pool.meso_assigned[slot_idx] = Some(*coord);
-        let entity = pool.meso_sprites[slot_idx];
-
-        let world_x = coord.0 as f64 * MESO_WORLD_SIZE;
-        let world_y = coord.1 as f64 * MESO_WORLD_SIZE;
-        let sprite_x = world_x as f32 + MESO_WORLD_SIZE as f32 / 2.0 - half_map_width;
-        let sprite_y = half_map_height - world_y as f32 - MESO_WORLD_SIZE as f32 / 2.0;
-
-        if let Ok((mut transform, mut sprite, mut vis)) = sprite_query.get_mut(entity) {
-            transform.translation = Vec3::new(sprite_x, sprite_y, 0.2);
-            sprite.image = tex_handle;
-            sprite.custom_size = Some(Vec2::new(MESO_WORLD_SIZE as f32, MESO_WORLD_SIZE as f32));
-            *vis = Visibility::Inherited;
-        }
-    }
-
-    for assignment in pool.meso_assigned.iter() {
-        if let Some(coord) = assignment {
-            if let Some(cached) = tile_cache.meso_tiles.get_mut(coord) {
-                cached.last_used_frame = frame;
-            }
-        }
-    }
-
 }
 
 // ─── Layer Change ────────────────────────────────────────────────────────────
@@ -1042,29 +811,12 @@ fn handle_layer_change(
             cached.texture = images.add(new_image);
         }
 
-        // Re-render meso tiles
-        for (_, cached) in cache.meso_tiles.iter_mut() {
-            let image_data = cached.biome_map.to_layer_image(new_layer);
-            let new_image = create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, image_data);
-            cached.texture = images.add(new_image);
-        }
-
         // Update assigned pool sprite images
         if let Some(ref pool) = pool {
             for (i, assignment) in pool.macro_assigned.iter().enumerate() {
                 if let Some(coord) = assignment {
                     if let Some(cached) = cache.macro_tiles.get(coord) {
                         let entity = pool.macro_sprites[i];
-                        if let Ok((_, mut sprite)) = sprite_query.get_mut(entity) {
-                            sprite.image = cached.texture.clone();
-                        }
-                    }
-                }
-            }
-            for (i, assignment) in pool.meso_assigned.iter().enumerate() {
-                if let Some(coord) = assignment {
-                    if let Some(cached) = cache.meso_tiles.get(coord) {
-                        let entity = pool.meso_sprites[i];
                         if let Ok((_, mut sprite)) = sprite_query.get_mut(entity) {
                             sprite.image = cached.texture.clone();
                         }
@@ -1128,7 +880,6 @@ fn regenerate_world(
 
     // Clear caches and in-flight tasks
     tile_cache.macro_tiles.clear();
-    tile_cache.meso_tiles.clear();
     request_queue.in_flight.clear();
 
     // Hide all pool sprites
@@ -1140,20 +891,9 @@ fn regenerate_world(
             transform.translation.x = -10000.0;
         }
     }
-    for i in 0..pool.meso_assigned.len() {
-        pool.meso_assigned[i] = None;
-        let entity = pool.meso_sprites[i];
-        if let Ok((mut transform, mut vis)) = sprite_query.get_mut(entity) {
-            *vis = Visibility::Hidden;
-            transform.translation.x = -10000.0;
-        }
-    }
     // Regenerate macro biome data
     let biome_map = Arc::new(BiomeMap::generate_with_backend(world_def.seed, world_def.width, world_def.height, backend));
     println!("  Macro biome data generated successfully");
-
-    let debug_path = std::path::Path::new("debug_layers");
-    biome_map.save_debug_layers(debug_path);
 
     textures.biome_map = biome_map;
 
@@ -1268,7 +1008,6 @@ fn update_chunk_highlight(
     world_def: Res<WorldDefinition>,
     mut highlight_query: Query<(&mut Transform, &mut Sprite), With<ChunkHighlight>>,
     mut contexts: EguiContexts,
-    view_level: Res<ViewLevel>,
     mut highlight_info: ResMut<HighlightInfo>,
 ) {
     let Ok((mut highlight_transform, mut highlight_sprite)) = highlight_query.get_single_mut() else { return };
@@ -1279,11 +1018,8 @@ fn update_chunk_highlight(
         return;
     }
 
-    // Adapt highlight size to current tier
-    let (chunk_size, tier_name) = match view_level.current {
-        DetailTier::Macro => (CHUNK_SIZE, "Macro"),
-        DetailTier::Meso => (MESO_WORLD_SIZE as f32, "Meso"),
-    };
+    let chunk_size = CHUNK_SIZE;
+    let tier_name = "Macro";
     highlight_sprite.custom_size = Some(Vec2::splat(chunk_size));
 
     let half_width = world_def.width as f32 / 2.0;
@@ -1388,14 +1124,6 @@ fn hide_world_map_on_play(
         for i in 0..pool.macro_assigned.len() {
             pool.macro_assigned[i] = None;
             let entity = pool.macro_sprites[i];
-            if let Ok((mut transform, mut vis)) = sprite_query.get_mut(entity) {
-                *vis = Visibility::Hidden;
-                transform.translation.x = -10000.0;
-            }
-        }
-        for i in 0..pool.meso_assigned.len() {
-            pool.meso_assigned[i] = None;
-            let entity = pool.meso_sprites[i];
             if let Ok((mut transform, mut vis)) = sprite_query.get_mut(entity) {
                 *vis = Visibility::Hidden;
                 transform.translation.x = -10000.0;
@@ -1595,12 +1323,13 @@ fn click_to_select_chunk(
     println!("Selected chunk ({}, {}) — press F4 to play", chunk_x, chunk_y);
 }
 
-/// When LevelLauncher mode is entered with a SelectedChunk, auto-start micro generation.
-fn auto_play_on_launcher_enter(
+/// Handle the "Generate Mesomap" button from the launcher UI.
+fn handle_generate_meso_request(
     mut commands: Commands,
     selected: Res<SelectedChunk>,
     world_def: Res<WorldDefinition>,
 ) {
+    commands.remove_resource::<GenerateMesoRequest>();
     commands.insert_resource(PlayableLevel {
         origin: selected.origin,
         chunk_coord: selected.chunk_coord,
@@ -1609,5 +1338,5 @@ fn auto_play_on_launcher_enter(
     });
     commands.init_resource::<LoadedChunks>();
 
-    println!("Entering play mode at chunk ({}, {})", selected.chunk_coord.0, selected.chunk_coord.1);
+    println!("Generating mesomap at chunk ({}, {})", selected.chunk_coord.0, selected.chunk_coord.1);
 }
