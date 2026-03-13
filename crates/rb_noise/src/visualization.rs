@@ -20,7 +20,8 @@ pub enum NoiseLayer {
     RiverFlow,
     Aridity,
     PrecipitationType,
-    RiverMoisture,
+    WaterTable,
+    Wind,
     Resources,
     Snowpack,
     VegetationDensity,
@@ -45,7 +46,8 @@ impl NoiseLayer {
             Self::RiverFlow,
             Self::Aridity,
             Self::PrecipitationType,
-            Self::RiverMoisture,
+            Self::WaterTable,
+            Self::Wind,
             Self::Resources,
             Self::Snowpack,
             Self::VegetationDensity,
@@ -61,6 +63,7 @@ impl NoiseLayer {
             Self::Humidity,
             Self::RockHardness,
             Self::LightLevel,
+            Self::Wind,
         ]
     }
 
@@ -75,7 +78,7 @@ impl NoiseLayer {
             Self::RiverFlow,
             Self::Aridity,
             Self::PrecipitationType,
-            Self::RiverMoisture,
+            Self::WaterTable,
             Self::Resources,
             Self::Snowpack,
             Self::Biome,
@@ -101,7 +104,8 @@ impl NoiseLayer {
             Self::RiverFlow => "River Flow",
             Self::Aridity => "Aridity",
             Self::PrecipitationType => "Precipitation Type",
-            Self::RiverMoisture => "River Moisture",
+            Self::WaterTable => "Water Table",
+            Self::Wind => "Wind Speed",
             Self::Resources => "Resources",
             Self::Snowpack => "Snowpack",
             Self::VegetationDensity => "Vegetation Density",
@@ -116,8 +120,8 @@ impl NoiseLayer {
             Self::Continentalness | Self::Tectonic | Self::Humidity
             | Self::RockHardness | Self::LightLevel => "Base",
             Self::PeaksValleys | Self::Volcanism | Self::Heightmap | Self::Erosion => "Terrain",
-            Self::Temperature | Self::Aridity | Self::PrecipitationType | Self::Snowpack => "Climate",
-            Self::RiverFlow | Self::RiverMoisture => "Hydrology",
+            Self::Temperature | Self::Aridity | Self::PrecipitationType | Self::Snowpack | Self::Wind => "Climate",
+            Self::RiverFlow | Self::WaterTable => "Hydrology",
             Self::VegetationDensity | Self::SoilType | Self::Resources => "Ecology",
         }
     }
@@ -131,6 +135,7 @@ impl NoiseLayer {
                 | Self::Humidity
                 | Self::RockHardness
                 | Self::LightLevel
+                | Self::Wind
         )
     }
 
@@ -146,7 +151,7 @@ impl NoiseLayer {
                 | Self::RiverFlow
                 | Self::Aridity
                 | Self::PrecipitationType
-                | Self::RiverMoisture
+                | Self::WaterTable
                 | Self::Resources
                 | Self::Snowpack
                 | Self::Biome
@@ -420,14 +425,67 @@ pub fn snowpack_to_rgba(snowpack: f64) -> [u8; 4] {
     }
 }
 
-/// Convert river moisture to RGBA.
-/// Tan (0) -> Blue-green (1).
-pub fn river_moisture_to_rgba(moisture: f64) -> [u8; 4] {
-    let t = moisture.clamp(0.0, 1.0);
-    let r = (180.0 - t * 140.0) as u8;
-    let g = (150.0 - t * 30.0) as u8;
-    let b = (100.0 + t * 120.0) as u8;
-    [r, g, b, 255]
+/// Convert water table to RGBA.
+/// Dark brown (0, dry) -> Olive (0.3) -> Teal (0.6) -> Cyan (1, saturated).
+pub fn water_table_to_rgba(wt: f64) -> [u8; 4] {
+    let t = wt.clamp(0.0, 1.0);
+    if t < 0.3 {
+        // Dark brown to olive
+        let s = t / 0.3;
+        let r = (100.0 + s * 20.0) as u8;
+        let g = (60.0 + s * 60.0) as u8;
+        let b = (30.0 + s * 10.0) as u8;
+        [r, g, b, 255]
+    } else if t < 0.6 {
+        // Olive to teal
+        let s = (t - 0.3) / 0.3;
+        let r = (120.0 - s * 80.0) as u8;
+        let g = (120.0 + s * 40.0) as u8;
+        let b = (40.0 + s * 100.0) as u8;
+        [r, g, b, 255]
+    } else {
+        // Teal to cyan
+        let s = (t - 0.6) / 0.4;
+        let r = (40.0 + s * 20.0) as u8;
+        let g = (160.0 + s * 60.0) as u8;
+        let b = (140.0 + s * 115.0) as u8;
+        [r, g, b, 255]
+    }
+}
+
+/// Convert wind speed to RGBA.
+/// Calm blue (0) -> Green (0.25) -> Yellow (0.5) -> Orange (0.75) -> Red (1).
+pub fn wind_speed_to_rgba(speed: f64) -> [u8; 4] {
+    let t = speed.clamp(0.0, 1.0);
+    if t < 0.25 {
+        // Calm blue to green
+        let s = t / 0.25;
+        let r = (30.0 + s * 10.0) as u8;
+        let g = (60.0 + s * 140.0) as u8;
+        let b = (180.0 - s * 130.0) as u8;
+        [r, g, b, 255]
+    } else if t < 0.5 {
+        // Green to yellow
+        let s = (t - 0.25) / 0.25;
+        let r = (40.0 + s * 215.0) as u8;
+        let g = (200.0 + s * 55.0) as u8;
+        let b = (50.0 - s * 30.0) as u8;
+        [r, g, b, 255]
+    } else if t < 0.75 {
+        // Yellow to orange
+        let s = (t - 0.5) / 0.25;
+        let r = 255;
+        let g = (255.0 - s * 100.0) as u8;
+        let b = (20.0 + s * 10.0) as u8;
+        [r, g, b, 255]
+    } else {
+        // Orange to red
+        let s = (t - 0.75) / 0.25;
+        let r = 255;
+        let g = (155.0 - s * 130.0) as u8;
+        let b = (30.0 - s * 20.0) as u8;
+        [r, g, b, 255]
+    }
 }
 
 /// Convert resource richness to RGBA.
@@ -502,11 +560,8 @@ mod tests {
         let derived = NoiseLayer::derived_layers();
         let all_non_biome: Vec<_> = NoiseLayer::all().iter().filter(|l| **l != NoiseLayer::Biome).collect();
         // Biome appears in both all() and derived_layers(), so derived includes Biome
-        // all_non_biome has 19 entries, base has 5, derived has 14 (including Biome)
-        // base(5) + derived_without_biome(13) = 18 = all_non_biome(18) -- wait
-        // Actually: all() has 19 entries. Biome is in all() and derived_layers().
-        // all_non_biome = 18. base=5, derived=14 (includes Biome).
-        // So base + derived - 1(Biome counted in derived) = 5 + 14 - 1 = 18. Check.
+        // all_non_biome = 19. base=6 (includes Wind), derived=14 (includes Biome).
+        // So base + derived - 1(Biome counted in derived) = 6 + 14 - 1 = 19. Check.
         assert_eq!(base.len() + derived.len() - 1, all_non_biome.len(),
             "base({}) + derived({}) - 1 should equal all_non_biome({})",
             base.len(), derived.len(), all_non_biome.len());
@@ -514,9 +569,9 @@ mod tests {
 
     #[test]
     fn total_layer_count() {
-        // 5 base + 15 derived (including Biome) = 20 total
-        assert_eq!(NoiseLayer::all().len(), 19, "Should have 19 entries in all() (Biome + 5 base + 13 derived-without-biome)");
-        assert_eq!(NoiseLayer::base_layers().len(), 5);
+        // 6 base + 14 derived (including Biome) = 20 total
+        assert_eq!(NoiseLayer::all().len(), 20, "Should have 20 entries in all()");
+        assert_eq!(NoiseLayer::base_layers().len(), 6);
         assert_eq!(NoiseLayer::derived_layers().len(), 14);
     }
 

@@ -16,9 +16,9 @@ use crate::strategy::{
 use crate::visualization::{
     aridity_to_rgba, grayscale_to_rgba, heightmap_to_rgba, humidity_to_rgba,
     light_level_to_rgba, peaks_to_rgba, precipitation_type_to_rgba, resources_to_rgba,
-    river_moisture_to_rgba, river_to_rgba, rock_hardness_to_rgba, snowpack_to_rgba,
+    river_to_rgba, rock_hardness_to_rgba, snowpack_to_rgba,
     soil_type_to_rgba, tectonic_to_rgba, temperature_to_rgba, vegetation_to_rgba,
-    volcanism_to_rgba, NoiseLayer,
+    volcanism_to_rgba, water_table_to_rgba, wind_speed_to_rgba, NoiseLayer,
 };
 
 /// Sea level threshold for continentalness.
@@ -75,7 +75,8 @@ pub struct BiomeMap {
     pub rivers: Vec<f64>,
     pub aridity: Vec<f64>,
     pub precipitation_type: Vec<f64>,
-    pub river_moisture: Vec<f64>,
+    pub water_table: Vec<f64>,
+    pub wind_speed: Vec<f64>,
     pub resource_richness: Vec<f64>,
     pub snowpack: Vec<f64>,
     pub biomes: Vec<TileType>,
@@ -275,12 +276,14 @@ impl BiomeMap {
             }
         }
 
-        // Post-river derivation: river_moisture, vegetation, soil
-        let river_moisture: Vec<f64> = rivers.iter().map(|&r| derived::derive_river_moisture(r)).collect();
+        // Post-river derivation: water_table, vegetation, soil
+        let water_table: Vec<f64> = (0..total_pixels).map(|idx| {
+            derived::derive_water_table(rivers[idx], humidity[idx], heightmap_vec[idx], precipitation_type[idx], continentalness[idx])
+        }).collect();
 
         // Oasis override: desert biomes near rivers become oases
         for idx in 0..total_pixels {
-            if river_moisture[idx] > 0.4 && continentalness[idx] >= SEA_LEVEL {
+            if water_table[idx] > 0.4 && continentalness[idx] >= SEA_LEVEL {
                 match biomes[idx] {
                     TileType::Desert | TileType::Sahara | TileType::Erg | TileType::Hamada => {
                         biomes[idx] = TileType::Oasis;
@@ -293,8 +296,8 @@ impl BiomeMap {
             }
         }
 
-        let vegetation_density: Vec<f64> = biomes.iter().zip(river_moisture.iter())
-            .map(|(&b, &rm)| derived::derive_vegetation_density(b, rm)).collect();
+        let vegetation_density: Vec<f64> = biomes.iter().zip(water_table.iter())
+            .map(|(&b, &wt)| derived::derive_vegetation_density(b, wt)).collect();
         let soil_type: Vec<f64> = biomes.iter().zip(erosion.iter()).zip(rock_hardness.iter())
             .map(|((&b, &e), &r)| derived::derive_soil_type(b, e, r)).collect();
 
@@ -339,7 +342,8 @@ impl BiomeMap {
             rivers,
             aridity,
             precipitation_type,
-            river_moisture,
+            water_table,
+            wind_speed: wind.speed,
             resource_richness,
             snowpack,
             biomes,
@@ -497,9 +501,11 @@ impl BiomeMap {
             }
         }
 
-        let river_moisture: Vec<f64> = rivers.iter().map(|&r| derived::derive_river_moisture(r)).collect();
-        let vegetation_density: Vec<f64> = biomes.iter().zip(river_moisture.iter())
-            .map(|(&b, &rm)| derived::derive_vegetation_density(b, rm)).collect();
+        let water_table: Vec<f64> = (0..total_pixels).map(|idx| {
+            derived::derive_water_table(rivers[idx], gpu_humidity[idx], heightmap_vec[idx], precipitation_type[idx], continentalness[idx])
+        }).collect();
+        let vegetation_density: Vec<f64> = biomes.iter().zip(water_table.iter())
+            .map(|(&b, &wt)| derived::derive_vegetation_density(b, wt)).collect();
         let soil_type: Vec<f64> = biomes.iter().zip(erosion.iter()).zip(gpu_rock_hardness.iter())
             .map(|((&b, &e), &r)| derived::derive_soil_type(b, e, r)).collect();
 
@@ -539,7 +545,8 @@ impl BiomeMap {
             rivers,
             aridity,
             precipitation_type,
-            river_moisture,
+            water_table,
+            wind_speed: wind.speed,
             resource_richness,
             snowpack,
             biomes,
@@ -573,7 +580,8 @@ impl BiomeMap {
         self.rivers = Vec::new();
         self.aridity = Vec::new();
         self.precipitation_type = Vec::new();
-        self.river_moisture = Vec::new();
+        self.water_table = Vec::new();
+        self.wind_speed = Vec::new();
         self.resource_richness = Vec::new();
         self.snowpack = Vec::new();
         self.vegetation_density = Vec::new();
@@ -633,7 +641,12 @@ impl BiomeMap {
                     NoiseLayer::RiverFlow => river_to_rgba(self.rivers[idx]),
                     NoiseLayer::Aridity => aridity_to_rgba(self.aridity[idx]),
                     NoiseLayer::PrecipitationType => precipitation_type_to_rgba(self.precipitation_type[idx]),
-                    NoiseLayer::RiverMoisture => river_moisture_to_rgba(self.river_moisture[idx]),
+                    NoiseLayer::WaterTable => water_table_to_rgba(self.water_table[idx]),
+                    NoiseLayer::Wind => if self.wind_speed.is_empty() {
+                        [0, 0, 0, 255]
+                    } else {
+                        wind_speed_to_rgba(self.wind_speed[idx])
+                    },
                     NoiseLayer::Resources => resources_to_rgba(self.resource_richness[idx]),
                     NoiseLayer::Snowpack => snowpack_to_rgba(self.snowpack[idx]),
                     NoiseLayer::VegetationDensity => vegetation_to_rgba(self.vegetation_density[idx]),
@@ -716,7 +729,8 @@ impl BiomeMap {
             (NoiseLayer::RiverFlow, "river_flow"),
             (NoiseLayer::Aridity, "aridity"),
             (NoiseLayer::PrecipitationType, "precipitation_type"),
-            (NoiseLayer::RiverMoisture, "river_moisture"),
+            (NoiseLayer::WaterTable, "water_table"),
+            (NoiseLayer::Wind, "wind_speed"),
             (NoiseLayer::Resources, "resources"),
             (NoiseLayer::Snowpack, "snowpack"),
             (NoiseLayer::VegetationDensity, "vegetation_density"),
@@ -956,11 +970,13 @@ impl BiomeMap {
             }
         }
 
-        let river_moisture: Vec<f64> = rivers.iter().map(|&r| derived::derive_river_moisture(r)).collect();
+        let water_table: Vec<f64> = (0..total_pixels).map(|idx| {
+            derived::derive_water_table(rivers[idx], humidity[idx], heightmap_vec[idx], precipitation_type[idx], continentalness[idx])
+        }).collect();
 
         // Oasis override: desert biomes near rivers become oases
         for idx in 0..total_pixels {
-            if river_moisture[idx] > 0.4 && continentalness[idx] >= SEA_LEVEL {
+            if water_table[idx] > 0.4 && continentalness[idx] >= SEA_LEVEL {
                 match biomes[idx] {
                     TileType::Desert | TileType::Sahara | TileType::Erg | TileType::Hamada => {
                         biomes[idx] = TileType::Oasis;
@@ -973,8 +989,8 @@ impl BiomeMap {
             }
         }
 
-        let vegetation_density: Vec<f64> = biomes.iter().zip(river_moisture.iter())
-            .map(|(&b, &rm)| derived::derive_vegetation_density(b, rm)).collect();
+        let vegetation_density: Vec<f64> = biomes.iter().zip(water_table.iter())
+            .map(|(&b, &wt)| derived::derive_vegetation_density(b, wt)).collect();
         let soil_type: Vec<f64> = biomes.iter().zip(erosion.iter()).zip(rock_hardness.iter())
             .map(|((&b, &e), &r)| derived::derive_soil_type(b, e, r)).collect();
 
@@ -1013,7 +1029,8 @@ impl BiomeMap {
             rivers,
             aridity,
             precipitation_type,
-            river_moisture,
+            water_table,
+            wind_speed: Vec::new(),
             resource_richness,
             snowpack,
             biomes,
@@ -1225,11 +1242,13 @@ impl BiomeMap {
             }
         }
 
-        let river_moisture: Vec<f64> = rivers.iter().map(|&r| derived::derive_river_moisture(r)).collect();
+        let water_table: Vec<f64> = (0..total_pixels).map(|idx| {
+            derived::derive_water_table(rivers[idx], humidity[idx], heightmap_vec[idx], precipitation_type[idx], continentalness[idx])
+        }).collect();
 
         // Oasis override: desert biomes near rivers become oases
         for idx in 0..total_pixels {
-            if river_moisture[idx] > 0.4 && continentalness[idx] >= SEA_LEVEL {
+            if water_table[idx] > 0.4 && continentalness[idx] >= SEA_LEVEL {
                 match biomes[idx] {
                     TileType::Desert | TileType::Sahara | TileType::Erg | TileType::Hamada => {
                         biomes[idx] = TileType::Oasis;
@@ -1242,8 +1261,8 @@ impl BiomeMap {
             }
         }
 
-        let vegetation_density: Vec<f64> = biomes.iter().zip(river_moisture.iter())
-            .map(|(&b, &rm)| derived::derive_vegetation_density(b, rm)).collect();
+        let vegetation_density: Vec<f64> = biomes.iter().zip(water_table.iter())
+            .map(|(&b, &wt)| derived::derive_vegetation_density(b, wt)).collect();
         let soil_type: Vec<f64> = biomes.iter().zip(erosion.iter()).zip(rock_hardness.iter())
             .map(|((&b, &e), &r)| derived::derive_soil_type(b, e, r)).collect();
 
@@ -1282,7 +1301,8 @@ impl BiomeMap {
             rivers,
             aridity,
             precipitation_type,
-            river_moisture,
+            water_table,
+            wind_speed: Vec::new(),
             resource_richness,
             snowpack,
             biomes,
@@ -1480,9 +1500,11 @@ impl BiomeMap {
             }
         }
 
-        let river_moisture: Vec<f64> = rivers.iter().map(|&r| derived::derive_river_moisture(r)).collect();
-        let vegetation_density: Vec<f64> = biomes.iter().zip(river_moisture.iter())
-            .map(|(&b, &rm)| derived::derive_vegetation_density(b, rm)).collect();
+        let water_table: Vec<f64> = (0..total_pixels).map(|idx| {
+            derived::derive_water_table(rivers[idx], gpu_humidity[idx], heightmap_vec[idx], precipitation_type[idx], continentalness[idx])
+        }).collect();
+        let vegetation_density: Vec<f64> = biomes.iter().zip(water_table.iter())
+            .map(|(&b, &wt)| derived::derive_vegetation_density(b, wt)).collect();
         let soil_type: Vec<f64> = biomes.iter().zip(erosion.iter()).zip(gpu_rock_hardness.iter())
             .map(|((&b, &e), &r)| derived::derive_soil_type(b, e, r)).collect();
 
@@ -1521,7 +1543,8 @@ impl BiomeMap {
             rivers,
             aridity,
             precipitation_type,
-            river_moisture,
+            water_table,
+            wind_speed: Vec::new(),
             resource_richness,
             snowpack,
             biomes,
@@ -1575,7 +1598,8 @@ mod tests {
         assert_eq!(map.heightmap.len(), 64 * 32);
         assert_eq!(map.aridity.len(), 64 * 32);
         assert_eq!(map.precipitation_type.len(), 64 * 32);
-        assert_eq!(map.river_moisture.len(), 64 * 32);
+        assert_eq!(map.water_table.len(), 64 * 32);
+        assert_eq!(map.wind_speed.len(), 64 * 32);
         assert_eq!(map.resource_richness.len(), 64 * 32);
         assert_eq!(map.snowpack.len(), 64 * 32);
         assert_eq!(map.vegetation_density.len(), 64 * 32);

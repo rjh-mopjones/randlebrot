@@ -121,7 +121,7 @@ pub fn render_terrain(map: &BiomeMap, hints: Option<&NormalizationHints>) -> Vec
                     let blend = river.sqrt() * 0.6;
                     pixel = lerp_rgb(pixel, [80, 130, 180], blend.min(0.9));
                 }
-                let rmoist = map.river_moisture[idx];
+                let rmoist = map.water_table[idx];
                 if rmoist > 0.1 && river <= 0.02 {
                     let green_tint = ((rmoist - 0.1) * 0.15).clamp(0.0, 0.1);
                     pixel = lerp_rgb(pixel, [60, 160, 60], green_tint);

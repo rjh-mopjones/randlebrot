@@ -37,7 +37,7 @@ pub use terrain_render::NormalizationHints;
 pub use visualization::NoiseLayer;
 pub use derived::{
     derive_aridity, derive_erosion, derive_heightmap, derive_peaks_valleys,
-    derive_precipitation_type, derive_resource_richness, derive_river_moisture,
+    derive_precipitation_type, derive_resource_richness, derive_water_table,
     derive_snowpack, derive_soil_type, derive_temperature, derive_vegetation_density,
 };
 

@@ -695,7 +695,10 @@ fn poll_macro_pregen(
                     );
                     for idx in 0..biome_map.rivers.len() {
                         biome_map.rivers[idx] = new_rivers[idx];
-                        biome_map.river_moisture[idx] = derived::derive_river_moisture(new_rivers[idx]);
+                        biome_map.water_table[idx] = derived::derive_water_table(
+                            new_rivers[idx], biome_map.humidity[idx], biome_map.heightmap[idx],
+                            biome_map.precipitation_type[idx], biome_map.continentalness[idx],
+                        );
                         if new_rivers[idx] > 0.0
                             && biome_map.continentalness[idx] >= SEA_LEVEL
                             && biome_map.temperature[idx] > -10.0

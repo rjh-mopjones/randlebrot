@@ -25,10 +25,10 @@ pub fn derive_temperature(light_level: f64, elevation: f64, humidity: f64, conti
 ///
 /// Combines continentalness + tectonic boundary effects + peaks into unified elevation.
 pub fn derive_heightmap(continentalness: f64, tectonic: f64, peaks_valleys: f64) -> f64 {
-    // Tectonic boundaries (low tectonic value) push up elevation slightly
-    let tectonic_uplift = (1.0 - tectonic) * 0.05;
+    // Tectonic boundaries (low tectonic value) push up elevation
+    let tectonic_uplift = (1.0 - tectonic) * 0.12;
     // Peaks add height, valleys subtract
-    let peak_contribution = peaks_valleys * 0.15;
+    let peak_contribution = peaks_valleys * 0.35;
     continentalness + tectonic_uplift + peak_contribution
 }
 
@@ -105,13 +105,21 @@ pub fn derive_snowpack(precipitation_type: f64, temperature: f64, heightmap: f64
     temperature_snow.max(altitude_snow).clamp(0.0, 1.0)
 }
 
-/// River moisture — how much moisture rivers contribute to surrounding area.
+/// Water table depth — combines multiple moisture sources into a single groundwater metric.
 ///
-/// Simple amplification of flow.
-/// - river_flow: [0, 1]
-/// Output: [0, 1]
-pub fn derive_river_moisture(river_flow: f64) -> f64 {
-    (river_flow * 3.0).min(1.0)
+/// Inputs: river_flow [0,1], humidity [0,1], heightmap (elevation), precipitation_type [-1,1], continentalness.
+/// Output: [0, 1] where 1.0 = saturated ground, 0.0 = bone dry.
+pub fn derive_water_table(
+    river_flow: f64, humidity: f64, heightmap: f64,
+    precipitation_type: f64, continentalness: f64,
+) -> f64 {
+    let humidity_base = humidity * 0.3;
+    let river_boost = (river_flow * 3.0).min(1.0) * 0.3;
+    let elevation_boost = (1.0 - heightmap.max(0.0) * 2.0).max(0.0) * 0.2;
+    let precip_boost = (-precipitation_type).max(0.0) * 0.1;
+    let sea_level = -0.025_f64;
+    let coastal_boost = (1.0 - (continentalness - sea_level).max(0.0) * 10.0).max(0.0) * 0.1;
+    (humidity_base + river_boost + elevation_boost + precip_boost + coastal_boost).clamp(0.0, 1.0)
 }
 
 /// Resource richness from geological factors.
@@ -126,11 +134,11 @@ pub fn derive_resource_richness(tectonic: f64, rock_hardness: f64, erosion: f64)
     (boundary * 0.5 + rock_hardness * 0.3 + erosion * 0.2).clamp(0.0, 1.0)
 }
 
-/// Vegetation density from biome type and river moisture.
+/// Vegetation density from biome type and water table.
 ///
-/// Each biome has base vegetation. River moisture boosts it.
+/// Each biome has base vegetation. Water table boosts it.
 /// Output: [0, 1]
-pub fn derive_vegetation_density(biome: TileType, river_moisture: f64) -> f64 {
+pub fn derive_vegetation_density(biome: TileType, water_table: f64) -> f64 {
     let base = match biome {
         TileType::Jungle => 0.95,
         TileType::TemperateRainforest | TileType::SubtropicalForest => 0.85,
@@ -159,7 +167,7 @@ pub fn derive_vegetation_density(biome: TileType, river_moisture: f64) -> f64 {
         | TileType::DeepOcean | TileType::OceanTrench | TileType::OceanRidge
         | TileType::CoralReef | TileType::River => 0.0,
     };
-    (base + river_moisture * 0.3).clamp(0.0, 1.0)
+    (base + water_table * 0.3).clamp(0.0, 1.0)
 }
 
 /// Soil type from biome, erosion, and rock hardness.
@@ -299,10 +307,15 @@ mod tests {
     }
 
     #[test]
-    fn river_moisture_amplifies() {
-        let low = derive_river_moisture(0.1);
-        let high = derive_river_moisture(0.5);
-        assert!(high > low, "More flow ({}) should give more moisture than less ({})", high, low);
+    fn water_table_varies_with_inputs() {
+        // River flow boosts water table
+        let low = derive_water_table(0.1, 0.3, 0.1, 0.0, 0.1);
+        let high = derive_water_table(0.5, 0.3, 0.1, 0.0, 0.1);
+        assert!(high > low, "More flow ({}) should give higher water table than less ({})", high, low);
+        // Humidity boosts water table
+        let dry = derive_water_table(0.0, 0.1, 0.1, 0.0, 0.1);
+        let wet = derive_water_table(0.0, 0.9, 0.1, 0.0, 0.1);
+        assert!(wet > dry, "Higher humidity ({}) should give higher water table than lower ({})", wet, dry);
     }
 
     #[test]
