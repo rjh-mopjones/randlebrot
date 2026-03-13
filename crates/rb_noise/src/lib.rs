@@ -22,7 +22,10 @@ pub use chunk_hierarchy::{
 pub use progress::{LayerId, LayerProgress};
 pub use resource::WorldChunks;
 pub use resource_map::ResourceMap;
-pub use rivers::{Lake, RiverCharacter, RiverConstraint, RiverGenerator, RiverNetwork, RiverSegment};
+pub use rivers::{
+    Lake, RiverCharacter, RiverConstraint, RiverGenerator, RiverNetwork, RiverSegment,
+    rasterize_from_network, LOD_THRESHOLD_MACRO, LOD_THRESHOLD_MESO, LOD_THRESHOLD_MICRO,
+};
 pub use strategy::{
     ContinentalnessStrategy, ErosionStrategy, HumidityStrategy, LightLevelStrategy,
     PeaksAndValleysStrategy, ResourceContext, ResourceNoiseStrategy, RockHardnessStrategy,

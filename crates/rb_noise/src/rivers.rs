@@ -111,6 +111,8 @@ pub struct RiverSegment {
     pub character: RiverCharacter,
     /// Pre-computed meandering offsets (perpendicular displacement per path point).
     pub meander_offsets: Vec<f64>,
+    /// Strahler stream order (1 = headwater, higher = larger trunk).
+    pub strahler_order: u32,
 }
 
 // ─── Lake ────────────────────────────────────────────────────────────────────
@@ -144,6 +146,8 @@ pub struct RiverConstraint {
     pub width: f64,
     /// Computed depth.
     pub depth: f64,
+    /// Strahler stream order.
+    pub strahler_order: u32,
 }
 
 // ─── Chunk Coordinate for Spatial Index ──────────────────────────────────────
@@ -232,6 +236,9 @@ impl RiverNetwork {
             seg.character = RiverCharacter::classify(light, humid, temp);
         }
 
+        // Step 5.25: Compute Strahler stream orders
+        compute_strahler_orders(&mut segments);
+
         // Step 5.5: Smooth paths to remove D8 staircase
         for seg in &mut segments {
             seg.path = chaikin_smooth(&seg.path, 2);
@@ -252,6 +259,28 @@ impl RiverNetwork {
         for seg in &mut segments[delta_start..] {
             seg.path = chaikin_smooth(&seg.path, 2);
             seg.meander_offsets = vec![0.0; seg.path.len()];
+        }
+
+        // Diagnostics: report river network statistics
+        {
+            let no_flow_count = flow_dir.iter().filter(|&&d| d == NO_FLOW).count();
+            let land_count = continentalness.iter().filter(|&&c| c > sea_level).count();
+            let no_flow_land = (0..total).filter(|&i| continentalness[i] > sea_level && flow_dir[i] == NO_FLOW).count();
+            let max_acc = accumulation.iter().copied().max().unwrap_or(0);
+            let acc_above_min = accumulation.iter().filter(|&&a| a >= min_accumulation).count();
+            let acc_above_2000 = accumulation.iter().filter(|&&a| a >= 2000).count();
+            let segs_above_2000 = segments.iter().filter(|s| s.drainage_area >= 2000).count();
+            let segs_above_500 = segments.iter().filter(|s| s.drainage_area >= 500).count();
+            let segs_above_300 = segments.iter().filter(|s| s.drainage_area >= 300).count();
+            let segs_above_100 = segments.iter().filter(|s| s.drainage_area >= 100).count();
+            let max_drainage = segments.iter().map(|s| s.drainage_area).max().unwrap_or(0);
+            println!("=== RiverNetwork diagnostics ===");
+            println!("  Grid: {width}x{height} = {total} cells, land: {land_count}");
+            println!("  NO_FLOW on land: {no_flow_land} / {land_count} ({:.1}%)", 100.0 * no_flow_land as f64 / land_count.max(1) as f64);
+            println!("  Max accumulation: {max_acc}, cells >= min_acc({min_accumulation}): {acc_above_min}, cells >= 2000: {acc_above_2000}");
+            println!("  Segments: {}, max drainage: {max_drainage}", segments.len());
+            println!("  Segs with drainage >= 100: {segs_above_100}, >= 300: {segs_above_300}, >= 500: {segs_above_500}, >= 2000: {segs_above_2000}");
+            println!("================================");
         }
 
         // Step 8: Build spatial index
@@ -320,6 +349,7 @@ impl RiverNetwork {
                             character: seg.character,
                             width: compute_river_width(seg.drainage_area, seg.character),
                             depth: compute_river_depth(seg.drainage_area),
+                            strahler_order: seg.strahler_order,
                         });
                     }
                 }
@@ -396,6 +426,151 @@ impl RiverNetwork {
     }
 }
 
+// ─── LOD Drainage Thresholds ────────────────────────────────────────────────
+
+/// Drainage threshold for macro-level rendering (trunk rivers).
+/// Set relative to typical max accumulation (~5000 on 1024×512 grids).
+pub const LOD_THRESHOLD_MACRO: u32 = 300;
+/// Drainage threshold for meso-level rendering (major tributaries).
+pub const LOD_THRESHOLD_MESO: u32 = 50;
+/// Drainage threshold for micro-level rendering (full network).
+pub const LOD_THRESHOLD_MICRO: u32 = 10;
+
+// ─── Strahler Stream Order ──────────────────────────────────────────────────
+
+/// Compute Strahler stream orders for all segments in place.
+/// Leaves (no upstream) get order 1. Interior nodes: if two+ upstream share
+/// the max order → max + 1, else just max.
+fn compute_strahler_orders(segments: &mut [RiverSegment]) {
+    if segments.is_empty() {
+        return;
+    }
+
+    // Find leaves (segments with no upstream tributaries)
+    let mut order: Vec<Option<u32>> = vec![None; segments.len()];
+    let mut stack: Vec<usize> = Vec::new();
+
+    for i in 0..segments.len() {
+        if segments[i].upstream.is_empty() {
+            order[i] = Some(1);
+            stack.push(i);
+        }
+    }
+
+    // Propagate downstream
+    while let Some(seg_idx) = stack.pop() {
+        let Some(downstream_id) = segments[seg_idx].downstream else {
+            continue;
+        };
+        if downstream_id >= segments.len() {
+            continue;
+        }
+
+        // Check if all upstream of downstream are computed
+        let all_computed = segments[downstream_id].upstream.iter()
+            .all(|&u| u >= segments.len() || order[u].is_some());
+
+        if !all_computed {
+            continue;
+        }
+
+        // Compute Strahler order for downstream
+        let upstream_orders: Vec<u32> = segments[downstream_id].upstream.iter()
+            .filter_map(|&u| if u < segments.len() { order[u] } else { None })
+            .collect();
+
+        let new_order = if upstream_orders.is_empty() {
+            1
+        } else {
+            let max_order = *upstream_orders.iter().max().unwrap();
+            let count_max = upstream_orders.iter().filter(|&&o| o == max_order).count();
+            if count_max >= 2 { max_order + 1 } else { max_order }
+        };
+
+        order[downstream_id] = Some(new_order);
+        stack.push(downstream_id);
+    }
+
+    // Apply computed orders to segments
+    for (i, seg) in segments.iter_mut().enumerate() {
+        seg.strahler_order = order[i].unwrap_or(1);
+    }
+}
+
+// ─── Rasterize from Global Network ─────────────────────────────────────────
+
+/// Rasterize rivers from a pre-computed global RiverNetwork onto a tile grid.
+///
+/// Queries the network for segments within the tile bounds, filtered by
+/// LOD drainage threshold, then rasterizes them into a flow grid matching
+/// the format used by per-tile river generation.
+pub fn rasterize_from_network(
+    network: &RiverNetwork,
+    world_x: f64,
+    world_y: f64,
+    world_size: f64,
+    output_size: usize,
+    lod_drainage_threshold: u32,
+) -> Vec<f64> {
+    let total = output_size * output_size;
+    let mut grid = vec![0.0f64; total];
+
+    let constraints = network.query_chunk(
+        world_x, world_y,
+        world_x + world_size, world_y + world_size,
+        lod_drainage_threshold,
+    );
+
+    if constraints.is_empty() {
+        return grid;
+    }
+
+    // Find max drainage for normalization
+    let max_drainage = constraints.iter()
+        .map(|c| c.drainage_area)
+        .max()
+        .unwrap_or(1);
+
+    let scale = output_size as f64 / world_size;
+
+    for constraint in &constraints {
+        if constraint.character == RiverCharacter::BuriedIce {
+            continue;
+        }
+
+        // Build pixel-space path from world-coordinate constraint
+        let pixel_path: Vec<(f64, f64)> = constraint.path.iter()
+            .map(|&(wx, wy, meander_offset)| {
+                let base_px = (wx - world_x) * scale;
+                let base_py = (wy - world_y) * scale;
+
+                if meander_offset.abs() < 0.001 {
+                    return (base_px, base_py);
+                }
+
+                // Compute perpendicular from flow direction
+                // Use next/prev points for direction estimation
+                (base_px, base_py) // meander already baked into query path coords
+            })
+            .collect();
+
+        if pixel_path.len() < 2 {
+            continue;
+        }
+
+        let drainage_per_point = vec![constraint.drainage_area; pixel_path.len()];
+        let max_half_width = 3.0 * constraint.character.width_multiplier();
+
+        rasterise_smooth_line(
+            &mut grid, output_size, output_size,
+            &pixel_path, &drainage_per_point,
+            max_drainage, max_half_width,
+        );
+    }
+
+    grid
+}
+
 // ─── Width & Depth ───────────────────────────────────────────────────────────
 
 /// Compute river width in world units from drainage area and character.
@@ -434,7 +609,7 @@ fn fill_depressions(elevation: &[f64], width: usize, height: usize, sea_level: f
     // Iteratively lower cells until stable
     let mut changed = true;
     let mut iterations = 0;
-    let max_iterations = 1000;
+    let max_iterations = 5000;
 
     while changed && iterations < max_iterations {
         changed = false;
@@ -463,6 +638,11 @@ fn fill_depressions(elevation: &[f64], width: usize, height: usize, sea_level: f
                 }
             }
         }
+    }
+
+    let unfilled = filled.iter().filter(|&&v| v >= f64::MAX / 2.0).count();
+    if unfilled > 0 || iterations >= max_iterations {
+        println!("fill_depressions: {iterations} iterations, converged={}, unfilled={unfilled}", !changed);
     }
 
     filled
@@ -565,8 +745,6 @@ fn compute_geology_aware_flow(
     sea_level: f64,
 ) -> Vec<u8> {
     let mut flow_dir = vec![NO_FLOW; width * height];
-    let hardness_penalty = 0.08;
-    let fault_bonus = 0.12;
 
     for y in 0..height {
         for x in 0..width {
@@ -591,10 +769,12 @@ fn compute_geology_aware_flow(
                 let drop = elevation[idx] - elevation[nidx];
                 let base_slope = drop / D8_DISTANCES[dir];
 
-                // Geological bias: penalise hard rock, prefer fault zones
-                let adjusted_slope = base_slope
-                    - rock_hardness.get(nidx).copied().unwrap_or(0.5) * hardness_penalty
-                    + tectonic_stress.get(nidx).copied().unwrap_or(0.0) * fault_bonus;
+                // Geological bias: prefer softer rock and fault zones, but never block flow
+                let geo_factor = (1.0
+                    - rock_hardness.get(nidx).copied().unwrap_or(0.5) * 0.5
+                    + tectonic_stress.get(nidx).copied().unwrap_or(0.0) * 0.4)
+                    .clamp(0.1, 2.0);
+                let adjusted_slope = base_slope * geo_factor;
 
                 if adjusted_slope > max_slope {
                     max_slope = adjusted_slope;
@@ -803,6 +983,7 @@ fn build_river_tree(
             downstream: None,
             upstream: Vec::new(),
             character: RiverCharacter::Permanent, // Will be classified later
+            strahler_order: 1,
         });
     }
 
@@ -1070,7 +1251,7 @@ fn trace_river_paths(
 }
 
 /// Rasterise a smooth line with graduated width onto a grid.
-fn rasterise_smooth_line(
+pub fn rasterise_smooth_line(
     grid: &mut [f64],
     width: usize,
     height: usize,
@@ -1260,6 +1441,7 @@ fn generate_deltas(
                     downstream: None,
                     upstream: vec![seg.id],
                     character: seg.character,
+                    strahler_order: 1,
                 });
             }
         }
@@ -1969,6 +2151,7 @@ mod tests {
             upstream: vec![],
             character: RiverCharacter::Permanent,
             meander_offsets: vec![0.0, 0.0, 0.0],
+            strahler_order: 1,
         };
 
         let spatial_index = build_spatial_index(&[seg.clone()]);
@@ -2001,6 +2184,7 @@ mod tests {
             upstream: vec![],
             character: RiverCharacter::Permanent,
             meander_offsets: vec![0.0; width],
+            strahler_order: 1,
         };
 
         apply_meandering(&mut seg, &heightmap, &pv, width, height);

@@ -82,6 +82,9 @@ pub struct BiomeMap {
     pub vegetation_density: Vec<f64>,
     pub soil_type: Vec<f64>,
     pub resource_map: Option<ResourceMap>,
+
+    /// Global river network (only set on the macro-level 1024×512 map).
+    pub river_network: Option<Arc<RiverNetwork>>,
 }
 
 impl BiomeMap {
@@ -232,17 +235,18 @@ impl BiomeMap {
 
         // Phase 3: Generate rivers
         // Use geology-aware RiverNetwork for large maps, fast RiverGenerator for small ones
-        let rivers = if total_pixels >= 256 * 128 {
+        let (rivers, river_network) = if total_pixels >= 256 * 128 {
             let tectonic_stress: Vec<f64> = tectonic.iter().map(|&t| 1.0 - t).collect();
             let river_network = RiverNetwork::generate(
                 &heightmap_vec, &rock_hardness, &tectonic_stress, &continentalness,
                 &light_level, &humidity, &temperature, &peaks_valleys,
                 width, height, SEA_LEVEL,
             );
-            river_network.to_flow_grid(width, height)
+            let grid = river_network.to_flow_grid(width, height);
+            (grid, Some(Arc::new(river_network)))
         } else {
             let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, width, height);
-            river_gen.generate_climate_aware(&heightmap_vec, &light_level, &humidity, width, height)
+            (river_gen.generate_climate_aware(&heightmap_vec, &light_level, &humidity, width, height), None)
         };
 
         // Erosion feedback: carve terrain along rivers and eroded areas
@@ -342,6 +346,7 @@ impl BiomeMap {
             vegetation_density,
             soil_type,
             resource_map: Some(resource_map),
+            river_network,
         }
     }
 
@@ -454,17 +459,18 @@ impl BiomeMap {
         }
 
         // Rivers: geology-aware RiverNetwork for large maps, fast fallback for small
-        let rivers = if total_pixels >= 256 * 128 {
+        let (rivers, river_network) = if total_pixels >= 256 * 128 {
             let tectonic_stress: Vec<f64> = gpu_tectonic.iter().map(|&t| 1.0 - t).collect();
             let river_network = RiverNetwork::generate(
                 &heightmap_vec, &gpu_rock_hardness, &tectonic_stress, &continentalness,
                 &gpu_light_level, &gpu_humidity, &temperature, &peaks_valleys,
                 width, height, SEA_LEVEL,
             );
-            river_network.to_flow_grid(width, height)
+            let grid = river_network.to_flow_grid(width, height);
+            (grid, Some(Arc::new(river_network)))
         } else {
             let river_gen = RiverGenerator::for_map_size(SEA_LEVEL, width, height);
-            river_gen.generate_climate_aware(&heightmap_vec, &gpu_light_level, &gpu_humidity, width, height)
+            (river_gen.generate_climate_aware(&heightmap_vec, &gpu_light_level, &gpu_humidity, width, height), None)
         };
 
         // Erosion feedback: carve terrain along rivers and eroded areas
@@ -540,6 +546,7 @@ impl BiomeMap {
             vegetation_density,
             soil_type,
             resource_map: None,
+            river_network,
         }
     }
 
@@ -547,6 +554,37 @@ impl BiomeMap {
     #[cfg(not(feature = "gpu"))]
     fn generate_gpu(seed: u32, width: usize, height: usize) -> Self {
         Self::generate(seed, width, height)
+    }
+
+    /// Drop all float layers to free memory. Only `biomes` and dimensions are retained.
+    /// After calling this, `to_layer_image()` will only work for the Biome layer.
+    pub fn shrink(&mut self) {
+        self.continentalness = Vec::new();
+        self.tectonic = Vec::new();
+        self.tectonic_plate_ids = Vec::new();
+        self.humidity = Vec::new();
+        self.rock_hardness = Vec::new();
+        self.light_level = Vec::new();
+        self.peaks_valleys = Vec::new();
+        self.volcanism = Vec::new();
+        self.heightmap = Vec::new();
+        self.temperature = Vec::new();
+        self.erosion = Vec::new();
+        self.rivers = Vec::new();
+        self.aridity = Vec::new();
+        self.precipitation_type = Vec::new();
+        self.river_moisture = Vec::new();
+        self.resource_richness = Vec::new();
+        self.snowpack = Vec::new();
+        self.vegetation_density = Vec::new();
+        self.soil_type = Vec::new();
+        self.resource_map = None;
+        self.river_network = None;
+    }
+
+    /// Returns true if this BiomeMap has been shrunk (float layers dropped).
+    pub fn is_shrunk(&self) -> bool {
+        self.continentalness.is_empty()
     }
 
     /// Convert any layer to RGBA image bytes.
@@ -960,6 +998,7 @@ impl BiomeMap {
             vegetation_density,
             soil_type,
             resource_map: None,
+            river_network: None,
         }
     }
 
@@ -1012,6 +1051,7 @@ impl BiomeMap {
         detail_level: u32,
         progress: Option<&Arc<LayerProgress>>,
         macro_map: Option<&BiomeMap>,
+        river_network: Option<&Arc<RiverNetwork>>,
     ) -> Self {
         let world_width = world_height * 2.0;
         let cont_strategy = ContinentalnessStrategy::new(seed);
@@ -1120,36 +1160,37 @@ impl BiomeMap {
             biomes.push(biome);
         }
 
-        // Carve macro river channels into meso heightmap before D8 flow
-        let mut carved_heightmap = heightmap_vec.clone();
-        if let Some(macro_map) = macro_map {
-            crate::rivers::carve_river_channels(
-                &mut carved_heightmap,
-                output_size, output_size,
-                &macro_map.rivers, macro_map.width, macro_map.height,
-                world_x, world_y, world_size,
-                SEA_LEVEL,
-            );
-        }
-
-        // Rivers (use carved heightmap for D8 routing) with climate awareness
-        let river_gen = RiverGenerator::for_map_size_with_detail(SEA_LEVEL, output_size, output_size, detail_level);
-        let rivers = if let Some(macro_map) = macro_map {
-            river_gen.generate_with_macro_flow_climate(
-                &carved_heightmap,
-                output_size,
-                output_size,
-                &macro_map.rivers,
-                macro_map.width,
-                macro_map.height,
-                world_x,
-                world_y,
-                world_size,
-                &light_level,
-                &humidity,
-            )
+        // Rivers: use global network if available, otherwise fall back to per-tile generation
+        let rivers = if let Some(net) = river_network {
+            let threshold = match detail_level {
+                0 | 1 => crate::rivers::LOD_THRESHOLD_MACRO,
+                2 => crate::rivers::LOD_THRESHOLD_MESO,
+                _ => crate::rivers::LOD_THRESHOLD_MICRO,
+            };
+            crate::rivers::rasterize_from_network(net, world_x, world_y, world_size, output_size, threshold)
         } else {
-            river_gen.generate_climate_aware(&heightmap_vec, &light_level, &humidity, output_size, output_size)
+            // Legacy fallback: per-tile river generation
+            let mut carved_heightmap = heightmap_vec.clone();
+            if let Some(macro_map) = macro_map {
+                crate::rivers::carve_river_channels(
+                    &mut carved_heightmap,
+                    output_size, output_size,
+                    &macro_map.rivers, macro_map.width, macro_map.height,
+                    world_x, world_y, world_size,
+                    SEA_LEVEL,
+                );
+            }
+            let river_gen = RiverGenerator::for_map_size_with_detail(SEA_LEVEL, output_size, output_size, detail_level);
+            if let Some(macro_map) = macro_map {
+                river_gen.generate_with_macro_flow_climate(
+                    &carved_heightmap, output_size, output_size,
+                    &macro_map.rivers, macro_map.width, macro_map.height,
+                    world_x, world_y, world_size,
+                    &light_level, &humidity,
+                )
+            } else {
+                river_gen.generate_climate_aware(&heightmap_vec, &light_level, &humidity, output_size, output_size)
+            }
         };
 
         for idx in 0..total_pixels {
@@ -1226,6 +1267,7 @@ impl BiomeMap {
             vegetation_density,
             soil_type,
             resource_map: None,
+            river_network: None,
         }
     }
 
@@ -1241,13 +1283,14 @@ impl BiomeMap {
         progress: Option<&Arc<LayerProgress>>,
         backend: NoiseBackend,
         macro_map: Option<&BiomeMap>,
+        river_network: Option<&Arc<RiverNetwork>>,
     ) -> Self {
         match backend {
             NoiseBackend::Cpu => Self::generate_meso_full(
-                seed, world_x, world_y, world_size, output_size, world_height, detail_level, progress, macro_map,
+                seed, world_x, world_y, world_size, output_size, world_height, detail_level, progress, macro_map, river_network,
             ),
             NoiseBackend::Gpu => Self::generate_meso_full_gpu(
-                seed, world_x, world_y, world_size, output_size, world_height, detail_level, progress, macro_map,
+                seed, world_x, world_y, world_size, output_size, world_height, detail_level, progress, macro_map, river_network,
             ),
         }
     }
@@ -1264,12 +1307,13 @@ impl BiomeMap {
         detail_level: u32,
         progress: Option<&Arc<LayerProgress>>,
         macro_map: Option<&BiomeMap>,
+        river_network: Option<&Arc<RiverNetwork>>,
     ) -> Self {
         use crate::gpu::GpuNoiseContext;
 
         let Some(gpu) = GpuNoiseContext::global() else {
             return Self::generate_meso_full(
-                seed, world_x, world_y, world_size, output_size, world_height, detail_level, progress, macro_map,
+                seed, world_x, world_y, world_size, output_size, world_height, detail_level, progress, macro_map, river_network,
             );
         };
 
@@ -1372,29 +1416,36 @@ impl BiomeMap {
             p.increment(LayerId::Derivation, total_pixels);
         }
 
-        // Carve macro river channels into meso heightmap before D8 flow
-        let mut carved_heightmap = heightmap_vec.clone();
-        if let Some(macro_map) = macro_map {
-            crate::rivers::carve_river_channels(
-                &mut carved_heightmap,
-                output_size, output_size,
-                &macro_map.rivers, macro_map.width, macro_map.height,
-                world_x, world_y, world_size,
-                SEA_LEVEL,
-            );
-        }
-
-        // Rivers (use carved heightmap for D8 routing) with climate awareness
-        let river_gen = RiverGenerator::for_map_size_with_detail(SEA_LEVEL, output_size, output_size, detail_level);
-        let rivers = if let Some(macro_map) = macro_map {
-            river_gen.generate_with_macro_flow_climate(
-                &carved_heightmap, output_size, output_size,
-                &macro_map.rivers, macro_map.width, macro_map.height,
-                world_x, world_y, world_size,
-                &gpu_light_level, &gpu_humidity,
-            )
+        // Rivers: use global network if available, otherwise fall back to per-tile generation
+        let rivers = if let Some(net) = river_network {
+            let threshold = match detail_level {
+                0 | 1 => crate::rivers::LOD_THRESHOLD_MACRO,
+                2 => crate::rivers::LOD_THRESHOLD_MESO,
+                _ => crate::rivers::LOD_THRESHOLD_MICRO,
+            };
+            crate::rivers::rasterize_from_network(net, world_x, world_y, world_size, output_size, threshold)
         } else {
-            river_gen.generate_climate_aware(&heightmap_vec, &gpu_light_level, &gpu_humidity, output_size, output_size)
+            let mut carved_heightmap = heightmap_vec.clone();
+            if let Some(macro_map) = macro_map {
+                crate::rivers::carve_river_channels(
+                    &mut carved_heightmap,
+                    output_size, output_size,
+                    &macro_map.rivers, macro_map.width, macro_map.height,
+                    world_x, world_y, world_size,
+                    SEA_LEVEL,
+                );
+            }
+            let river_gen = RiverGenerator::for_map_size_with_detail(SEA_LEVEL, output_size, output_size, detail_level);
+            if let Some(macro_map) = macro_map {
+                river_gen.generate_with_macro_flow_climate(
+                    &carved_heightmap, output_size, output_size,
+                    &macro_map.rivers, macro_map.width, macro_map.height,
+                    world_x, world_y, world_size,
+                    &gpu_light_level, &gpu_humidity,
+                )
+            } else {
+                river_gen.generate_climate_aware(&heightmap_vec, &gpu_light_level, &gpu_humidity, output_size, output_size)
+            }
         };
 
         for idx in 0..total_pixels {
@@ -1455,6 +1506,7 @@ impl BiomeMap {
             vegetation_density,
             soil_type,
             resource_map: None,
+            river_network: None,
         }
     }
 
@@ -1470,9 +1522,10 @@ impl BiomeMap {
         detail_level: u32,
         progress: Option<&Arc<LayerProgress>>,
         macro_map: Option<&BiomeMap>,
+        river_network: Option<&Arc<RiverNetwork>>,
     ) -> Self {
         Self::generate_meso_full(
-            seed, world_x, world_y, world_size, output_size, world_height, detail_level, progress, macro_map,
+            seed, world_x, world_y, world_size, output_size, world_height, detail_level, progress, macro_map, river_network,
         )
     }
 }

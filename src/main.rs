@@ -208,7 +208,7 @@ const MESO_GRID_SIZE: i32 = 8;
 const MESO_TILE_DISPLAY_PX: f32 = 64.0;
 
 /// Max concurrent async tile generation tasks during macro pre-generation.
-const MACRO_PREGEN_CONCURRENCY: usize = 12;
+const MACRO_PREGEN_CONCURRENCY: usize = 4;
 
 /// Max tile completions to process per frame.
 const POLL_BUDGET: usize = 16;
@@ -249,6 +249,13 @@ impl Default for GeneratorParams {
 #[derive(Resource)]
 struct MacroBiomeData {
     biome_map: Arc<BiomeMap>,
+}
+
+/// Global river network computed once from the macro BiomeMap.
+/// All tile generations query this for consistent rivers across zoom levels.
+#[derive(Resource)]
+struct GlobalRiverNetwork {
+    network: Arc<rb_noise::RiverNetwork>,
 }
 
 /// Marker component for the chunk highlight overlay (follows cursor).
@@ -502,11 +509,19 @@ fn start_generation(
     // Generate macro map synchronously (fast)
     let backend_name = if backend == NoiseBackend::Gpu { "GPU" } else { "CPU" };
     println!("Generating macro map {}x{} ({})...", width, height, backend_name);
-    let biome_map = Arc::new(BiomeMap::generate_with_backend(seed, width, height, backend));
+    let biome_map = BiomeMap::generate_with_backend(seed, width, height, backend);
     println!("  Macro map generated successfully");
 
+    // Extract the global river network before wrapping in Arc
+    if let Some(ref network) = biome_map.river_network {
+        commands.insert_resource(GlobalRiverNetwork {
+            network: network.clone(),
+        });
+        println!("  Global river network stored ({} segments)", network.segment_count());
+    }
+
     commands.insert_resource(MacroBiomeData {
-        biome_map,
+        biome_map: Arc::new(biome_map),
     });
 
     // Spawn chunk highlight (follows cursor)
@@ -582,19 +597,23 @@ fn dispatch_macro_pregen(
     world_textures: Option<Res<MacroBiomeData>>,
     world_def: Res<WorldDefinition>,
     ui_state: Res<GeneratorUiState>,
+    global_rivers: Option<Res<GlobalRiverNetwork>>,
 ) {
     let Some(world_textures) = world_textures else { return };
     let seed = world_def.seed;
     let height = world_def.height as f64;
     let backend = ui_state.backend();
+    let river_net = global_rivers.map(|r| r.network.clone());
 
     while pregen.in_flight.len() < MACRO_PREGEN_CONCURRENCY {
         let Some(coord) = pregen.remaining.pop() else { break };
         let macro_map = world_textures.biome_map.clone();
+        let river_net_clone = river_net.clone();
         let world_x = coord.0 as f64 * CHUNK_SIZE as f64;
         let world_y = coord.1 as f64 * CHUNK_SIZE as f64;
 
         let task = AsyncComputeTaskPool::get().spawn(async move {
+            let river_ref = river_net_clone.as_ref();
             let biome_map = BiomeMap::generate_meso_full_with_backend(
                 seed,
                 world_x,
@@ -606,6 +625,7 @@ fn dispatch_macro_pregen(
                 None,
                 backend,
                 Some(&macro_map),
+                river_ref,
             );
             (coord, Arc::new(biome_map))
         });
@@ -622,6 +642,7 @@ fn poll_macro_pregen(
     current_layer: Res<CurrentLayer>,
     mut next_phase: ResMut<NextState<AppPhase>>,
     mut commands: Commands,
+    global_rivers: Option<Res<GlobalRiverNetwork>>,
 ) {
     let frame = tile_cache.frame;
 
@@ -650,8 +671,54 @@ fn poll_macro_pregen(
     if pregen.completed >= pregen.total {
         println!("All {} macro tiles pre-generated.", pregen.total);
 
+        // Refresh macro tile rivers from global network for consistency
+        if let Some(ref global_rivers) = global_rivers {
+            use rb_noise::{rasterize_from_network, LOD_THRESHOLD_MACRO, derived, SEA_LEVEL};
+            use rb_core::TileType;
+
+            println!("Refreshing macro tile rivers from global network...");
+            for cy in 0..8i32 {
+                for cx in 0..16i32 {
+                    let coord = (cx, cy);
+                    let Some(cached) = tile_cache.macro_tiles.get_mut(&coord) else { continue };
+                    let Some(biome_map) = Arc::get_mut(&mut cached.biome_map) else { continue };
+                    let world_x = cx as f64 * CHUNK_SIZE as f64;
+                    let world_y = cy as f64 * CHUNK_SIZE as f64;
+                    let new_rivers = rasterize_from_network(
+                        &global_rivers.network, world_x, world_y,
+                        CHUNK_SIZE as f64, TILE_MAP_SIZE, LOD_THRESHOLD_MACRO,
+                    );
+                    for idx in 0..biome_map.rivers.len() {
+                        biome_map.rivers[idx] = new_rivers[idx];
+                        biome_map.river_moisture[idx] = derived::derive_river_moisture(new_rivers[idx]);
+                        if new_rivers[idx] > 0.0
+                            && biome_map.continentalness[idx] >= SEA_LEVEL
+                            && biome_map.temperature[idx] > -10.0
+                            && biome_map.temperature[idx] < 70.0
+                        {
+                            biome_map.biomes[idx] = TileType::River;
+                        }
+                    }
+                    // Regenerate texture
+                    let image_data = biome_map.to_layer_image(current_layer.0);
+                    cached.texture = images.add(create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, image_data));
+                }
+            }
+            println!("  Macro tile rivers refreshed.");
+        }
+
         // Save debug layers by stitching all macro tiles — same data the app displays
         save_stitched_debug_layers(&tile_cache);
+
+        // Shrink BiomeMaps to free memory (~38MB each → ~1MB each)
+        let mut shrunk = 0;
+        for (_, cached) in tile_cache.macro_tiles.iter_mut() {
+            if let Some(bm) = Arc::get_mut(&mut cached.biome_map) {
+                bm.shrink();
+                shrunk += 1;
+            }
+        }
+        println!("Shrunk {shrunk} macro BiomeMaps to save memory.");
 
         commands.remove_resource::<MacroPregenState>();
         next_phase.set(AppPhase::Ready);
@@ -799,6 +866,7 @@ fn enqueue_and_dispatch_tiles(
     world_textures: Option<Res<MacroBiomeData>>,
     ui_state: Res<GeneratorUiState>,
     camera_query: Query<&Transform, With<Camera2d>>,
+    global_rivers: Option<Res<GlobalRiverNetwork>>,
 ) {
     let Some(world_textures) = world_textures else { return };
     let Ok(camera_transform) = camera_query.get_single() else { return };
@@ -807,6 +875,7 @@ fn enqueue_and_dispatch_tiles(
     let seed = world_def.seed;
     let height = world_def.height as f64;
     let backend = ui_state.backend();
+    let river_net = global_rivers.map(|r| r.network.clone());
     let half_map_width = world_def.width as f32 / 2.0;
     let half_map_height = world_def.height as f32 / 2.0;
 
@@ -838,10 +907,12 @@ fn enqueue_and_dispatch_tiles(
         }
 
         let macro_map_clone = macro_map.clone();
+        let river_net_clone = river_net.clone();
         let world_x = coord.0 as f64 * CHUNK_SIZE as f64;
         let world_y = coord.1 as f64 * CHUNK_SIZE as f64;
 
         let task = AsyncComputeTaskPool::get().spawn(async move {
+            let river_ref = river_net_clone.as_ref();
             let biome_map = BiomeMap::generate_meso_full_with_backend(
                 seed,
                 world_x,
@@ -853,6 +924,7 @@ fn enqueue_and_dispatch_tiles(
                 None,
                 backend,
                 Some(&macro_map_clone),
+                river_ref,
             );
             (coord, Arc::new(biome_map))
         });
@@ -992,9 +1064,14 @@ fn handle_layer_change(
 
     // Re-render all cached tiles from their BiomeMap data
     if let Some(ref mut cache) = tile_cache {
-        // Re-render macro tiles
+        // Re-render macro tiles (shrunk maps can only render Biome layer)
         for (_, cached) in cache.macro_tiles.iter_mut() {
-            let image_data = cached.biome_map.to_layer_image(new_layer);
+            let effective_layer = if cached.biome_map.is_shrunk() {
+                rb_noise::NoiseLayer::Biome
+            } else {
+                new_layer
+            };
+            let image_data = cached.biome_map.to_layer_image(effective_layer);
             let new_image = create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, image_data);
             cached.texture = images.add(new_image);
         }
@@ -1341,6 +1418,7 @@ fn level_chunk_load_system(
     mut queue: ResMut<LevelChunkQueue>,
     world_textures: Option<Res<MacroBiomeData>>,
     ui_state: Res<GeneratorUiState>,
+    global_rivers: Option<Res<GlobalRiverNetwork>>,
 ) {
     let Some(world_textures) = world_textures else { return };
     let Ok(player_transform) = player_query.get_single() else { return };
@@ -1352,6 +1430,7 @@ fn level_chunk_load_system(
     let seed = level.seed;
     let height = level.world_height;
     let backend = ui_state.backend();
+    let river_net = global_rivers.map(|r| r.network.clone());
 
     // Collect in-flight coords
     let in_flight_coords: HashSet<(i32, i32)> = queue.in_flight.iter()
@@ -1377,7 +1456,9 @@ fn level_chunk_load_system(
             let world_y = level.origin.y + cy as f64 * MICRO_WORLD_SIZE;
 
             let macro_map = world_textures.biome_map.clone();
+            let river_net_clone = river_net.clone();
             let task = AsyncComputeTaskPool::get().spawn(async move {
+                let river_ref = river_net_clone.as_ref();
                 let biome_map = BiomeMap::generate_meso_full_with_backend(
                     seed,
                     world_x,
@@ -1389,6 +1470,7 @@ fn level_chunk_load_system(
                     None,
                     backend,
                     Some(&macro_map),
+                    river_ref,
                 );
                 (coord, Arc::new(biome_map))
             });
@@ -1634,6 +1716,7 @@ fn dispatch_meso_pregen(
     world_def: Res<WorldDefinition>,
     selected: Option<Res<SelectedChunk>>,
     ui_state: Res<GeneratorUiState>,
+    global_rivers: Option<Res<GlobalRiverNetwork>>,
 ) {
     let Some(world_textures) = world_textures else { return };
     let Some(selected) = selected else { return };
@@ -1642,19 +1725,23 @@ fn dispatch_meso_pregen(
     let height = world_def.height as f64;
     let backend = ui_state.backend();
     let chunk_origin = selected.origin;
+    let river_net = global_rivers.map(|r| r.network.clone());
 
     while pregen.in_flight.len() < MACRO_PREGEN_CONCURRENCY {
         let Some(coord) = pregen.remaining.pop() else { break };
         let macro_map = world_textures.biome_map.clone();
+        let river_net_clone = river_net.clone();
 
         let world_x = chunk_origin.x + coord.0 as f64 * MESO_WORLD_SIZE;
         let world_y = chunk_origin.y + coord.1 as f64 * MESO_WORLD_SIZE;
 
         let task = AsyncComputeTaskPool::get().spawn(async move {
+            let river_ref = river_net_clone.as_ref();
             let biome_map = BiomeMap::generate_meso_full_with_backend(
                 seed, world_x, world_y, MESO_WORLD_SIZE, TILE_MAP_SIZE, height,
                 2, // meso detail level
                 None, backend, Some(&macro_map),
+                river_ref,
             );
             (coord, Arc::new(biome_map))
         });
@@ -1900,6 +1987,7 @@ fn dispatch_micro_pregen(
     world_def: Res<WorldDefinition>,
     selected_meso: Option<Res<SelectedMesoTile>>,
     ui_state: Res<GeneratorUiState>,
+    global_rivers: Option<Res<GlobalRiverNetwork>>,
 ) {
     let Some(world_textures) = world_textures else { return };
     let Some(selected_meso) = selected_meso else { return };
@@ -1908,19 +1996,23 @@ fn dispatch_micro_pregen(
     let height = world_def.height as f64;
     let backend = ui_state.backend();
     let meso_origin = selected_meso.origin;
+    let river_net = global_rivers.map(|r| r.network.clone());
 
     while pregen.in_flight.len() < MACRO_PREGEN_CONCURRENCY {
         let Some(coord) = pregen.remaining.pop() else { break };
         let macro_map = world_textures.biome_map.clone();
+        let river_net_clone = river_net.clone();
 
         let world_x = meso_origin.x + coord.0 as f64 * MICRO_WORLD_SIZE;
         let world_y = meso_origin.y + coord.1 as f64 * MICRO_WORLD_SIZE;
 
         let task = AsyncComputeTaskPool::get().spawn(async move {
+            let river_ref = river_net_clone.as_ref();
             let biome_map = BiomeMap::generate_meso_full_with_backend(
                 seed, world_x, world_y, MICRO_WORLD_SIZE, TILE_MAP_SIZE, height,
                 3, // micro detail level
                 None, backend, Some(&macro_map),
+                river_ref,
             );
             (coord, Arc::new(biome_map))
         });

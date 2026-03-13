@@ -61,6 +61,7 @@ fn main() {
                 Some(&progress),
                 NoiseBackend::Gpu,
                 Some(&macro_map),
+                None, // no global river network in standalone example
             );
             meso_tiles.push(tile);
         }
