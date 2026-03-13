@@ -523,9 +523,13 @@ pub fn rasterize_from_network(
     let total = output_size * output_size;
     let mut grid = vec![0.0f64; total];
 
+    // Expand query bounds so that segments passing through the tile are captured
+    // even if their path points lie just outside. Critical for small tiles (micro=0.25)
+    // where river paths have ~1 point per world unit.
+    let margin = 1.5;
     let constraints = network.query_chunk(
-        world_x, world_y,
-        world_x + world_size, world_y + world_size,
+        world_x - margin, world_y - margin,
+        world_x + world_size + margin, world_y + world_size + margin,
         lod_drainage_threshold,
     );
 
@@ -547,19 +551,34 @@ pub fn rasterize_from_network(
             continue;
         }
 
-        // Build pixel-space path from world-coordinate constraint
+        // Build pixel-space path from world-coordinate constraint,
+        // applying meander offsets perpendicular to flow direction.
         let pixel_path: Vec<(f64, f64)> = constraint.path.iter()
-            .map(|&(wx, wy, meander_offset)| {
-                let base_px = (wx - world_x) * scale;
-                let base_py = (wy - world_y) * scale;
+            .enumerate()
+            .map(|(i, &(wx, wy, meander_offset))| {
+                let mut px = (wx - world_x) * scale;
+                let mut py = (wy - world_y) * scale;
 
-                if meander_offset.abs() < 0.001 {
-                    return (base_px, base_py);
+                if meander_offset.abs() > 0.001 {
+                    // Compute perpendicular from flow direction using next/prev points
+                    let (next_wx, next_wy) = if i + 1 < constraint.path.len() {
+                        (constraint.path[i + 1].0, constraint.path[i + 1].1)
+                    } else if i > 0 {
+                        let (prev_wx, prev_wy, _) = constraint.path[i - 1];
+                        (wx + (wx - prev_wx), wy + (wy - prev_wy))
+                    } else {
+                        (wx, wy + 1.0)
+                    };
+                    let flow_dx = next_wx - wx;
+                    let flow_dy = next_wy - wy;
+                    let flow_len = (flow_dx * flow_dx + flow_dy * flow_dy).sqrt().max(0.001);
+                    let perp_x = -flow_dy / flow_len;
+                    let perp_y = flow_dx / flow_len;
+                    px += meander_offset * perp_x * scale;
+                    py += meander_offset * perp_y * scale;
                 }
 
-                // Compute perpendicular from flow direction
-                // Use next/prev points for direction estimation
-                (base_px, base_py) // meander already baked into query path coords
+                (px, py)
             })
             .collect();
 
@@ -570,7 +589,9 @@ pub fn rasterize_from_network(
         let drainage_per_point = vec![constraint.drainage_area; pixel_path.len()];
         // Scale river width with tile resolution so rivers have consistent world-space width.
         // Base width ~3 world units for the largest river, scaled to pixel space.
-        let max_half_width = 3.0 * scale * constraint.character.width_multiplier();
+        // Cap to 1/4 of tile size to avoid absurd scan areas at micro resolution.
+        let max_half_width = (3.0 * scale * constraint.character.width_multiplier())
+            .min(output_size as f64 * 0.25);
 
         rasterise_smooth_line(
             &mut grid, output_size, output_size,
@@ -704,7 +725,7 @@ fn condition_heightmap_for_drainage(
     // The smoothed version controls large-scale flow direction;
     // the original adds local variation for natural-looking river courses.
     // blend = 0.0 → pure original (fragmented), 1.0 → pure smooth (too straight)
-    let blend = 0.85;
+    let blend = 0.65;
     let mut conditioned = Vec::with_capacity(total);
     for idx in 0..total {
         conditioned.push(heightmap[idx] * (1.0 - blend) + smoothed[idx] * blend);
