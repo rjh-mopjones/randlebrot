@@ -33,6 +33,7 @@ pub use strategy::{
     TectonicPlatesStrategy, TemperatureStrategy,
 };
 pub use tidally_locked::{LatitudeTemperatureStrategy, TidallyLockedTemperatureStrategy};
+pub use terrain_render::NormalizationHints;
 pub use visualization::NoiseLayer;
 pub use derived::{
     derive_aridity, derive_erosion, derive_heightmap, derive_peaks_valleys,

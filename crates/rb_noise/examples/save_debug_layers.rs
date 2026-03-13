@@ -7,7 +7,7 @@
 //! Each tile is generated at 64px and stitched into 8192×4096 images.
 
 use image::{ImageBuffer, Rgba, RgbaImage};
-use rb_noise::{BiomeMap, LayerProgress, NoiseBackend, NoiseLayer};
+use rb_noise::{BiomeMap, LayerProgress, NormalizationHints, NoiseBackend, NoiseLayer};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -20,7 +20,7 @@ fn main() {
     let world_width = 1024.0_f64;
     let world_height = 512.0_f64;
     let meso_world_size = 8.0_f64; // matches MESO_WORLD_SIZE in main.rs
-    let tile_px = 64_usize; // pixels per meso tile in output
+    let tile_px = 32_usize; // pixels per meso tile in output (32 keeps PNGs under 30MB)
 
     let tiles_x = (world_width / meso_world_size) as usize; // 128
     let tiles_y = (world_height / meso_world_size) as usize; // 64
@@ -87,6 +87,23 @@ fn main() {
     }
     println!("\r  All {total_tiles} meso tiles generated.                              ");
 
+    // Compute global heightmap range for consistent normalization across tiles
+    let norm_hints = {
+        let mut hmin = f64::MAX;
+        let mut hmax = f64::MIN;
+        for tile in &meso_tiles {
+            for &v in &tile.heightmap {
+                if v < hmin { hmin = v; }
+                if v > hmax { hmax = v; }
+            }
+        }
+        NormalizationHints {
+            heightmap_min: if hmin < hmax { hmin } else { 0.0 },
+            heightmap_max: if hmin < hmax { hmax } else { 1.0 },
+        }
+    };
+    println!("  Global heightmap range: [{:.4}, {:.4}]", norm_hints.heightmap_min, norm_hints.heightmap_max);
+
     // Stitch and save each layer
     let out_dir = Path::new("debug_layers");
     let base_dir = out_dir.join("base");
@@ -104,7 +121,7 @@ fn main() {
         for ty in 0..tiles_y {
             for tx in 0..tiles_x {
                 let tile = &meso_tiles[ty * tiles_x + tx];
-                let rgba_data = tile.to_layer_image(*layer);
+                let rgba_data = tile.to_layer_image_with_hints(*layer, Some(&norm_hints));
                 let tile_img: ImageBuffer<Rgba<u8>, _> =
                     ImageBuffer::from_raw(tile_px as u32, tile_px as u32, rgba_data)
                         .expect("tile image size mismatch");

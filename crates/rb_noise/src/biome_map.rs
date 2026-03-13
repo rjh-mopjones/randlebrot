@@ -587,12 +587,29 @@ impl BiomeMap {
         self.continentalness.is_empty()
     }
 
+    /// Convert any layer to RGBA image bytes with optional global normalization hints.
+    pub fn to_layer_image_with_hints(
+        &self,
+        layer: NoiseLayer,
+        hints: Option<&crate::terrain_render::NormalizationHints>,
+    ) -> Vec<u8> {
+        // Composited terrain render for Biome layer when full data is available
+        if layer == NoiseLayer::Biome && !self.is_shrunk() {
+            return crate::terrain_render::render_terrain(self, hints);
+        }
+        self.to_layer_image_inner(layer)
+    }
+
     /// Convert any layer to RGBA image bytes.
     pub fn to_layer_image(&self, layer: NoiseLayer) -> Vec<u8> {
         // Composited terrain render for Biome layer when full data is available
         if layer == NoiseLayer::Biome && !self.is_shrunk() {
-            return crate::terrain_render::render_terrain(self);
+            return crate::terrain_render::render_terrain(self, None);
         }
+        self.to_layer_image_inner(layer)
+    }
+
+    fn to_layer_image_inner(&self, layer: NoiseLayer) -> Vec<u8> {
 
         let mut data = Vec::with_capacity(self.width * self.height * 4);
 

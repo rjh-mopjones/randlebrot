@@ -58,22 +58,22 @@ impl MoistureClass {
 /// Elevation classification for altitude-based biome selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ElevationClass {
-    Coastal,  // < 0.02 above sea level
-    Lowland,  // 0.02 to 0.08
-    Upland,   // 0.08 to 0.18
-    Highland, // 0.18 to 0.28
-    Alpine,   // > 0.28
+    Coastal,  // < 0.04 above sea level
+    Lowland,  // 0.04 to 0.12
+    Upland,   // 0.12 to 0.25
+    Highland, // 0.25 to 0.38
+    Alpine,   // > 0.38
 }
 
 impl ElevationClass {
     pub fn from_elevation(above_sea: f64) -> Self {
-        if above_sea < 0.02 {
+        if above_sea < 0.04 {
             Self::Coastal
-        } else if above_sea < 0.08 {
+        } else if above_sea < 0.12 {
             Self::Lowland
-        } else if above_sea < 0.18 {
+        } else if above_sea < 0.25 {
             Self::Upland
-        } else if above_sea < 0.28 {
+        } else if above_sea < 0.38 {
             Self::Highland
         } else {
             Self::Alpine

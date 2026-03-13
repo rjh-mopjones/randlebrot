@@ -2,23 +2,55 @@
 //!
 //! Replaces flat biome colors with a multi-layer composited image using
 //! heightmap, erosion, snowpack, volcanism, rivers, vegetation, and lighting data.
+//!
+//! Key insight: the heightmap raw values vary over a tiny range per tile (e.g. 0.03 to 0.33),
+//! so we precompute a contrast-stretched heightmap normalized to [0,1] per tile.
+//! All terrain shading (hillshade, AO, slope) operates on this normalized version
+//! so derivatives are meaningful.
 
 use rb_core::TileType;
 
 use crate::biome_map::{BiomeMap, SEA_LEVEL};
 
+/// Global heightmap statistics for consistent normalization across tiles.
+/// Without this, each tile normalizes independently causing visible tile boundary seams.
+#[derive(Clone, Debug)]
+pub struct NormalizationHints {
+    pub heightmap_min: f64,
+    pub heightmap_max: f64,
+}
+
 /// Render a fully composited terrain image from all BiomeMap layers.
 /// Returns RGBA bytes (width * height * 4).
-pub fn render_terrain(map: &BiomeMap) -> Vec<u8> {
+///
+/// If `hints` is provided, uses global heightmap range for normalization
+/// so all tiles produce consistent shading. Without hints, falls back to
+/// per-tile normalization (which causes tile boundary artifacts).
+pub fn render_terrain(map: &BiomeMap, hints: Option<&NormalizationHints>) -> Vec<u8> {
     let w = map.width;
     let h = map.height;
     let mut data = Vec::with_capacity(w * h * 4);
 
-    // Precompute heightmap min/max for normalization (land only)
-    let (land_min, land_max) = land_height_range(&map.heightmap, &map.continentalness);
-
     // Light direction for hillshading: northwest, steep angle
     let light_dir = normalize([1.0, -1.0, 2.0]);
+
+    // Contrast-stretched heightmap normalized to [0,1].
+    // Uses global range from hints if available, otherwise per-tile range.
+    let norm_height = {
+        let (hmin, hmax) = if let Some(h) = hints {
+            (h.heightmap_min, h.heightmap_max)
+        } else {
+            let mut hmin = f64::MAX;
+            let mut hmax = f64::MIN;
+            for &v in &map.heightmap {
+                if v < hmin { hmin = v; }
+                if v > hmax { hmax = v; }
+            }
+            (hmin, hmax)
+        };
+        let range = if hmax > hmin { hmax - hmin } else { 1.0 };
+        map.heightmap.iter().map(|&v| ((v - hmin) / range).clamp(0.0, 1.0)).collect::<Vec<f64>>()
+    };
 
     for y in 0..h {
         for x in 0..w {
@@ -27,27 +59,53 @@ pub fn render_terrain(map: &BiomeMap) -> Vec<u8> {
             let biome = map.biomes[idx];
 
             let [r, g, b] = if is_water_biome(biome) && cont < SEA_LEVEL {
-                // Ocean rendering
                 render_ocean(cont, map.light_level[idx], map.temperature[idx])
             } else {
-                // Land compositing pipeline
-                let elevation_norm = if land_max > land_min {
-                    ((map.heightmap[idx] - land_min) / (land_max - land_min)).clamp(0.0, 1.0)
-                } else {
-                    0.5
-                };
+                // 1. Start with biome base color — always use the biome's identity
+                let mut pixel = biome.rgb();
 
-                // 1. Base color from biome + elevation
-                let mut pixel = biome_base_color(biome, elevation_norm);
+                // 2. Sub-biome tinting for grey/brown highland biomes
+                //    Uses rock hardness, erosion, temperature, soil to break up monotony
+                if matches!(biome,
+                    TileType::Mountain | TileType::Plateau | TileType::Badlands
+                    | TileType::Hamada | TileType::ScorchedRock | TileType::AlpineMeadow
+                ) {
+                    let rock = map.rock_hardness[idx];
+                    let eros = map.erosion[idx];
+                    let temp = map.temperature[idx];
+                    let soil = map.soil_type[idx];
 
-                // 2. Slope-based rock exposure
-                let slope = compute_slope(&map.heightmap, x, y, w, h);
-                if slope > 0.15 {
-                    let rock_alpha = ((slope - 0.15) / 0.3).clamp(0.0, 1.0);
-                    let hardness_boost = map.rock_hardness[idx] * 0.3;
-                    let alpha = (rock_alpha * (0.7 + hardness_boost)).clamp(0.0, 1.0);
-                    pixel = lerp_rgb(pixel, [140, 130, 120], alpha);
+                    // Hard rock → blue-grey, soft rock → warm brown
+                    pixel = lerp_rgb(pixel, [160, 130, 100], (1.0 - rock) * 0.25);
+
+                    // Erosion reveals warm sedimentary strata
+                    if eros > 0.1 {
+                        pixel = lerp_rgb(pixel, [180, 150, 110], (eros * 0.4).min(0.3));
+                    }
+
+                    // Temperature: hot = reddish, cold = blue-grey
+                    if temp > 50.0 {
+                        let heat = ((temp - 50.0) / 40.0).clamp(0.0, 1.0);
+                        pixel = lerp_rgb(pixel, [170, 100, 70], heat * 0.25);
+                    } else if temp < 10.0 {
+                        let cold = ((10.0 - temp) / 30.0).clamp(0.0, 1.0);
+                        pixel = lerp_rgb(pixel, [130, 140, 160], cold * 0.2);
+                    }
+
+                    // Soil in low-slope areas → greenish-brown tint
+                    if soil > 0.2 {
+                        pixel = lerp_rgb(pixel, [120, 140, 80], (soil - 0.2) * 0.3);
+                    }
                 }
+
+                // 3. Modulate brightness by normalized height (±15% around base)
+                let hn = norm_height[idx];
+                let brightness = 0.85 + hn * 0.30;
+                pixel = [
+                    (pixel[0] as f64 * brightness).clamp(0.0, 255.0) as u8,
+                    (pixel[1] as f64 * brightness).clamp(0.0, 255.0) as u8,
+                    (pixel[2] as f64 * brightness).clamp(0.0, 255.0) as u8,
+                ];
 
                 // 3. Coastal fringing
                 if !matches!(biome, TileType::Beach | TileType::Mangrove | TileType::RockyCoast | TileType::SeaCliff) {
@@ -72,11 +130,10 @@ pub fn render_terrain(map: &BiomeMap) -> Vec<u8> {
                 // 5. Snowpack overlay
                 let snow = map.snowpack[idx];
                 if snow > 0.01 {
-                    let blend = snow.powf(0.7);
-                    pixel = lerp_rgb(pixel, [245, 248, 255], blend);
+                    pixel = lerp_rgb(pixel, [245, 248, 255], snow.powf(0.7));
                 }
 
-                // 6. Volcanism overlay (pre-hillshade for glow effect check)
+                // 6. Volcanism overlay
                 let volc = map.volcanism[idx];
                 let is_emissive = volc > 0.85;
                 if volc > 0.5 {
@@ -88,20 +145,19 @@ pub fn render_terrain(map: &BiomeMap) -> Vec<u8> {
                     }
                 }
 
-                // 7. Vegetation tint
+                // 7. Vegetation tint — strong enough to show through everywhere
                 let veg = map.vegetation_density[idx];
-                if veg > 0.05 && !is_desert_biome(biome) {
+                if veg > 0.05 {
                     let green_target = [40, (veg * 120.0 + 60.0).min(255.0) as u8, 30];
-                    pixel = lerp_rgb(pixel, green_target, veg * 0.3);
+                    // Weaker in desert (oases), stronger elsewhere
+                    let strength = if is_desert_biome(biome) { 0.3 } else { 0.5 };
+                    pixel = lerp_rgb(pixel, green_target, veg * strength);
                 }
 
-                // 8. Hillshading (skip for emissive volcanic)
+                // 8. Hillshading on normalized heightmap (skip for emissive volcanic)
                 if !is_emissive {
-                    let shade = compute_hillshade(&map.heightmap, x, y, w, h, light_dir);
-
-                    // 9. Ambient occlusion
-                    let ao = compute_ao(&map.heightmap, x, y, w, h);
-
+                    let shade = compute_hillshade(&norm_height, x, y, w, h, light_dir);
+                    let ao = compute_ao(&norm_height, x, y, w, h);
                     let lighting = shade * ao;
                     pixel = [
                         (pixel[0] as f64 * lighting).clamp(0.0, 255.0) as u8,
@@ -110,7 +166,7 @@ pub fn render_terrain(map: &BiomeMap) -> Vec<u8> {
                     ];
                 }
 
-                // 10. Aerial perspective
+                // 9. Aerial perspective
                 let ll = map.light_level[idx];
                 let haze_amount = (1.0 - ll) * 0.15;
                 if haze_amount > 0.001 {
@@ -175,118 +231,57 @@ fn is_desert_biome(b: TileType) -> bool {
     )
 }
 
-/// Compute the land-only height range for normalization.
-fn land_height_range(heightmap: &[f64], continentalness: &[f64]) -> (f64, f64) {
-    let mut min = f64::MAX;
-    let mut max = f64::MIN;
-    for (i, &h) in heightmap.iter().enumerate() {
-        if continentalness[i] >= SEA_LEVEL {
-            if h < min { min = h; }
-            if h > max { max = h; }
-        }
-    }
-    if min > max {
-        (0.0, 1.0)
-    } else {
-        (min, max)
-    }
-}
-
-/// Biome base color modulated by elevation (2-stop gradient around biome rgb).
-fn biome_base_color(biome: TileType, elevation_norm: f64) -> [u8; 3] {
-    let base = biome.rgb();
-
-    if is_desert_biome(biome) {
-        // Desert: low = redder, high = yellower
-        let low = [
-            base[0].saturating_sub(15),
-            base[1].saturating_sub(30),
-            base[2].saturating_sub(10),
-        ];
-        let high = [
-            base[0],
-            base[1].saturating_add(15),
-            base[2].saturating_add(20),
-        ];
-        lerp_rgb(low, high, elevation_norm)
-    } else {
-        // General: low = darker/warmer, high = lighter/cooler
-        let low = [
-            (base[0] as f64 * 0.80) as u8,
-            (base[1] as f64 * 0.80) as u8,
-            (base[2] as f64 * 0.82) as u8,
-        ];
-        let high = [
-            ((base[0] as f64 * 1.20).min(255.0)) as u8,
-            ((base[1] as f64 * 1.18).min(255.0)) as u8,
-            ((base[2] as f64 * 1.20).min(255.0)) as u8,
-        ];
-        lerp_rgb(low, high, elevation_norm)
-    }
-}
-
-/// Sobel-based slope magnitude from heightmap.
-fn compute_slope(heightmap: &[f64], x: usize, y: usize, w: usize, h: usize) -> f64 {
-    if x == 0 || x >= w - 1 || y == 0 || y >= h - 1 {
-        return 0.0;
-    }
-    let get = |xi: usize, yi: usize| heightmap[yi * w + xi];
-
-    let dx = (get(x + 1, y - 1) + 2.0 * get(x + 1, y) + get(x + 1, y + 1))
-           - (get(x - 1, y - 1) + 2.0 * get(x - 1, y) + get(x - 1, y + 1));
-    let dy = (get(x - 1, y + 1) + 2.0 * get(x, y + 1) + get(x + 1, y + 1))
-           - (get(x - 1, y - 1) + 2.0 * get(x, y - 1) + get(x + 1, y - 1));
-
-    (dx * dx + dy * dy).sqrt()
-}
-
-/// Lambertian hillshading from heightmap normals.
-fn compute_hillshade(
-    heightmap: &[f64],
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-    light_dir: [f64; 3],
-) -> f64 {
-    if x == 0 || x >= w - 1 || y == 0 || y >= h - 1 {
-        return 0.8;
-    }
-    let get = |xi: usize, yi: usize| heightmap[yi * w + xi];
-
-    let z_factor = 8.0;
-
-    let dx = (get(x + 1, y - 1) + 2.0 * get(x + 1, y) + get(x + 1, y + 1))
-           - (get(x - 1, y - 1) + 2.0 * get(x - 1, y) + get(x - 1, y + 1));
-    let dy = (get(x - 1, y + 1) + 2.0 * get(x, y + 1) + get(x + 1, y + 1))
-           - (get(x - 1, y - 1) + 2.0 * get(x, y - 1) + get(x + 1, y - 1));
-
-    let normal = normalize([-dx * z_factor, -dy * z_factor, 1.0]);
-    let dot = normal[0] * light_dir[0] + normal[1] * light_dir[1] + normal[2] * light_dir[2];
-
-    dot.clamp(0.2, 1.0)
-}
-
-/// Approximate ambient occlusion from heightmap Laplacian (curvature).
-fn compute_ao(heightmap: &[f64], x: usize, y: usize, w: usize, h: usize) -> f64 {
-    if x == 0 || x >= w - 1 || y == 0 || y >= h - 1 {
-        return 1.0;
-    }
-    let get = |xi: usize, yi: usize| heightmap[yi * w + xi];
-    let center = get(x, y);
-    let neighbors = get(x - 1, y) + get(x + 1, y) + get(x, y - 1) + get(x, y + 1);
-    let laplacian = neighbors / 4.0 - center;
-
-    // Negative laplacian = valley → darken
-    1.0 - (-laplacian * 15.0).clamp(0.0, 0.3)
-}
-
 /// Coastal fringe blend factor for land pixels near sea level.
 fn coastal_fringe(continentalness: f64) -> f64 {
     if continentalness < SEA_LEVEL {
         return 0.0;
     }
     1.0 - ((continentalness - SEA_LEVEL) / 0.03).clamp(0.0, 1.0)
+}
+
+/// Lambertian hillshading on contrast-stretched heightmap.
+/// Since the input is normalized [0,1], derivatives are meaningful and
+/// z_factor controls how dramatic the relief shading appears.
+fn compute_hillshade(
+    norm_height: &[f64],
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    light_dir: [f64; 3],
+) -> f64 {
+    let r = 2usize;
+    if x < r || x + r >= w || y < r || y + r >= h {
+        return 0.8;
+    }
+    let get = |xi: usize, yi: usize| norm_height[yi * w + xi];
+
+    // High z_factor because normalized heightmap has full [0,1] range
+    // and we want dramatic terrain relief
+    let z_factor = 30.0;
+
+    let dx = (get(x + r, y) - get(x - r, y)) / (2 * r) as f64;
+    let dy = (get(x, y + r) - get(x, y - r)) / (2 * r) as f64;
+
+    let normal = normalize([-dx * z_factor, -dy * z_factor, 1.0]);
+    let dot = normal[0] * light_dir[0] + normal[1] * light_dir[1] + normal[2] * light_dir[2];
+
+    dot.clamp(0.25, 1.0)
+}
+
+/// Approximate ambient occlusion from heightmap curvature.
+fn compute_ao(norm_height: &[f64], x: usize, y: usize, w: usize, h: usize) -> f64 {
+    let r = 2usize;
+    if x < r || x + r >= w || y < r || y + r >= h {
+        return 1.0;
+    }
+    let get = |xi: usize, yi: usize| norm_height[yi * w + xi];
+    let center = get(x, y);
+    let neighbors = get(x - r, y) + get(x + r, y) + get(x, y - r) + get(x, y + r);
+    let laplacian = neighbors / 4.0 - center;
+
+    // Normalized heightmap so curvature values are larger → visible AO
+    1.0 - (-laplacian * 8.0).clamp(0.0, 0.3)
 }
 
 /// Render an ocean pixel based on depth, light, and temperature.

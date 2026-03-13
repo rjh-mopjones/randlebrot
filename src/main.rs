@@ -6,7 +6,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use rb_core::{AppMode, ModeTransitionEvent, PlayableLevel, SelectedChunk, SelectedMesoTile, SelectedMicroTile, WorldPos, handle_mode_shortcuts};
 use rb_editor::{CurrentLayer, GenerateMesoRequest, GeneratorUiState, LaunchLevelRequest, LauncherPhase, RegenerationRequest, StartPlayRequest};
-use rb_noise::{BiomeMap, NoiseBackend};
+use rb_noise::{BiomeMap, NoiseBackend, NormalizationHints};
 use rb_player::Player;
 use rb_tilemap::{LevelChunk, LoadedChunks};
 use rb_world::WorldDefinition;
@@ -214,11 +214,11 @@ const MACRO_PREGEN_CONCURRENCY: usize = 4;
 const POLL_BUDGET: usize = 16;
 
 
-/// Micro tile covers this many world units (0.25×0.25 area at 512×512 pixels).
-const MICRO_WORLD_SIZE: f64 = 0.25;
+/// Micro tile covers this many world units (1.0×1.0 area at 512×512 pixels).
+const MICRO_WORLD_SIZE: f64 = 1.0;
 
-/// Number of micro tiles per meso tile edge (8.0/0.25 = 32).
-const MICRO_GRID_SIZE: i32 = 32;
+/// Number of micro tiles per meso tile edge (8.0/1.0 = 8).
+const MICRO_GRID_SIZE: i32 = 8;
 
 /// Display size of each micro tile in the launcher grid.
 const MICRO_TILE_DISPLAY_PX: f32 = 16.0;
@@ -228,6 +228,11 @@ const MICRO_TILE_DISPLAY_PX: f32 = 16.0;
 /// Marker resource to trigger generation start.
 #[derive(Resource)]
 struct GenerationStarted;
+
+/// Global heightmap normalization hints computed after macro pregen.
+/// Ensures all tiles use the same heightmap range for consistent shading.
+#[derive(Resource, Clone)]
+struct GlobalNormHints(NormalizationHints);
 
 /// Parameters for world generation (editable in UI).
 #[derive(Resource, Debug, Clone)]
@@ -707,6 +712,28 @@ fn poll_macro_pregen(
             println!("  Macro tile rivers refreshed.");
         }
 
+        // Compute global heightmap range across all macro tiles for consistent normalization
+        let mut hmin = f64::MAX;
+        let mut hmax = f64::MIN;
+        for cached in tile_cache.macro_tiles.values() {
+            for &v in &cached.biome_map.heightmap {
+                if v < hmin { hmin = v; }
+                if v > hmax { hmax = v; }
+            }
+        }
+        let norm_hints = NormalizationHints {
+            heightmap_min: if hmin < hmax { hmin } else { 0.0 },
+            heightmap_max: if hmin < hmax { hmax } else { 1.0 },
+        };
+        println!("  Global heightmap range: [{:.4}, {:.4}]", norm_hints.heightmap_min, norm_hints.heightmap_max);
+        commands.insert_resource(GlobalNormHints(norm_hints.clone()));
+
+        // Re-render all macro tiles with global normalization hints
+        for cached in tile_cache.macro_tiles.values_mut() {
+            let image_data = cached.biome_map.to_layer_image_with_hints(current_layer.0, Some(&norm_hints));
+            cached.texture = images.add(create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, image_data));
+        }
+
         // Save debug layers by stitching all macro tiles — same data the app displays
         save_stitched_debug_layers(&tile_cache);
 
@@ -777,10 +804,32 @@ fn save_stitched_debug_layers(tile_cache: &TileCache) {
             _ => derived_dir.join(format!("{name}.png")),
         };
 
-        if let Err(e) = full_img.save(&path) {
+        // Downscale 2x to keep PNGs under 30MB (8192×4096 → 4096×2048)
+        let half_w = full_w / 2;
+        let half_h = full_h / 2;
+        let mut small_img: RgbaImage = ImageBuffer::new(half_w, half_h);
+        for sy in 0..half_h {
+            for sx in 0..half_w {
+                let x0 = sx * 2;
+                let y0 = sy * 2;
+                let [r0, g0, b0, a0] = full_img.get_pixel(x0, y0).0;
+                let [r1, g1, b1, a1] = full_img.get_pixel(x0 + 1, y0).0;
+                let [r2, g2, b2, a2] = full_img.get_pixel(x0, y0 + 1).0;
+                let [r3, g3, b3, a3] = full_img.get_pixel(x0 + 1, y0 + 1).0;
+                let avg = Rgba([
+                    ((r0 as u16 + r1 as u16 + r2 as u16 + r3 as u16) / 4) as u8,
+                    ((g0 as u16 + g1 as u16 + g2 as u16 + g3 as u16) / 4) as u8,
+                    ((b0 as u16 + b1 as u16 + b2 as u16 + b3 as u16) / 4) as u8,
+                    ((a0 as u16 + a1 as u16 + a2 as u16 + a3 as u16) / 4) as u8,
+                ]);
+                small_img.put_pixel(sx, sy, avg);
+            }
+        }
+
+        if let Err(e) = small_img.save(&path) {
             eprintln!("Failed to save {}: {e}", path.display());
         } else {
-            println!("  Saved {}", path.display());
+            println!("  Saved {} ({}x{})", path.display(), half_w, half_h);
         }
     }
 }
@@ -939,6 +988,7 @@ fn poll_tile_results(
     mut tile_cache: ResMut<TileCache>,
     mut images: ResMut<Assets<Image>>,
     current_layer: Res<CurrentLayer>,
+    norm_hints: Option<Res<GlobalNormHints>>,
 ) {
     tile_cache.frame += 1;
     let frame = tile_cache.frame;
@@ -950,7 +1000,8 @@ fn poll_tile_results(
             request_queue.in_flight.swap_remove(i);
             let (coord, biome_map) = result;
 
-            let image_data = biome_map.to_layer_image(current_layer.0);
+            let hints_ref = norm_hints.as_ref().map(|h| &h.0);
+            let image_data = biome_map.to_layer_image_with_hints(current_layer.0, hints_ref);
             let image = create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, image_data);
             let texture = images.add(image);
 
@@ -1052,6 +1103,7 @@ fn handle_layer_change(
     mut tile_cache: Option<ResMut<TileCache>>,
     pool: Option<Res<SpritePool>>,
     mut sprite_query: Query<(&PoolSlot, &mut Sprite)>,
+    norm_hints: Option<Res<GlobalNormHints>>,
 ) {
     // Sync current layer to UI state
     ui_state.current_layer = Some(current_layer.0);
@@ -1071,7 +1123,8 @@ fn handle_layer_change(
             } else {
                 new_layer
             };
-            let image_data = cached.biome_map.to_layer_image(effective_layer);
+            let hints_ref = norm_hints.as_ref().map(|h| &h.0);
+            let image_data = cached.biome_map.to_layer_image_with_hints(effective_layer, hints_ref);
             let new_image = create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, image_data);
             cached.texture = images.add(new_image);
         }
@@ -1916,7 +1969,7 @@ fn update_meso_highlight(
     highlight_tf.translation.y = sprite_y;
 }
 
-/// Handle "Launch Level" — start async generation of 1024 micro tiles.
+/// Handle "Launch Level" — start async generation of 64 micro tiles.
 fn handle_launch_level_request(
     mut commands: Commands,
     selected_meso: Option<Res<SelectedMesoTile>>,
@@ -1934,7 +1987,7 @@ fn handle_launch_level_request(
         commands.entity(entity).insert(Visibility::Hidden);
     }
 
-    // Queue 1024 micro tiles for generation
+    // Queue 64 micro tiles for generation
     let mut remaining = Vec::with_capacity((MICRO_GRID_SIZE * MICRO_GRID_SIZE) as usize);
     for uy in 0..MICRO_GRID_SIZE {
         for ux in 0..MICRO_GRID_SIZE {
@@ -1952,7 +2005,7 @@ fn handle_launch_level_request(
     commands.insert_resource(LauncherPhase::GeneratingMicro);
 
     println!(
-        "Generating 1024 micro tiles for meso tile ({}, {})",
+        "Generating 64 micro tiles for meso tile ({}, {})",
         selected_meso.meso_coord.0, selected_meso.meso_coord.1
     );
 }
