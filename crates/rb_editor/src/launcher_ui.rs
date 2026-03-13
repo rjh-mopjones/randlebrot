@@ -1,20 +1,40 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
-use rb_core::{PlayableLevel, SelectedChunk};
+use rb_core::{PlayableLevel, SelectedChunk, SelectedMesoTile};
 use rb_tilemap::{LevelChunk, LoadedChunks};
 
-/// Signal to generate a mesomap for the selected chunk.
+/// Signal to generate meso tiles for the selected macro chunk.
 #[derive(Resource)]
 pub struct GenerateMesoRequest;
 
-/// Launcher UI panel — shows selected chunk info and Generate Mesomap button.
+/// Signal to launch the level at the selected meso tile.
+#[derive(Resource)]
+pub struct LaunchLevelRequest;
+
+/// Launcher phase — tracks progression through the multi-step workflow.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LauncherPhase {
+    /// Showing the selected macro chunk, waiting for "Generate Mesomap".
+    MacroView,
+    /// Generating 8×8 meso tiles asynchronously.
+    GeneratingMeso,
+    /// Displaying the 8×8 meso grid, user can select a meso tile.
+    MesoView,
+    /// Playing at micro level.
+    Playing,
+}
+
+/// Launcher UI panel — phase-aware side panel.
 pub fn launcher_ui_system(
     mut commands: Commands,
     mut contexts: EguiContexts,
-    selected: Option<Res<SelectedChunk>>,
+    selected_chunk: Option<Res<SelectedChunk>>,
+    selected_meso: Option<Res<SelectedMesoTile>>,
+    phase: Option<Res<LauncherPhase>>,
     playing: Option<Res<PlayableLevel>>,
 ) {
     let ctx = contexts.ctx_mut();
+    let phase = phase.map(|p| *p).unwrap_or(LauncherPhase::MacroView);
 
     egui::SidePanel::left("launcher_panel")
         .default_width(220.0)
@@ -22,36 +42,64 @@ pub fn launcher_ui_system(
             ui.heading("Level Launcher");
             ui.separator();
 
-            if let Some(selected) = &selected {
-                let (cx, cy) = selected.chunk_coord;
-                ui.label(format!("Selected chunk: ({cx}, {cy})"));
-                ui.label(format!(
-                    "World origin: ({:.0}, {:.0})",
-                    selected.origin.x, selected.origin.y
-                ));
-
-                ui.separator();
-
-                if playing.is_some() {
-                    ui.label("Playing — press ESC to stop");
-                } else if ui.button("Generate Mesomap").clicked() {
-                    commands.insert_resource(GenerateMesoRequest);
+            match phase {
+                LauncherPhase::MacroView => {
+                    if let Some(ref chunk) = selected_chunk {
+                        let (cx, cy) = chunk.chunk_coord;
+                        ui.label(format!("Macro chunk: ({cx}, {cy})"));
+                        ui.label(format!(
+                            "World origin: ({:.0}, {:.0})",
+                            chunk.origin.x, chunk.origin.y
+                        ));
+                        ui.separator();
+                        if ui.button("Generate Mesomap").clicked() {
+                            commands.insert_resource(GenerateMesoRequest);
+                        }
+                    } else {
+                        ui.label("No chunk selected.");
+                        ui.label("Click a tile on the world map,");
+                        ui.label("then press F4.");
+                    }
                 }
-            } else {
-                ui.label("No chunk selected.");
-                ui.label("Click a tile on the world map,");
-                ui.label("then press F4.");
+                LauncherPhase::GeneratingMeso => {
+                    ui.label("Generating meso tiles...");
+                }
+                LauncherPhase::MesoView => {
+                    if let Some(ref chunk) = selected_chunk {
+                        let (cx, cy) = chunk.chunk_coord;
+                        ui.label(format!("Macro chunk: ({cx}, {cy})"));
+                    }
+                    ui.separator();
+                    if let Some(ref meso) = selected_meso {
+                        let (mx, my) = meso.meso_coord;
+                        ui.label(format!("Meso tile: ({mx}, {my})"));
+                        ui.label(format!(
+                            "World: ({:.0}, {:.0})",
+                            meso.origin.x, meso.origin.y
+                        ));
+                        ui.separator();
+                        if ui.button("Launch Level").clicked() {
+                            commands.insert_resource(LaunchLevelRequest);
+                        }
+                    } else {
+                        ui.label("Click a meso tile to select it.");
+                    }
+                }
+                LauncherPhase::Playing => {
+                    if playing.is_some() {
+                        ui.label("Playing — press ESC to stop");
+                    }
+                }
             }
         });
 }
 
-/// System to handle ESC key to exit play mode directly.
-/// ESC removes PlayableLevel (stops micro generation) but keeps SelectedChunk
-/// so the user can click the button again.
+/// ESC exits play mode back to meso view (not all the way out).
 pub fn escape_to_stop_system(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut commands: Commands,
     existing_level: Option<Res<PlayableLevel>>,
+    phase: Option<Res<LauncherPhase>>,
     level_chunks: Query<Entity, With<LevelChunk>>,
 ) {
     if existing_level.is_none() {
@@ -66,25 +114,36 @@ pub fn escape_to_stop_system(
             commands.entity(entity).despawn();
         }
 
+        // Go back to meso view if we were playing
+        if phase.map_or(false, |p| *p == LauncherPhase::Playing) {
+            commands.insert_resource(LauncherPhase::MesoView);
+        }
+
         println!("Exited play mode");
     }
 }
 
-/// System to clean up when leaving LevelLauncher mode entirely.
+/// Clean up when leaving LevelLauncher mode entirely.
 pub fn cleanup_on_exit(
     mut commands: Commands,
     existing_level: Option<Res<PlayableLevel>>,
     existing_selected: Option<Res<SelectedChunk>>,
+    existing_meso: Option<Res<SelectedMesoTile>>,
     level_chunks: Query<Entity, With<LevelChunk>>,
 ) {
     if existing_level.is_some() {
         commands.remove_resource::<PlayableLevel>();
         commands.remove_resource::<LoadedChunks>();
     }
-
     if existing_selected.is_some() {
         commands.remove_resource::<SelectedChunk>();
     }
+    if existing_meso.is_some() {
+        commands.remove_resource::<SelectedMesoTile>();
+    }
+    commands.remove_resource::<LauncherPhase>();
+    commands.remove_resource::<GenerateMesoRequest>();
+    commands.remove_resource::<LaunchLevelRequest>();
 
     for entity in &level_chunks {
         commands.entity(entity).despawn();

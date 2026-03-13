@@ -6,7 +6,7 @@ pub mod generator_ui;
 pub mod launcher_ui;
 
 pub use generator_ui::{CurrentLayer, GeneratorUiState, RegenerationRequest};
-pub use launcher_ui::GenerateMesoRequest;
+pub use launcher_ui::{GenerateMesoRequest, LaunchLevelRequest, LauncherPhase};
 
 /// Editor plugin for Randlebrot.
 /// Provides egui-based authoring tools and debug overlays.

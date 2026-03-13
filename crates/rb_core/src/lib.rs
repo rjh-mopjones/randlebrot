@@ -35,6 +35,15 @@ pub struct SelectedChunk {
     pub origin: WorldPos,
 }
 
+/// Tracks which meso tile within a macro chunk has been selected.
+#[derive(Resource, Debug, Clone)]
+pub struct SelectedMesoTile {
+    /// Position within the 8×8 meso grid (0-7, 0-7).
+    pub meso_coord: (i32, i32),
+    /// World-space origin of this meso tile (top-left).
+    pub origin: WorldPos,
+}
+
 /// Core plugin providing foundational types for Randlebrot.
 pub struct RbCorePlugin;
 

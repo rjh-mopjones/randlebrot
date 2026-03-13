@@ -4,8 +4,8 @@ use bevy_egui::{egui, EguiContexts};
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use rb_core::{AppMode, ModeTransitionEvent, PlayableLevel, SelectedChunk, WorldPos, handle_mode_shortcuts};
-use rb_editor::{CurrentLayer, GenerateMesoRequest, GeneratorUiState, RegenerationRequest};
+use rb_core::{AppMode, ModeTransitionEvent, PlayableLevel, SelectedChunk, SelectedMesoTile, WorldPos, handle_mode_shortcuts};
+use rb_editor::{CurrentLayer, GenerateMesoRequest, GeneratorUiState, LaunchLevelRequest, LauncherPhase, RegenerationRequest};
 use rb_noise::{BiomeMap, NoiseBackend};
 use rb_player::Player;
 use rb_tilemap::{LevelChunk, LoadedChunks};
@@ -79,15 +79,7 @@ fn main() {
                     .and(in_state(AppMode::WorldGenerator))
                     .and(not(resource_exists::<PlayableLevel>))),
         )
-        // Generate Mesomap button pressed in launcher UI
-        .add_systems(Update,
-            handle_generate_meso_request
-                .run_if(in_state(AppPhase::Ready)
-                    .and(resource_exists::<GenerateMesoRequest>)
-                    .and(resource_exists::<SelectedChunk>)
-                    .and(not(resource_exists::<PlayableLevel>))),
-        )
-        // World map systems (disabled during play mode)
+        // World map systems (only in WorldGenerator, not during play)
         .add_systems(Update, (
             camera_zoom,
             camera_pan,
@@ -98,7 +90,49 @@ fn main() {
             update_cursor_world_pos,
             update_chunk_highlight,
             highlight_info_ui,
-        ).run_if(in_state(AppPhase::Ready).and(not(resource_exists::<PlayableLevel>))))
+        ).run_if(in_state(AppPhase::Ready).and(in_state(AppMode::WorldGenerator))))
+        // Launcher: enter/exit
+        .add_systems(OnEnter(AppMode::LevelLauncher), enter_launcher_macro_view)
+        .add_systems(OnExit(AppMode::LevelLauncher), cleanup_launcher_entities)
+        // Launcher: "Generate Mesomap" button
+        .add_systems(Update,
+            handle_generate_meso_request
+                .run_if(in_state(AppPhase::Ready)
+                    .and(resource_exists::<GenerateMesoRequest>)),
+        )
+        // Launcher: meso generation + progress UI
+        .add_systems(Update, (
+            dispatch_meso_pregen,
+            poll_meso_pregen,
+            meso_pregen_progress_ui,
+        ).run_if(in_state(AppPhase::Ready)
+            .and(resource_exists::<MesoPregenState>)))
+        // Launcher: camera pan (all launcher phases)
+        .add_systems(Update,
+            camera_pan
+                .run_if(in_state(AppPhase::Ready)
+                    .and(in_state(AppMode::LevelLauncher))),
+        )
+        // Launcher: meso view interactions
+        .add_systems(Update, (
+            launcher_camera_zoom,
+            click_to_select_meso_tile,
+            update_meso_highlight,
+        ).run_if(in_state(AppPhase::Ready)
+            .and(in_state(AppMode::LevelLauncher))
+            .and(|phase: Option<Res<LauncherPhase>>| phase.map_or(false, |p| *p == LauncherPhase::MesoView))))
+        // Launcher: re-show meso grid when ESC returns from Playing
+        .add_systems(Update,
+            reshow_meso_on_return
+                .run_if(in_state(AppPhase::Ready)
+                    .and(in_state(AppMode::LevelLauncher))),
+        )
+        // Launcher: "Launch Level" button
+        .add_systems(Update,
+            handle_launch_level_request
+                .run_if(in_state(AppPhase::Ready)
+                    .and(resource_exists::<LaunchLevelRequest>)),
+        )
         // Hide world map when play mode starts
         .add_systems(Update,
             hide_world_map_on_play
@@ -129,6 +163,15 @@ const MACRO_CACHE_MAX: usize = 128;
 
 /// Max concurrent async tile generation tasks (streaming).
 const MAX_CONCURRENT_TILES: usize = 16;
+
+/// Meso tile world size (8×8 world units).
+const MESO_WORLD_SIZE: f64 = 8.0;
+
+/// Number of meso tiles per macro chunk edge (64/8 = 8).
+const MESO_GRID_SIZE: i32 = 8;
+
+/// Display size of each meso tile in the launcher grid.
+const MESO_TILE_DISPLAY_PX: f32 = 64.0;
 
 /// Max concurrent async tile generation tasks during macro pre-generation.
 const MACRO_PREGEN_CONCURRENCY: usize = 12;
@@ -189,11 +232,6 @@ struct HighlightInfo {
 #[derive(Resource, Default)]
 struct CursorWorldPos(Vec2);
 
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-enum DetailTier {
-    Macro,
-}
 
 /// Camera viewport in chunk coordinates.
 #[derive(Resource, Default)]
@@ -257,7 +295,6 @@ impl TileCache {
 /// An in-flight async tile generation task.
 struct InFlightTile {
     coord: (i32, i32),
-    tier: DetailTier,
     task: Task<((i32, i32), Arc<BiomeMap>)>,
 }
 
@@ -265,6 +302,45 @@ struct InFlightTile {
 #[derive(Resource, Default)]
 struct TileRequestQueue {
     in_flight: Vec<InFlightTile>,
+}
+
+// ─── Meso Launcher Types ─────────────────────────────────────────────────────
+
+/// Marker for the enlarged macro chunk sprite in the launcher.
+#[derive(Component)]
+struct LauncherMacroSprite;
+
+/// Marker for meso tile sprites in the launcher grid.
+#[derive(Component)]
+struct LauncherMesoSprite;
+
+/// Marker for the meso tile highlight overlay.
+#[derive(Component)]
+struct MesoHighlight;
+
+/// Cache of generated meso tiles for the launcher.
+#[derive(Resource, Default)]
+struct MesoTileCache {
+    tiles: HashMap<(i32, i32), MesoCachedTile>,
+    sprite_entities: Vec<Entity>,
+}
+
+struct MesoCachedTile {
+    _biome_map: Arc<BiomeMap>,
+    texture: Handle<Image>,
+}
+
+/// State for async meso tile pre-generation.
+#[derive(Resource)]
+struct MesoPregenState {
+    total: usize,
+    completed: usize,
+    remaining: Vec<(i32, i32)>,
+    in_flight: Vec<MesoInFlightTile>,
+}
+
+struct MesoInFlightTile {
+    task: Task<((i32, i32), Arc<BiomeMap>)>,
 }
 
 /// Application phase - config, generating, pre-generating macro tiles, or ready.
@@ -443,7 +519,7 @@ fn dispatch_macro_pregen(
             (coord, Arc::new(biome_map))
         });
 
-        pregen.in_flight.push(InFlightTile { coord, tier: DetailTier::Macro, task });
+        pregen.in_flight.push(InFlightTile { coord, task });
     }
 }
 
@@ -577,6 +653,27 @@ fn macro_pregen_progress_ui(
         });
 }
 
+/// Show progress bar during meso tile pre-generation.
+fn meso_pregen_progress_ui(
+    mut contexts: EguiContexts,
+    pregen: Res<MesoPregenState>,
+) {
+    let ctx = contexts.ctx_mut();
+    egui::Window::new("Generating Meso Tiles")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .fixed_size([300.0, 80.0])
+        .show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                let progress = pregen.completed as f32 / pregen.total as f32;
+                ui.label(format!("Generating meso tiles: {}/{}", pregen.completed, pregen.total));
+                ui.add_space(10.0);
+                ui.add(egui::ProgressBar::new(progress).show_percentage());
+            });
+        });
+}
+
 fn create_image(width: usize, height: usize, data: Vec<u8>) -> Image {
     let mut image = Image::new(
         Extent3d {
@@ -669,7 +766,7 @@ fn enqueue_and_dispatch_tiles(
             (coord, Arc::new(biome_map))
         });
 
-        request_queue.in_flight.push(InFlightTile { coord, tier: DetailTier::Macro, task });
+        request_queue.in_flight.push(InFlightTile { coord, task });
     }
 }
 
@@ -939,9 +1036,7 @@ fn camera_zoom(
 
     for mut projection in &mut query {
         let zoom_factor = 1.0 - scroll_delta;
-        // Clamp to 0.15 min — meso is the deepest zoom on the world map.
-        // Micro detail is only accessible via LevelLauncher.
-        projection.scale = (projection.scale * zoom_factor).clamp(0.15, 10.0);
+        projection.scale = (projection.scale * zoom_factor).clamp(0.05, 10.0);
     }
 }
 
@@ -1323,20 +1418,373 @@ fn click_to_select_chunk(
     println!("Selected chunk ({}, {}) — press F4 to play", chunk_x, chunk_y);
 }
 
-/// Handle the "Generate Mesomap" button from the launcher UI.
+// ─── Launcher Systems ────────────────────────────────────────────────────────
+
+/// On entering LevelLauncher: hide world map, show the selected macro chunk enlarged.
+fn enter_launcher_macro_view(
+    mut commands: Commands,
+    selected: Option<Res<SelectedChunk>>,
+    tile_cache: Option<Res<TileCache>>,
+    mut camera_query: Query<(&mut Transform, &mut OrthographicProjection), With<Camera2d>>,
+    mut pool_query: Query<&mut Visibility, With<PoolSlot>>,
+    mut highlight_query: Query<&mut Visibility, (With<ChunkHighlight>, Without<PoolSlot>)>,
+) {
+    commands.insert_resource(LauncherPhase::MacroView);
+
+    // Hide all world map pool sprites
+    for mut vis in &mut pool_query {
+        *vis = Visibility::Hidden;
+    }
+    // Hide chunk highlight
+    for mut vis in &mut highlight_query {
+        *vis = Visibility::Hidden;
+    }
+
+    let Some(selected) = selected else { return };
+    let Some(tile_cache) = tile_cache else { return };
+    let Ok((mut cam_transform, mut projection)) = camera_query.get_single_mut() else { return };
+
+    // Show the macro tile as a large centered sprite
+    if let Some(cached) = tile_cache.macro_tiles.get(&selected.chunk_coord) {
+        commands.spawn((
+            Sprite {
+                image: cached.texture.clone(),
+                custom_size: Some(Vec2::splat(CHUNK_SIZE * 8.0)), // 512px display
+                ..default()
+            },
+            Transform::from_xyz(0.0, 0.0, 0.5),
+            LauncherMacroSprite,
+        ));
+    }
+
+    // Center camera
+    cam_transform.translation = Vec3::new(0.0, 0.0, cam_transform.translation.z);
+    projection.scale = 1.0;
+}
+
+/// Handle "Generate Mesomap" — start async generation of 64 meso tiles.
 fn handle_generate_meso_request(
     mut commands: Commands,
-    selected: Res<SelectedChunk>,
-    world_def: Res<WorldDefinition>,
+    selected: Option<Res<SelectedChunk>>,
+    macro_sprites: Query<Entity, With<LauncherMacroSprite>>,
 ) {
     commands.remove_resource::<GenerateMesoRequest>();
+    let Some(selected) = selected else { return };
+
+    // Despawn the macro sprite
+    for entity in &macro_sprites {
+        commands.entity(entity).despawn();
+    }
+
+    // Queue 64 meso tiles for generation
+    let mut remaining = Vec::with_capacity(64);
+    for my in 0..MESO_GRID_SIZE {
+        for mx in 0..MESO_GRID_SIZE {
+            remaining.push((mx, my));
+        }
+    }
+
+    commands.insert_resource(MesoPregenState {
+        total: remaining.len(),
+        completed: 0,
+        remaining,
+        in_flight: Vec::new(),
+    });
+    commands.insert_resource(MesoTileCache::default());
+    commands.insert_resource(LauncherPhase::GeneratingMeso);
+
+    println!(
+        "Generating 64 meso tiles for chunk ({}, {})",
+        selected.chunk_coord.0, selected.chunk_coord.1
+    );
+}
+
+/// Dispatch async meso tile generation tasks.
+fn dispatch_meso_pregen(
+    mut pregen: ResMut<MesoPregenState>,
+    world_textures: Option<Res<MacroBiomeData>>,
+    world_def: Res<WorldDefinition>,
+    selected: Option<Res<SelectedChunk>>,
+    ui_state: Res<GeneratorUiState>,
+) {
+    let Some(world_textures) = world_textures else { return };
+    let Some(selected) = selected else { return };
+
+    let seed = world_def.seed;
+    let height = world_def.height as f64;
+    let backend = ui_state.backend();
+    let chunk_origin = selected.origin;
+
+    while pregen.in_flight.len() < MACRO_PREGEN_CONCURRENCY {
+        let Some(coord) = pregen.remaining.pop() else { break };
+        let macro_map = world_textures.biome_map.clone();
+
+        let world_x = chunk_origin.x + coord.0 as f64 * MESO_WORLD_SIZE;
+        let world_y = chunk_origin.y + coord.1 as f64 * MESO_WORLD_SIZE;
+
+        let task = AsyncComputeTaskPool::get().spawn(async move {
+            let biome_map = BiomeMap::generate_meso_full_with_backend(
+                seed, world_x, world_y, MESO_WORLD_SIZE, TILE_MAP_SIZE, height,
+                2, // meso detail level
+                None, backend, Some(&macro_map),
+            );
+            (coord, Arc::new(biome_map))
+        });
+
+        pregen.in_flight.push(MesoInFlightTile { task });
+    }
+}
+
+/// Poll meso tile tasks; when all done, spawn the grid and transition to MesoView.
+fn poll_meso_pregen(
+    mut commands: Commands,
+    mut pregen: ResMut<MesoPregenState>,
+    mut meso_cache: ResMut<MesoTileCache>,
+    mut images: ResMut<Assets<Image>>,
+    current_layer: Res<CurrentLayer>,
+) {
+    let mut i = 0;
+    while i < pregen.in_flight.len() {
+        if let Some(result) = block_on(poll_once(&mut pregen.in_flight[i].task)) {
+            pregen.in_flight.swap_remove(i);
+            let (coord, biome_map) = result;
+
+            let image_data = biome_map.to_layer_image(current_layer.0);
+            let image = create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, image_data);
+            let texture = images.add(image);
+
+            meso_cache.tiles.insert(coord, MesoCachedTile { _biome_map: biome_map, texture });
+            pregen.completed += 1;
+        } else {
+            i += 1;
+        }
+    }
+
+    if pregen.completed >= pregen.total {
+        println!("All {} meso tiles generated.", pregen.total);
+        commands.remove_resource::<MesoPregenState>();
+
+        // Spawn 8×8 grid of meso tile sprites
+        let grid_size = MESO_GRID_SIZE as f32 * MESO_TILE_DISPLAY_PX;
+        let half_grid = grid_size / 2.0;
+
+        for my in 0..MESO_GRID_SIZE {
+            for mx in 0..MESO_GRID_SIZE {
+                let coord = (mx, my);
+                let Some(cached) = meso_cache.tiles.get(&coord) else { continue };
+
+                let sprite_x = mx as f32 * MESO_TILE_DISPLAY_PX + MESO_TILE_DISPLAY_PX / 2.0 - half_grid;
+                let sprite_y = half_grid - my as f32 * MESO_TILE_DISPLAY_PX - MESO_TILE_DISPLAY_PX / 2.0;
+
+                let entity = commands.spawn((
+                    Sprite {
+                        image: cached.texture.clone(),
+                        custom_size: Some(Vec2::splat(MESO_TILE_DISPLAY_PX)),
+                        ..default()
+                    },
+                    Transform::from_xyz(sprite_x, sprite_y, 0.5),
+                    LauncherMesoSprite,
+                )).id();
+                meso_cache.sprite_entities.push(entity);
+            }
+        }
+
+        // Spawn meso highlight
+        commands.spawn((
+            Sprite {
+                color: Color::srgba(1.0, 1.0, 0.0, 0.3),
+                custom_size: Some(Vec2::splat(MESO_TILE_DISPLAY_PX)),
+                ..default()
+            },
+            Transform::from_xyz(-10000.0, -10000.0, 0.8),
+            MesoHighlight,
+        ));
+
+        commands.insert_resource(LauncherPhase::MesoView);
+    }
+}
+
+/// Allow zoom in meso view.
+fn launcher_camera_zoom(
+    mut scroll_events: EventReader<MouseWheel>,
+    mut query: Query<&mut OrthographicProjection, With<Camera2d>>,
+) {
+    let mut scroll_delta = 0.0;
+    for event in scroll_events.read() {
+        scroll_delta += match event.unit {
+            MouseScrollUnit::Line => event.y * 0.1,
+            MouseScrollUnit::Pixel => event.y * 0.001,
+        };
+    }
+    if scroll_delta == 0.0 { return; }
+    for mut projection in &mut query {
+        let zoom_factor = 1.0 - scroll_delta;
+        projection.scale = (projection.scale * zoom_factor).clamp(0.2, 3.0);
+    }
+}
+
+/// Click to select a meso tile in the grid.
+fn click_to_select_meso_tile(
+    mut commands: Commands,
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    selected_chunk: Option<Res<SelectedChunk>>,
+    mut contexts: EguiContexts,
+) {
+    if !mouse.just_pressed(MouseButton::Left) { return; }
+    if contexts.ctx_mut().is_pointer_over_area() { return; }
+    let Some(selected_chunk) = selected_chunk else { return };
+
+    let Ok(window) = windows.get_single() else { return };
+    let Some(cursor_pos) = window.cursor_position() else { return };
+    let Ok((camera, camera_transform)) = camera_query.get_single() else { return };
+    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else { return };
+
+    let grid_size = MESO_GRID_SIZE as f32 * MESO_TILE_DISPLAY_PX;
+    let half_grid = grid_size / 2.0;
+
+    let mx = ((world_pos.x + half_grid) / MESO_TILE_DISPLAY_PX).floor() as i32;
+    let my = ((half_grid - world_pos.y) / MESO_TILE_DISPLAY_PX).floor() as i32;
+
+    if mx < 0 || mx >= MESO_GRID_SIZE || my < 0 || my >= MESO_GRID_SIZE { return; }
+
+    let origin = WorldPos::new(
+        selected_chunk.origin.x + mx as f64 * MESO_WORLD_SIZE,
+        selected_chunk.origin.y + my as f64 * MESO_WORLD_SIZE,
+    );
+
+    commands.insert_resource(SelectedMesoTile {
+        meso_coord: (mx, my),
+        origin,
+    });
+
+    println!("Selected meso tile ({}, {})", mx, my);
+}
+
+/// Update the meso highlight overlay to follow cursor.
+fn update_meso_highlight(
+    mut highlight_query: Query<&mut Transform, With<MesoHighlight>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    mut contexts: EguiContexts,
+) {
+    let Ok(mut highlight_tf) = highlight_query.get_single_mut() else { return };
+
+    if contexts.ctx_mut().is_pointer_over_area() {
+        highlight_tf.translation.x = -10000.0;
+        return;
+    }
+
+    let Ok(window) = windows.get_single() else { return };
+    let Some(cursor_screen) = window.cursor_position() else {
+        highlight_tf.translation.x = -10000.0;
+        return;
+    };
+    let Ok((camera, camera_transform)) = camera_query.get_single() else { return };
+    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_screen) else { return };
+
+    let grid_size = MESO_GRID_SIZE as f32 * MESO_TILE_DISPLAY_PX;
+    let half_grid = grid_size / 2.0;
+
+    let mx = ((world_pos.x + half_grid) / MESO_TILE_DISPLAY_PX).floor() as i32;
+    let my = ((half_grid - world_pos.y) / MESO_TILE_DISPLAY_PX).floor() as i32;
+
+    if mx < 0 || mx >= MESO_GRID_SIZE || my < 0 || my >= MESO_GRID_SIZE {
+        highlight_tf.translation.x = -10000.0;
+        return;
+    }
+
+    let sprite_x = mx as f32 * MESO_TILE_DISPLAY_PX + MESO_TILE_DISPLAY_PX / 2.0 - half_grid;
+    let sprite_y = half_grid - my as f32 * MESO_TILE_DISPLAY_PX - MESO_TILE_DISPLAY_PX / 2.0;
+    highlight_tf.translation.x = sprite_x;
+    highlight_tf.translation.y = sprite_y;
+}
+
+/// Handle "Launch Level" — start micro generation at the selected meso tile.
+fn handle_launch_level_request(
+    mut commands: Commands,
+    selected_meso: Option<Res<SelectedMesoTile>>,
+    world_def: Res<WorldDefinition>,
+    selected_chunk: Option<Res<SelectedChunk>>,
+    meso_sprites: Query<Entity, With<LauncherMesoSprite>>,
+    meso_highlight: Query<Entity, With<MesoHighlight>>,
+) {
+    commands.remove_resource::<LaunchLevelRequest>();
+    let Some(selected_meso) = selected_meso else { return };
+    let Some(selected_chunk) = selected_chunk else { return };
+
+    // Hide meso grid sprites (keep cache for ESC to return)
+    for entity in &meso_sprites {
+        commands.entity(entity).insert(Visibility::Hidden);
+    }
+    for entity in &meso_highlight {
+        commands.entity(entity).insert(Visibility::Hidden);
+    }
+
     commands.insert_resource(PlayableLevel {
-        origin: selected.origin,
-        chunk_coord: selected.chunk_coord,
+        origin: selected_meso.origin,
+        chunk_coord: selected_chunk.chunk_coord,
         seed: world_def.seed,
         world_height: world_def.height as f64,
     });
     commands.init_resource::<LoadedChunks>();
+    commands.insert_resource(LauncherPhase::Playing);
 
-    println!("Generating mesomap at chunk ({}, {})", selected.chunk_coord.0, selected.chunk_coord.1);
+    println!(
+        "Launching level at meso tile ({}, {}), world ({:.0}, {:.0})",
+        selected_meso.meso_coord.0, selected_meso.meso_coord.1,
+        selected_meso.origin.x, selected_meso.origin.y
+    );
+}
+
+/// Re-show meso grid sprites when returning from Playing to MesoView (ESC).
+fn reshow_meso_on_return(
+    phase: Option<Res<LauncherPhase>>,
+    meso_sprites: Query<Entity, With<LauncherMesoSprite>>,
+    meso_highlight: Query<Entity, With<MesoHighlight>>,
+    mut commands: Commands,
+    playing: Option<Res<PlayableLevel>>,
+) {
+    // Only act when phase just changed to MesoView and no PlayableLevel exists
+    let Some(phase) = phase else { return };
+    if *phase != LauncherPhase::MesoView || playing.is_some() { return; }
+    if !phase.is_changed() { return; }
+
+    for entity in &meso_sprites {
+        commands.entity(entity).insert(Visibility::Inherited);
+    }
+    for entity in &meso_highlight {
+        commands.entity(entity).insert(Visibility::Inherited);
+    }
+}
+
+/// Clean up all launcher-specific entities when leaving LevelLauncher mode.
+fn cleanup_launcher_entities(
+    mut commands: Commands,
+    macro_sprites: Query<Entity, With<LauncherMacroSprite>>,
+    meso_sprites: Query<Entity, With<LauncherMesoSprite>>,
+    meso_highlight: Query<Entity, With<MesoHighlight>>,
+    mut pool_query: Query<&mut Visibility, With<PoolSlot>>,
+    mut highlight_query: Query<&mut Visibility, (With<ChunkHighlight>, Without<PoolSlot>)>,
+) {
+    for entity in &macro_sprites {
+        commands.entity(entity).despawn();
+    }
+    for entity in &meso_sprites {
+        commands.entity(entity).despawn();
+    }
+    for entity in &meso_highlight {
+        commands.entity(entity).despawn();
+    }
+    commands.remove_resource::<MesoTileCache>();
+    commands.remove_resource::<MesoPregenState>();
+
+    // Re-show world map pool sprites and highlight
+    for mut vis in &mut pool_query {
+        *vis = Visibility::Inherited;
+    }
+    for mut vis in &mut highlight_query {
+        *vis = Visibility::Inherited;
+    }
 }
