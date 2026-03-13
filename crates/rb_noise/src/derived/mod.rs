@@ -23,13 +23,21 @@ pub fn derive_temperature(light_level: f64, elevation: f64, humidity: f64, conti
 
 /// Heightmap from geological layers (used as elevation input for temperature).
 ///
-/// Combines continentalness + tectonic boundary effects + peaks into unified elevation.
+/// Combines continentalness (reduced to 80% for base), broad tectonic uplift,
+/// and peaks/valleys relief with coastal tapering.
 pub fn derive_heightmap(continentalness: f64, tectonic: f64, peaks_valleys: f64) -> f64 {
-    // Tectonic boundaries (low tectonic value) push up elevation
-    let tectonic_uplift = (1.0 - tectonic) * 0.12;
-    // Peaks add height, valleys subtract
-    let peak_contribution = peaks_valleys * 0.35;
-    continentalness + tectonic_uplift + peak_contribution
+    let stress = 1.0 - tectonic;
+    let continental_base = continentalness * 0.95;
+    let broad_uplift = stress.powf(2.0) * 0.08;
+    let relief = peaks_valleys * 0.35;
+    let coastal_taper = if continentalness < -0.05 {
+        0.3
+    } else if continentalness < 0.1 {
+        ((continentalness + 0.05) / 0.15).clamp(0.0, 1.0).sqrt()
+    } else {
+        1.0
+    };
+    (continental_base + broad_uplift + relief * coastal_taper).clamp(-1.0, 1.0)
 }
 
 /// Erosion derived from heightmap, rock hardness, and humidity.
@@ -39,20 +47,24 @@ pub fn derive_heightmap(continentalness: f64, tectonic: f64, peaks_valleys: f64)
 /// - rock_hardness: [0, 1] where 1.0 = very hard
 /// - humidity: [0, 1] where 1.0 = saturated
 pub fn derive_erosion(heightmap: f64, rock_hardness: f64, humidity: f64) -> f64 {
-    ((heightmap.max(0.0) * 0.5 + humidity * 0.5) * (1.0 - rock_hardness * 0.6)).clamp(0.0, 1.0)
+    let raw = (heightmap.max(0.0) * 2.5 + humidity * 0.8) * (1.0 - rock_hardness * 0.3);
+    raw.sqrt().clamp(0.0, 1.0)
 }
 
 /// Peaks amplified by tectonic stress, sustained by hard rock.
+///
+/// Plate interiors get only 5% amplitude (subtle rolling terrain),
+/// boundaries get full amplitude for dramatic mountain ranges.
 ///
 /// - base_pv: raw peaks/valleys noise [-1, 1]
 /// - tectonic: boundary distance [0, 1] where 0 = boundary
 /// - rock_hardness: [0, 1] where 1.0 = very hard
 pub fn derive_peaks_valleys(base_pv: f64, tectonic: f64, rock_hardness: f64) -> f64 {
-    // Near tectonic boundaries = taller peaks
-    let tectonic_amp = 1.0 + (1.0 - tectonic) * 0.5;
-    // Hard rock sustains sharper peaks
-    let hardness_sustain = 0.7 + rock_hardness * 0.3;
-    (base_pv * tectonic_amp * hardness_sustain).clamp(-1.0, 1.0)
+    let stress = 1.0 - tectonic;
+    let stress_envelope = stress.powf(0.6);
+    let amplitude = 0.05 + stress_envelope * 0.95;
+    let hardness_factor = 0.6 + rock_hardness * 0.4;
+    (base_pv * amplitude * hardness_factor).clamp(-1.0, 1.0)
 }
 
 /// Aridity from temperature and humidity.
@@ -93,13 +105,15 @@ pub fn derive_snowpack(precipitation_type: f64, temperature: f64, heightmap: f64
     let snow_precip = (-precipitation_type).max(0.0);
     let temperature_snow = cold_factor * snow_precip;
 
-    // Altitude snow: peaks above threshold accumulate snow even in warmer zones
+    // Altitude snow: peaks above threshold accumulate snow, but NOT in hot zones
+    // No altitude snow if temperature > 30°C (too warm for snow to persist)
     // Snow line varies with light level (higher near sub-stellar, lower in twilight)
+    let temp_gate = ((30.0 - temperature) / 20.0).clamp(0.0, 1.0); // 1.0 below 10°C, 0.0 above 30°C
     let snow_altitude = if light_level < 0.2 { 0.0 }
-        else if light_level < 0.5 { 0.12 + (light_level - 0.2) * 0.6 }
-        else { 0.30 + (light_level - 0.5) * 0.4 };
+        else if light_level < 0.5 { 0.02 + (light_level - 0.2) * 0.15 }
+        else { 0.065 + (light_level - 0.5) * 0.2 };
     let altitude_snow = if heightmap > snow_altitude {
-        ((heightmap - snow_altitude) * 5.0).min(1.0)
+        ((heightmap - snow_altitude) * 12.0).min(1.0) * temp_gate
     } else { 0.0 };
 
     temperature_snow.max(altitude_snow).clamp(0.0, 1.0)

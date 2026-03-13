@@ -21,6 +21,10 @@ pub struct TectonicSample {
     pub stress: f64,
     pub boundary_type: BoundaryType,
     pub volcanism: f64,
+    /// Tangent direction along the nearest plate boundary.
+    /// Perpendicular to the plate-connecting normal vector.
+    /// Interior points default to (1.0, 0.0).
+    pub boundary_tangent: (f64, f64),
 }
 
 /// A tectonic plate with physical properties.
@@ -364,9 +368,9 @@ impl TectonicPlatesStrategy {
         let perturb = self.boundary_perturb.get([x * 0.015, y * 0.015]) * 0.15;
         let perturbed_dist = f2_minus_f1 + perturb;
 
-        // Determine boundary type
-        let boundary_type = if plate_a_idx == plate_b_idx {
-            BoundaryType::None
+        // Determine boundary type and tangent
+        let (boundary_type, boundary_tangent) = if plate_a_idx == plate_b_idx {
+            (BoundaryType::None, (1.0, 0.0))
         } else {
             // Normal approximation: direction between plate centers
             let pa = &self.registry.plates[plate_a_idx];
@@ -375,7 +379,10 @@ impl TectonicPlatesStrategy {
             let ndy = pb.center.1 - pa.center.1;
             let len = (ndx * ndx + ndy * ndy).sqrt().max(0.001);
             let normal = (ndx / len, ndy / len);
-            Self::classify_boundary(pa, pb, normal)
+            let btype = Self::classify_boundary(pa, pb, normal);
+            // Tangent is perpendicular to the plate-connecting normal
+            let tangent = (-normal.1, normal.0);
+            (btype, tangent)
         };
 
         // Stress field computation
@@ -487,6 +494,7 @@ impl TectonicPlatesStrategy {
             stress,
             boundary_type,
             volcanism,
+            boundary_tangent,
         }
     }
 
@@ -619,6 +627,27 @@ mod tests {
             volcanism_away_from_boundary,
             "Should find volcanism away from plate boundaries (hotspots)"
         );
+    }
+
+    #[test]
+    fn boundary_tangent_perpendicular_to_normal() {
+        let strategy = TectonicPlatesStrategy::new(42);
+        // Find a point near a plate boundary (high stress)
+        let mut found = false;
+        for i in 0..2000 {
+            let x = (i as f64 * 7.3) % 1000.0;
+            let y = (i as f64 * 11.7) % 500.0;
+            let sample = strategy.generate_full(x, y);
+            if sample.stress > 0.3 && sample.boundary_tangent != (1.0, 0.0) {
+                // Tangent should be unit-length (or close)
+                let (tx, ty) = sample.boundary_tangent;
+                let len = (tx * tx + ty * ty).sqrt();
+                assert!((len - 1.0).abs() < 0.01, "Tangent should be unit length, got {}", len);
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "Should find a boundary point with non-default tangent");
     }
 
     #[test]

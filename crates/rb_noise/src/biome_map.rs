@@ -145,10 +145,10 @@ impl BiomeMap {
 
                 let cont = cont_strategy.generate(fx, fy, 0);
                 let tect_sample = tectonic_strategy.generate_full(fx, fy);
-                let raw_peaks = raw_peaks_strategy.generate(fx, fy, 0);
+                let raw_peaks = raw_peaks_strategy.ridged_aligned(fx, fy, 0, tect_sample.boundary_tangent, tect_sample.stress);
                 let light = light_level_strategy.generate(fx, fy, 0);
                 let rock = rock_hardness_strategy.generate(fx, fy, 0);
-                let humid = humidity_strategy.generate_with_continentalness(fx, fy, 0, cont);
+                let humid = humidity_strategy.generate_terminator_model(fx, fy, 0, cont, light);
 
                 (cont, tect_sample.boundary_distance, tect_sample.plate_id, raw_peaks, light, rock, humid, tect_sample.volcanism)
             })
@@ -380,27 +380,32 @@ impl BiomeMap {
 
         // Convert f32 GPU results to f64
         let continentalness: Vec<f64> = layers.continentalness.iter().map(|&v| v as f64).collect();
-        let raw_peaks: Vec<f64> = layers.peaks_valleys.iter().map(|&v| v as f64).collect();
         let gpu_light_level: Vec<f64> = layers.light_level.iter().map(|&v| v as f64).collect();
         let gpu_rock_hardness: Vec<f64> = layers.rock_hardness.iter().map(|&v| v as f64).collect();
 
-        // Tectonic computed on CPU (too complex for GPU shader)
+        // Tectonic, peaks, and humidity computed on CPU for boundary alignment and terminator model
         let tectonic_strategy = TectonicPlatesStrategy::new(seed.wrapping_add(2));
-        let tectonic_data: Vec<_> = (0..total_pixels)
+        let raw_peaks_strategy = PeaksAndValleysStrategy::new(seed.wrapping_add(4));
+        let humidity_strategy = HumidityStrategy::new(seed.wrapping_add(5));
+        let cpu_data: Vec<_> = (0..total_pixels)
             .into_par_iter()
             .map(|idx| {
                 let x = (idx % width) as f64;
                 let y = (idx / width) as f64;
-                tectonic_strategy.generate_full(x, y)
+                let tect_sample = tectonic_strategy.generate_full(x, y);
+                let raw_peaks = raw_peaks_strategy.ridged_aligned(x, y, 0, tect_sample.boundary_tangent, tect_sample.stress);
+                let cont = continentalness[idx];
+                let light = gpu_light_level[idx];
+                let humid = humidity_strategy.generate_terminator_model(x, y, 0, cont, light);
+                (tect_sample, raw_peaks, humid)
             })
             .collect();
 
-        let gpu_tectonic: Vec<f64> = tectonic_data.iter().map(|s| s.boundary_distance).collect();
-        let tectonic_plate_ids: Vec<f64> = tectonic_data.iter().map(|s| s.plate_id).collect();
-        let tectonic_volcanism: Vec<f64> = tectonic_data.iter().map(|s| s.volcanism).collect();
-
-        // Humidity from GPU is pure base (fBm + water distance, no light drying)
-        let mut gpu_humidity: Vec<f64> = layers.humidity.iter().map(|&v| v as f64).collect();
+        let gpu_tectonic: Vec<f64> = cpu_data.iter().map(|(s, _, _)| s.boundary_distance).collect();
+        let tectonic_plate_ids: Vec<f64> = cpu_data.iter().map(|(s, _, _)| s.plate_id).collect();
+        let tectonic_volcanism: Vec<f64> = cpu_data.iter().map(|(s, _, _)| s.volcanism).collect();
+        let raw_peaks: Vec<f64> = cpu_data.iter().map(|(_, p, _)| *p).collect();
+        let mut gpu_humidity: Vec<f64> = cpu_data.iter().map(|(_, _, h)| *h).collect();
 
         // Wind-driven moisture advection
         let quick_heightmap: Vec<f64> = (0..total_pixels).map(|i| {
@@ -921,10 +926,10 @@ impl BiomeMap {
                 let tect_sample = tectonic_strategy.generate_full(wx, wy);
                 let tect = tect_sample.boundary_distance;
                 let pid = tect_sample.plate_id;
-                let raw_peaks = raw_peaks_strategy.generate(wx, wy, detail_level);
+                let raw_peaks = raw_peaks_strategy.ridged_aligned(wx, wy, detail_level, tect_sample.boundary_tangent, tect_sample.stress);
                 let light = light_level_strategy.generate(wx, wy, detail_level);
                 let rock = rock_hardness_strategy.generate(wx, wy, detail_level);
-                let humid = humidity_strategy.generate_with_continentalness(wx, wy, detail_level, cont);
+                let humid = humidity_strategy.generate_terminator_model(wx, wy, detail_level, cont, light);
 
                 let peaks = derived::derive_peaks_valleys(raw_peaks, tect, rock);
                 let volc = tect_sample.volcanism;
@@ -1012,6 +1017,15 @@ impl BiomeMap {
             }
         }
 
+        // Compute wind field
+        let sub_x_pixel = (sub_stellar_x * world_width - world_x) / scale;
+        let sub_y_pixel = (sub_stellar_y * world_height - world_y) / scale;
+        let sub_stellar_norm = (sub_x_pixel / output_size as f64, sub_y_pixel / output_size as f64);
+        let region_wind = WindField::generate(
+            &light_level, &heightmap_vec, output_size, output_size,
+            sub_stellar_norm,
+        );
+
         Self {
             width: output_size,
             height: output_size,
@@ -1030,7 +1044,7 @@ impl BiomeMap {
             aridity,
             precipitation_type,
             water_table,
-            wind_speed: Vec::new(),
+            wind_speed: region_wind.speed,
             resource_richness,
             snowpack,
             biomes,
@@ -1126,10 +1140,10 @@ impl BiomeMap {
                     let tect_sample = tectonic_strategy.generate_full(wx, wy);
                     let tect = tect_sample.boundary_distance;
                     let pid = tect_sample.plate_id;
-                    let raw_peaks = raw_peaks_strategy.generate(wx, wy, detail_level);
+                    let raw_peaks = raw_peaks_strategy.ridged_aligned(wx, wy, detail_level, tect_sample.boundary_tangent, tect_sample.stress);
                     let light = light_level_strategy.generate(wx, wy, detail_level);
                     let rock = rock_hardness_strategy.generate(wx, wy, detail_level);
-                    let humid = humidity_strategy.generate_with_continentalness(wx, wy, detail_level, cont);
+                    let humid = humidity_strategy.generate_terminator_model(wx, wy, detail_level, cont, light);
 
                     // Phase 2: Derived layers
                     let peaks = derived::derive_peaks_valleys(raw_peaks, tect, rock);
@@ -1284,6 +1298,15 @@ impl BiomeMap {
             }
         }
 
+        // Compute wind field for meso tile
+        let sub_x_pixel = (0.5 * world_width - world_x) / scale;
+        let sub_y_pixel = (1.0 * world_height - world_y) / scale;
+        let sub_stellar_norm = (sub_x_pixel / output_size as f64, sub_y_pixel / output_size as f64);
+        let meso_wind = WindField::generate(
+            &light_level, &heightmap_vec, output_size, output_size,
+            sub_stellar_norm,
+        );
+
         Self {
             width: output_size,
             height: output_size,
@@ -1302,7 +1325,7 @@ impl BiomeMap {
             aridity,
             precipitation_type,
             water_table,
-            wind_speed: Vec::new(),
+            wind_speed: meso_wind.speed,
             resource_richness,
             snowpack,
             biomes,
@@ -1361,6 +1384,7 @@ impl BiomeMap {
 
         let total_pixels = output_size * output_size;
         let scale = world_size / output_size as f64;
+        let world_width = world_height * 2.0;
 
         let layers = gpu.generate_layers(
             seed, output_size, output_size, world_x, world_y, scale, world_height, detail_level,
@@ -1375,27 +1399,34 @@ impl BiomeMap {
         }
 
         let continentalness: Vec<f64> = layers.continentalness.iter().map(|&v| v as f64).collect();
-        let raw_peaks: Vec<f64> = layers.peaks_valleys.iter().map(|&v| v as f64).collect();
         let gpu_light_level: Vec<f64> = layers.light_level.iter().map(|&v| v as f64).collect();
         let gpu_rock_hardness: Vec<f64> = layers.rock_hardness.iter().map(|&v| v as f64).collect();
-        let gpu_humidity: Vec<f64> = layers.humidity.iter().map(|&v| v as f64).collect();
 
-        // Tectonic computed on CPU (too complex for GPU shader)
+        // Tectonic, peaks, and humidity computed on CPU for boundary alignment and terminator model
         let tectonic_strategy = TectonicPlatesStrategy::new(seed.wrapping_add(2));
-        let tectonic_data: Vec<_> = (0..total_pixels)
+        let raw_peaks_strategy = PeaksAndValleysStrategy::new(seed.wrapping_add(4));
+        let humidity_strategy = HumidityStrategy::new(seed.wrapping_add(5));
+        let cpu_data: Vec<_> = (0..total_pixels)
             .into_par_iter()
             .map(|idx| {
                 let px = idx % output_size;
                 let py = idx / output_size;
                 let wx = world_x + (px as f64 * scale);
                 let wy = world_y + (py as f64 * scale);
-                tectonic_strategy.generate_full(wx, wy)
+                let tect_sample = tectonic_strategy.generate_full(wx, wy);
+                let raw_peaks = raw_peaks_strategy.ridged_aligned(wx, wy, detail_level, tect_sample.boundary_tangent, tect_sample.stress);
+                let cont = continentalness[idx];
+                let light = gpu_light_level[idx];
+                let humid = humidity_strategy.generate_terminator_model(wx, wy, detail_level, cont, light);
+                (tect_sample, raw_peaks, humid)
             })
             .collect();
 
-        let gpu_tectonic: Vec<f64> = tectonic_data.iter().map(|s| s.boundary_distance).collect();
-        let tectonic_plate_ids: Vec<f64> = tectonic_data.iter().map(|s| s.plate_id).collect();
-        let tectonic_volcanism: Vec<f64> = tectonic_data.iter().map(|s| s.volcanism).collect();
+        let gpu_tectonic: Vec<f64> = cpu_data.iter().map(|(s, _, _)| s.boundary_distance).collect();
+        let tectonic_plate_ids: Vec<f64> = cpu_data.iter().map(|(s, _, _)| s.plate_id).collect();
+        let tectonic_volcanism: Vec<f64> = cpu_data.iter().map(|(s, _, _)| s.volcanism).collect();
+        let raw_peaks: Vec<f64> = cpu_data.iter().map(|(_, p, _)| *p).collect();
+        let gpu_humidity: Vec<f64> = cpu_data.iter().map(|(_, _, h)| *h).collect();
 
         if let Some(p) = progress {
             p.increment(LayerId::PeaksValleys, total_pixels);
@@ -1526,6 +1557,15 @@ impl BiomeMap {
             }
         }
 
+        // Compute wind field for GPU meso tile
+        let sub_x_pixel = (0.5 * world_width - world_x) / scale;
+        let sub_y_pixel = (1.0 * world_height - world_y) / scale;
+        let sub_stellar_norm = (sub_x_pixel / output_size as f64, sub_y_pixel / output_size as f64);
+        let gpu_meso_wind = WindField::generate(
+            &gpu_light_level, &heightmap_vec, output_size, output_size,
+            sub_stellar_norm,
+        );
+
         Self {
             width: output_size,
             height: output_size,
@@ -1544,7 +1584,7 @@ impl BiomeMap {
             aridity,
             precipitation_type,
             water_table,
-            wind_speed: Vec::new(),
+            wind_speed: gpu_meso_wind.speed,
             resource_richness,
             snowpack,
             biomes,

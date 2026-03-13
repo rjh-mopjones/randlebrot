@@ -192,6 +192,69 @@ impl HumidityStrategy {
         combined.clamp(0.0, 1.0)
     }
 
+    /// Generate humidity using the terminator ring model for tidally locked planets.
+    ///
+    /// Physics-motivated atmospheric circulation:
+    /// - Gaussian peak at the terminator ring (light_level ≈ 0.2) where warm and cold air collide
+    /// - Day-side drying from intense solar radiation (light_level > 0.4)
+    /// - Night-side cold trap reduces moisture capacity (light_level < 0.05)
+    /// - Continental moisture decay from coast to inland
+    /// - Local variation from fBm noise
+    pub fn generate_terminator_model(
+        &self,
+        x: f64,
+        y: f64,
+        detail_level: u32,
+        continentalness: f64,
+        light_level: f64,
+    ) -> f64 {
+        let base_noise = (self.fbm(x, y, detail_level) + 1.0) * 0.5;
+
+        // Terminator ring: Gaussian peak at light_level ≈ 0.2 with width 0.15
+        let terminator_center = 0.2;
+        let terminator_width = 0.25;
+        let terminator_peak = (-(light_level - terminator_center).powi(2)
+            / (2.0 * terminator_width * terminator_width))
+            .exp();
+
+        // Day-side drying: quadratic reduction for light_level > 0.4
+        let day_drying = if light_level > 0.4 {
+            let t = (light_level - 0.4) / 0.6; // 0 at 0.4, 1 at 1.0
+            1.0 - t * t * 0.8 // up to 0.8 reduction
+        } else {
+            1.0
+        };
+
+        // Night-side cold trap: reduced moisture capacity for light_level < 0.05
+        let night_trap = if light_level < 0.05 {
+            let t = light_level / 0.05; // 0 at 0, 1 at 0.05
+            0.3 + t * 0.7 // 0.3 minimum (up to 0.7 reduction at edge)
+        } else {
+            1.0
+        };
+
+        // Continental moisture decay: ocean=1.0, coastal→0.5, inland→0.1
+        let moisture_source = if continentalness < -0.025 {
+            1.0 // ocean
+        } else if continentalness < 0.05 {
+            let t = (continentalness + 0.025) / 0.075; // 0 at -0.025, 1 at 0.05
+            1.0 - t * 0.5 // 1.0 to 0.5
+        } else if continentalness < 0.2 {
+            let t = (continentalness - 0.05) / 0.15; // 0 at 0.05, 1 at 0.2
+            0.5 - t * 0.3 // 0.5 to 0.2
+        } else {
+            let t = ((continentalness - 0.2) / 0.3).min(1.0); // 0 at 0.2, 1 at 0.5
+            0.2 - t * 0.1 // 0.2 to 0.1
+        };
+
+        // Combine: terminator ring enhances base, day/night modifiers reduce
+        let atmospheric = terminator_peak * day_drying * night_trap;
+        let scaled_moisture = moisture_source * (0.3 + terminator_peak * 0.7);
+        let combined = base_noise * 0.2 + scaled_moisture * 0.3 + atmospheric * 0.5;
+
+        combined.clamp(0.0, 1.0)
+    }
+
     /// Generate humidity based on continentalness (proxy for water distance).
     /// Useful when water distance isn't precomputed.
     pub fn generate_with_continentalness(
@@ -264,6 +327,52 @@ mod tests {
             "Near water ({}) should be more humid than far ({})",
             near_water,
             far_water
+        );
+    }
+
+    #[test]
+    fn terminator_peak_humidity() {
+        let strategy = HumidityStrategy::new(42);
+        // At the terminator ring (light ≈ 0.2), humidity should be higher than day side
+        let terminator = strategy.generate_terminator_model(100.0, 100.0, 0, -0.5, 0.2);
+        let day_side = strategy.generate_terminator_model(100.0, 100.0, 0, -0.5, 0.9);
+        assert!(
+            terminator > day_side,
+            "Terminator ({}) should be more humid than day side ({})",
+            terminator, day_side
+        );
+    }
+
+    #[test]
+    fn day_side_drying() {
+        let strategy = HumidityStrategy::new(42);
+        // High light level on land should produce low humidity
+        let bright = strategy.generate_terminator_model(100.0, 100.0, 0, 0.3, 0.95);
+        assert!(bright < 0.5, "Day side inland humidity ({}) should be reduced", bright);
+    }
+
+    #[test]
+    fn night_side_cold_trap() {
+        let strategy = HumidityStrategy::new(42);
+        // Very low light should reduce humidity vs terminator
+        let night = strategy.generate_terminator_model(100.0, 100.0, 0, -0.5, 0.01);
+        let terminator = strategy.generate_terminator_model(100.0, 100.0, 0, -0.5, 0.2);
+        assert!(
+            night < terminator,
+            "Night side ({}) should be less humid than terminator ({})",
+            night, terminator
+        );
+    }
+
+    #[test]
+    fn ocean_vs_inland_terminator() {
+        let strategy = HumidityStrategy::new(42);
+        let ocean = strategy.generate_terminator_model(100.0, 100.0, 0, -0.5, 0.2);
+        let inland = strategy.generate_terminator_model(100.0, 100.0, 0, 0.4, 0.2);
+        assert!(
+            ocean > inland,
+            "Ocean terminator ({}) should be more humid than inland terminator ({})",
+            ocean, inland
         );
     }
 
