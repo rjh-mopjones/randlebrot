@@ -122,7 +122,8 @@ pub fn render_terrain(map: &BiomeMap, hints: Option<&NormalizationHints>) -> Vec
                     pixel = lerp_rgb(pixel, [80, 130, 180], blend.min(0.9));
                 }
                 let rmoist = map.water_table[idx];
-                if rmoist > 0.1 && river <= 0.02 {
+                let temp_here = map.temperature[idx];
+                if rmoist > 0.1 && river <= 0.02 && temp_here < 45.0 {
                     let green_tint = ((rmoist - 0.1) * 0.15).clamp(0.0, 0.1);
                     pixel = lerp_rgb(pixel, [60, 160, 60], green_tint);
                 }
@@ -145,11 +146,10 @@ pub fn render_terrain(map: &BiomeMap, hints: Option<&NormalizationHints>) -> Vec
                     }
                 }
 
-                // 7. Vegetation tint — strong enough to show through everywhere
+                // 7. Vegetation tint — only where temperature allows growth
                 let veg = map.vegetation_density[idx];
-                if veg > 0.05 {
+                if veg > 0.05 && temp_here < 45.0 {
                     let green_target = [40, (veg * 120.0 + 60.0).min(255.0) as u8, 30];
-                    // Weaker in desert (oases), stronger elsewhere
                     let strength = if is_desert_biome(biome) { 0.3 } else { 0.5 };
                     pixel = lerp_rgb(pixel, green_target, veg * strength);
                 }

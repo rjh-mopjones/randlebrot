@@ -11,14 +11,18 @@ pub fn derive_temperature(light_level: f64, elevation: f64, humidity: f64, conti
     // Map light [0,1] to temp [-80, +120]
     let base_temp = light_level * 200.0 - 80.0;
     // Lapse rate: mountains are colder (only for positive elevation)
-    let lapse_rate = elevation.max(0.0) * 60.0;
+    // Capped at 25% of base_temp — on a tidally locked planet with constant
+    // direct sunlight, mountains can't cool enough to become habitable.
+    // At 100°C base: max drop = 25°C → 75°C minimum (still scorching)
+    let max_lapse = if base_temp > 0.0 { base_temp * 0.25 } else { 20.0 };
+    let lapse_rate = (elevation.max(0.0) * 40.0).min(max_lapse);
     // Moisture moderates extremes slightly
     let humidity_buffer = humidity * 5.0;
     let raw = base_temp - lapse_rate + humidity_buffer;
     // Coastal moderation: ocean proximity pulls temperature toward moderate
     let inland_factor = ((continentalness + 0.01).max(0.0) * 5.0).clamp(0.0, 1.0);
     let moderate_temp = 15.0;
-    raw + (moderate_temp - raw) * (1.0 - inland_factor) * 0.3
+    raw + (moderate_temp - raw) * (1.0 - inland_factor) * 0.15
 }
 
 /// Heightmap from geological layers (used as elevation input for temperature).
@@ -59,9 +63,9 @@ pub fn derive_erosion(heightmap: f64, rock_hardness: f64, humidity: f64) -> f64 
 /// - rock_hardness: [0, 1] where 1.0 = very hard
 pub fn derive_peaks_valleys(base_pv: f64, tectonic: f64, rock_hardness: f64) -> f64 {
     let stress = 1.0 - tectonic;
-    // Cubic envelope: only cells very close to boundaries get significant amplitude
+    // Cubic envelope: boundaries get full amplitude, interiors get gentle rolling hills
     let stress_envelope = stress * stress * stress;
-    let amplitude = 0.02 + stress_envelope * 0.98;
+    let amplitude = 0.08 + stress_envelope * 0.92;
     let hardness_factor = 0.7 + rock_hardness * 0.3;
     (base_pv * amplitude * hardness_factor).clamp(-1.0, 1.0)
 }
@@ -73,8 +77,10 @@ pub fn derive_peaks_valleys(base_pv: f64, tectonic: f64, rock_hardness: f64) -> 
 /// - humidity: [0, 1]
 /// Output: [0, 1] where 1.0 = hyper-arid
 pub fn derive_aridity(temperature: f64, humidity: f64) -> f64 {
-    let temp_factor = ((temperature - 10.0) / 80.0).clamp(0.0, 1.0);
-    (temp_factor * 0.5 + (1.0 - humidity) * 0.5).clamp(0.0, 1.0)
+    // Steeper temperature ramp: anything above 55°C is fully arid from heat alone
+    let temp_factor = ((temperature - 10.0) / 45.0).clamp(0.0, 1.0);
+    // Temperature dominates: 65% temp, 35% dryness
+    (temp_factor * 0.65 + (1.0 - humidity) * 0.35).clamp(0.0, 1.0)
 }
 
 /// Precipitation type from temperature, humidity, and elevation.

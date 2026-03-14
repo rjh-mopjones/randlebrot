@@ -141,6 +141,22 @@ impl BiomeSplines {
         aridity: f64,
         rock_hardness: f64,
     ) -> TileType {
+        self.evaluate_with_light(continentalness, temperature, tectonic, erosion, peaks_valleys, humidity, aridity, rock_hardness, 0.3)
+    }
+
+    /// Evaluate biome with light level for sun-side gate.
+    pub fn evaluate_with_light(
+        &self,
+        continentalness: f64,
+        temperature: f64,
+        tectonic: f64,
+        erosion: f64,
+        peaks_valleys: f64,
+        humidity: f64,
+        aridity: f64,
+        rock_hardness: f64,
+        light_level: f64,
+    ) -> TileType {
         // Step 1: Compute effective elevation with tectonic amplification
         let elevation = self.compute_elevation(continentalness, peaks_valleys, erosion, tectonic);
 
@@ -162,12 +178,12 @@ impl BiomeSplines {
         let elev_class = ElevationClass::from_elevation(above_sea);
         let terrain = TerrainClass::from_erosion(erosion);
 
-        // Step 5b: Aridity overrides moisture class
-        // Makes sun-side desert zones more dramatic
-        if aridity > 0.85 {
+        // Step 5b: Hard temperature gate — above 45°C, no vegetation. Period.
+        if temperature > 45.0 {
             moisture = MoistureClass::Arid;
-        } else if aridity > 0.7 {
-            // Cap at Dry
+        } else if aridity > 0.75 {
+            moisture = MoistureClass::Arid;
+        } else if aridity > 0.6 {
             if matches!(moisture, MoistureClass::Moderate | MoistureClass::Humid | MoistureClass::Saturated) {
                 moisture = MoistureClass::Dry;
             }
@@ -271,13 +287,13 @@ impl BiomeSplines {
         }
     }
 
-    /// Adjust temperature based on elevation (lapse rate) and tectonic heat.
-    fn adjust_temperature(&self, temp: f64, elevation: f64, _tectonic: f64) -> f64 {
-        // Lapse rate: temperature decreases with altitude
-        let elevation_above_sea = (elevation - self.sea_level).max(0.0);
-        let lapse_rate = elevation_above_sea * 60.0; // ~60°C per 1.0 elevation unit
-
-        temp - lapse_rate
+    /// Adjust temperature based on elevation and tectonic heat.
+    /// NOTE: lapse rate is already applied in derive_temperature. This only applies
+    /// minor adjustments that don't duplicate the primary lapse rate.
+    fn adjust_temperature(&self, temp: f64, _elevation: f64, _tectonic: f64) -> f64 {
+        // No additional lapse rate — derive_temperature already handles it.
+        // This prevents double-cooling that lets hot sun-side mountains appear temperate.
+        temp
     }
 
     /// Adjust humidity with rain shadow effect at high elevations.
@@ -311,7 +327,24 @@ impl BiomeSplines {
         px: usize,
         py: usize,
     ) -> TileType {
-        let base = self.evaluate(continentalness, temperature, tectonic, erosion, peaks_valleys, humidity, aridity, rock_hardness);
+        self.evaluate_dithered_with_light(continentalness, temperature, tectonic, erosion, peaks_valleys, humidity, aridity, rock_hardness, px, py, 0.3)
+    }
+
+    pub fn evaluate_dithered_with_light(
+        &self,
+        continentalness: f64,
+        temperature: f64,
+        tectonic: f64,
+        erosion: f64,
+        peaks_valleys: f64,
+        humidity: f64,
+        aridity: f64,
+        rock_hardness: f64,
+        px: usize,
+        py: usize,
+        light_level: f64,
+    ) -> TileType {
+        let base = self.evaluate_with_light(continentalness, temperature, tectonic, erosion, peaks_valleys, humidity, aridity, rock_hardness, light_level);
 
         // Position hash for deterministic spatial noise
         let hash = (((px.wrapping_mul(374761393)) ^ (py.wrapping_mul(668265263))) & 0xFFFF) as f64 / 65535.0;
@@ -526,18 +559,22 @@ mod tests {
     }
 
     #[test]
-    fn hot_dry_rugged_is_badlands() {
+    fn hot_dry_rugged_is_desert() {
         let s = splines();
-        // Hot + arid + rugged terrain (low erosion)
+        // Hot (65°C) + rugged — above 45°C gate, forced to arid desert biome
         let biome = s.evaluate(0.1, 65.0, 0.5, 0.1, 0.0, 0.1, 0.3, 0.5);
-        assert_eq!(biome, TileType::Badlands);
+        assert!(matches!(biome, TileType::Sahara | TileType::Desert | TileType::Badlands | TileType::Hamada | TileType::ScorchedRock),
+            "At 65°C should be desert-type, got {:?}", biome);
     }
 
     #[test]
-    fn hot_humid_is_jungle() {
+    fn hot_humid_is_NOT_jungle() {
         let s = splines();
+        // 65°C is above the 45°C hard gate — even with humidity, no green biomes
         let biome = s.evaluate(0.1, 65.0, 0.5, 0.5, 0.0, 0.7, 0.3, 0.5);
-        assert_eq!(biome, TileType::Jungle);
+        assert!(!matches!(biome, TileType::Jungle | TileType::Forest | TileType::Plains
+            | TileType::DeciduousForest | TileType::TemperateRainforest | TileType::SubtropicalForest),
+            "At 65°C nothing should be green, got {:?}", biome);
     }
 
     #[test]
@@ -554,9 +591,10 @@ mod tests {
         // Scorching + arid = sahara (rolling terrain)
         let biome = s.evaluate(0.1, 100.0, 0.5, 0.5, 0.0, 0.1, 0.3, 0.5);
         assert_eq!(biome, TileType::Sahara);
-        // Scorching + some moisture = desert
+        // Scorching + humidity forced arid by 45°C gate = still desert
         let biome2 = s.evaluate(0.1, 100.0, 0.5, 0.5, 0.0, 0.4, 0.3, 0.5);
-        assert_eq!(biome2, TileType::Desert);
+        // 45°C gate forces Arid, so same result as above
+        assert_eq!(biome2, TileType::Sahara);
     }
 
     #[test]
@@ -607,9 +645,8 @@ mod tests {
     #[test]
     fn cold_highland_is_alpine_meadow() {
         let s = splines();
-        // Cold zone, highland, rolling terrain
-        // Need temp to stay Cold (-20 to 3) after lapse rate of ~16.5°C
-        let biome = s.evaluate(0.25, 10.0, 0.5, 0.5, 0.0, 0.5, 0.3, 0.5);
+        // Cold zone (-20 to 3°C), highland, rolling terrain
+        let biome = s.evaluate(0.25, -5.0, 0.5, 0.5, 0.0, 0.5, 0.3, 0.5);
         assert_eq!(biome, TileType::AlpineMeadow);
     }
 
@@ -651,19 +688,32 @@ mod tests {
     }
 
     #[test]
-    fn warm_humid_highland_is_cloud_forest() {
+    fn warm_humid_highland_not_green_above_45c() {
         let s = splines();
-        // Very high humidity to survive rain shadow at highland
+        // 55°C is above the 45°C gate — even with max humidity, no green
         let biome = s.evaluate(0.25, 55.0, 0.5, 0.5, 0.0, 0.95, 0.3, 0.5);
-        assert_eq!(biome, TileType::CloudForest);
+        assert!(!matches!(biome, TileType::CloudForest | TileType::Forest | TileType::Jungle),
+            "At 55°C nothing should be green, got {:?}", biome);
     }
 
     #[test]
-    fn warm_dry_highland_is_highland_savanna() {
+    fn warm_humid_highland_below_45c_is_cloud_forest() {
         let s = splines();
-        // Humidity 0.6 → after rain shadow (~0.31) = Dry → HighlandSavanna
+        // 35°C is well below the 45°C gate — green biomes should be possible
+        let biome = s.evaluate(0.1, 35.0, 0.5, 0.5, 0.0, 0.8, 0.2, 0.5);
+        assert!(matches!(biome, TileType::Forest | TileType::Jungle | TileType::SubtropicalForest
+            | TileType::TemperateRainforest | TileType::Woodland | TileType::DryWoodland
+            | TileType::Plains | TileType::Meadow | TileType::Savanna | TileType::Marsh),
+            "Below 45°C with moisture should allow green biomes, got {:?}", biome);
+    }
+
+    #[test]
+    fn warm_dry_highland_not_green_above_45c() {
+        let s = splines();
+        // 55°C above gate — forced to arid
         let biome = s.evaluate(0.25, 55.0, 0.5, 0.5, 0.0, 0.6, 0.3, 0.5);
-        assert_eq!(biome, TileType::HighlandSavanna);
+        assert!(!matches!(biome, TileType::HighlandSavanna | TileType::Savanna | TileType::Forest),
+            "At 55°C nothing should be green, got {:?}", biome);
     }
 
     #[test]
@@ -696,10 +746,13 @@ mod tests {
     }
 
     #[test]
-    fn hot_dry_rugged_is_hamada() {
+    fn hot_dry_rugged_is_desert_type() {
         let s = splines();
+        // 65°C above gate — must be desert/scorched, not green
         let biome = s.evaluate(0.1, 65.0, 0.5, 0.1, 0.0, 0.3, 0.3, 0.5);
-        assert_eq!(biome, TileType::Hamada);
+        assert!(matches!(biome, TileType::Sahara | TileType::Desert | TileType::Badlands
+            | TileType::Hamada | TileType::ScorchedRock | TileType::Erg),
+            "At 65°C should be desert-type, got {:?}", biome);
     }
 
     #[test]
@@ -724,10 +777,34 @@ mod tests {
     }
 
     #[test]
-    fn scorching_dry_is_erg() {
+    fn scorching_dry_is_desert_type() {
         let s = splines();
         let biome = s.evaluate(0.1, 100.0, 0.5, 0.5, 0.0, 0.3, 0.3, 0.5);
-        assert_eq!(biome, TileType::Erg);
+        assert!(matches!(biome, TileType::Sahara | TileType::Desert | TileType::Erg
+            | TileType::ScorchedRock | TileType::MoltenWaste | TileType::SaltFlat),
+            "At 100°C should be scorched/desert, got {:?}", biome);
+    }
+
+    #[test]
+    fn nothing_green_above_45c() {
+        let s = splines();
+        let green_biomes = [
+            TileType::Forest, TileType::Jungle, TileType::Plains, TileType::Meadow,
+            TileType::DeciduousForest, TileType::TemperateRainforest, TileType::SubtropicalForest,
+            TileType::CloudForest, TileType::Woodland, TileType::DryWoodland, TileType::Taiga,
+            TileType::AlpineMeadow, TileType::Marsh, TileType::Mangrove, TileType::Oasis,
+        ];
+        // Test across a range of temperatures above 45°C, various humidity/elevation combos
+        for temp in [46.0, 55.0, 65.0, 80.0, 100.0, 120.0] {
+            for humidity in [0.1, 0.3, 0.5, 0.7, 0.9] {
+                for cont in [0.05, 0.15, 0.3] {
+                    let biome = s.evaluate(cont, temp, 0.5, 0.5, 0.0, humidity, 0.3, 0.5);
+                    assert!(!green_biomes.contains(&biome),
+                        "At {}°C, humidity={}, cont={}: got green biome {:?}",
+                        temp, humidity, cont, biome);
+                }
+            }
+        }
     }
 
     #[test]

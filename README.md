@@ -29,6 +29,9 @@ cargo run --release -p rb_noise --example save_debug_layers
 - Stream power erosion sim (`erosion_sim.rs`) carves dendritic valleys through uplift vs erosion competition
 - Meso tiles sample the macro eroded heightmap and add fine-grained ridge/valley detail in mountain zones
 - Rivers form coherent drainage networks from mountains to coast
+- Above 45°C — NO vegetation (hard gate, tested by `nothing_green_above_45c`)
+- No vegetation in bottom 25% of map — sun side is scorched, tested by `no_vegetation_in_bottom_25_percent`
+- No vegetation within 10% radius of sub-stellar point — circular scorched zone, tested by `no_vegetation_near_sub_stellar`
 
 ## Project Structure
 

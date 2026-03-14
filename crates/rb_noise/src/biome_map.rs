@@ -323,7 +323,7 @@ impl BiomeMap {
             let precip = derived::derive_precipitation_type(temp, humid, hm);
             let res = derived::derive_resource_richness(tect, rock, eros);
             let snow = derived::derive_snowpack(precip, temp, hm, light);
-            let biome = splines.evaluate_dithered(cont, temp, tect, eros, peaks, humid, arid, rock, px, py);
+            let biome = splines.evaluate_dithered_with_light(cont, temp, tect, eros, peaks, humid, arid, rock, px, py, light);
 
             peaks_valleys.push(peaks);
             heightmap_vec.push(hm);
@@ -387,9 +387,9 @@ impl BiomeMap {
             (twi + river_boost).clamp(0.0, 1.0)
         }).collect();
 
-        // Oasis override: desert biomes near rivers become oases
+        // Oasis override: desert biomes near rivers become oases (rare, small)
         for idx in 0..total_pixels {
-            if water_table[idx] > 0.25 && continentalness[idx] >= SEA_LEVEL {
+            if water_table[idx] > 0.45 && continentalness[idx] >= SEA_LEVEL && temperature[idx] < 80.0 {
                 match biomes[idx] {
                     TileType::Desert | TileType::Sahara | TileType::Erg | TileType::Hamada => {
                         biomes[idx] = TileType::Oasis;
@@ -541,7 +541,7 @@ impl BiomeMap {
                 let precip = derived::derive_precipitation_type(temp, humid, hm);
                 let res = derived::derive_resource_richness(tect, rock, eros);
                 let snow = derived::derive_snowpack(precip, temp, hm, light);
-                let biome = splines.evaluate_dithered(cont, temp, tect, eros, peaks, humid, arid, rock, px, py);
+                let biome = splines.evaluate_dithered_with_light(cont, temp, tect, eros, peaks, humid, arid, rock, px, py, light);
 
                 (peaks, volc, hm, temp, eros, arid, precip, res, snow, biome)
             })
@@ -1038,7 +1038,7 @@ impl BiomeMap {
                 let precip = derived::derive_precipitation_type(temp, humid, hm);
                 let res = derived::derive_resource_richness(tect, rock, eros);
                 let snow = derived::derive_snowpack(precip, temp, hm, light);
-                let biome = splines.evaluate_dithered(cont, temp, tect, eros, peaks, humid, arid, rock, px, py);
+                let biome = splines.evaluate_dithered_with_light(cont, temp, tect, eros, peaks, humid, arid, rock, px, py, light);
 
                 continentalness.push(cont);
                 tectonic.push(tect);
@@ -1077,9 +1077,9 @@ impl BiomeMap {
             derived::derive_water_table(rivers[idx], humidity[idx], heightmap_vec[idx], precipitation_type[idx], continentalness[idx])
         }).collect();
 
-        // Oasis override: desert biomes near rivers become oases
+        // Oasis override: desert biomes near rivers become oases (rare, small)
         for idx in 0..total_pixels {
-            if water_table[idx] > 0.25 && continentalness[idx] >= SEA_LEVEL {
+            if water_table[idx] > 0.45 && continentalness[idx] >= SEA_LEVEL && temperature[idx] < 80.0 {
                 match biomes[idx] {
                     TileType::Desert | TileType::Sahara | TileType::Erg | TileType::Hamada => {
                         biomes[idx] = TileType::Oasis;
@@ -1240,7 +1240,7 @@ impl BiomeMap {
                     let precip = derived::derive_precipitation_type(temp, humid, hm);
                     let res = derived::derive_resource_richness(tect, rock, eros);
                     let snow = derived::derive_snowpack(precip, temp, hm, light);
-                    let biome = splines.evaluate_dithered(cont, temp, tect, eros, peaks, humid, arid, rock, px, py);
+                    let biome = splines.evaluate_dithered_with_light(cont, temp, tect, eros, peaks, humid, arid, rock, px, py, light);
 
                     results.push((cont, temp, tect, pid, peaks, volc, hm, eros, humid, light, rock, arid, precip, res, snow, biome));
                 }
@@ -1325,10 +1325,10 @@ impl BiomeMap {
                     aridity[idx] = derived::derive_aridity(temp, humidity[idx]);
                     precipitation_type[idx] = derived::derive_precipitation_type(temp, humidity[idx], hm);
                     snowpack[idx] = derived::derive_snowpack(precipitation_type[idx], temp, hm, light_level[idx]);
-                    biomes[idx] = splines.evaluate_dithered(
+                    biomes[idx] = splines.evaluate_dithered_with_light(
                         continentalness[idx], temp, tectonic[idx], erosion[idx],
                         peaks_valleys[idx], humidity[idx], aridity[idx], rock_hardness[idx],
-                        px, py,
+                        px, py, light_level[idx],
                     );
                 }
             }
@@ -1381,9 +1381,9 @@ impl BiomeMap {
             derived::derive_water_table(rivers[idx], humidity[idx], heightmap_vec[idx], precipitation_type[idx], continentalness[idx])
         }).collect();
 
-        // Oasis override: desert biomes near rivers become oases
+        // Oasis override: desert biomes near rivers become oases (rare, small)
         for idx in 0..total_pixels {
-            if water_table[idx] > 0.25 && continentalness[idx] >= SEA_LEVEL {
+            if water_table[idx] > 0.45 && continentalness[idx] >= SEA_LEVEL && temperature[idx] < 80.0 {
                 match biomes[idx] {
                     TileType::Desert | TileType::Sahara | TileType::Erg | TileType::Hamada => {
                         biomes[idx] = TileType::Oasis;
@@ -1563,7 +1563,7 @@ impl BiomeMap {
                 let precip = derived::derive_precipitation_type(temp, humid, hm);
                 let res = derived::derive_resource_richness(tect, rock, eros);
                 let snow = derived::derive_snowpack(precip, temp, hm, light);
-                let biome = splines.evaluate_dithered(cont, temp, tect, eros, peaks, humid, arid, rock, px, py);
+                let biome = splines.evaluate_dithered_with_light(cont, temp, tect, eros, peaks, humid, arid, rock, px, py, light);
 
                 (peaks, volc, hm, temp, eros, arid, precip, res, snow, biome)
             })
@@ -1615,10 +1615,10 @@ impl BiomeMap {
                     aridity[idx] = derived::derive_aridity(temp, gpu_humidity[idx]);
                     precipitation_type[idx] = derived::derive_precipitation_type(temp, gpu_humidity[idx], hm);
                     snowpack[idx] = derived::derive_snowpack(precipitation_type[idx], temp, hm, gpu_light_level[idx]);
-                    biomes[idx] = splines_recomp.evaluate_dithered(
+                    biomes[idx] = splines_recomp.evaluate_dithered_with_light(
                         continentalness[idx], temp, gpu_tectonic[idx], erosion[idx],
                         peaks_valleys[idx], gpu_humidity[idx], aridity[idx], gpu_rock_hardness[idx],
-                        px, py,
+                        px, py, gpu_light_level[idx],
                     );
                 }
             }
@@ -1806,5 +1806,74 @@ mod tests {
         let map = BiomeMap::generate(42, 128, 64);
         let temp = map.get_temperature(64, 60).unwrap();
         assert!(temp > 30.0, "Near sub-stellar temp {} should be hot (> 30)", temp);
+    }
+
+    #[test]
+    fn no_vegetation_in_bottom_25_percent() {
+        // The bottom 25% of the map is the sun side — constant direct sunlight,
+        // temperatures near 100°C, evaporated oceans. The simulation must produce
+        // NO green/vegetation biomes there. If this test fails, the temperature
+        // model, aridity, or lapse rate is broken.
+        let map = BiomeMap::generate(42, 256, 128);
+        let green_biomes = [
+            TileType::Forest, TileType::Jungle, TileType::Plains, TileType::Meadow,
+            TileType::DeciduousForest, TileType::TemperateRainforest, TileType::SubtropicalForest,
+            TileType::CloudForest, TileType::Woodland, TileType::DryWoodland, TileType::Taiga,
+            TileType::AlpineMeadow, TileType::Marsh, TileType::Mangrove,
+            TileType::Savanna, TileType::HighlandSavanna, TileType::Steppe,
+        ];
+        let y_cutoff = (map.height * 3) / 4; // bottom 25%
+        let mut violations = Vec::new();
+        for y in y_cutoff..map.height {
+            for x in 0..map.width {
+                let biome = map.biomes[y * map.width + x];
+                if green_biomes.contains(&biome) {
+                    let temp = map.temperature[y * map.width + x];
+                    violations.push((x, y, biome, temp));
+                }
+            }
+        }
+        assert!(violations.is_empty(),
+            "Found {} green biomes in bottom 25% (sun side). First 5: {:?}",
+            violations.len(), &violations[..violations.len().min(5)]);
+    }
+
+    #[test]
+    fn no_vegetation_near_sub_stellar() {
+        // The sub-stellar point is the hottest spot on the planet (bottom center).
+        // Within 10% of the map radius around it, nothing grows — not even oases.
+        // This is a spherical check: distance from sub-stellar < 10% of map diagonal.
+        let w = 256;
+        let h = 128;
+        let map = BiomeMap::generate(42, w, h);
+        let green_biomes = [
+            TileType::Forest, TileType::Jungle, TileType::Plains, TileType::Meadow,
+            TileType::DeciduousForest, TileType::TemperateRainforest, TileType::SubtropicalForest,
+            TileType::CloudForest, TileType::Woodland, TileType::DryWoodland, TileType::Taiga,
+            TileType::AlpineMeadow, TileType::Marsh, TileType::Mangrove, TileType::Oasis,
+            TileType::Savanna, TileType::HighlandSavanna, TileType::Steppe,
+        ];
+        // Sub-stellar at (0.5, 1.0) in normalized coords = (w/2, h) in pixels
+        let sub_x = w as f64 * 0.5;
+        let sub_y = h as f64; // bottom edge
+        let radius = (w as f64).hypot(h as f64) * 0.10; // 10% of diagonal
+        let mut violations = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let dx = x as f64 - sub_x;
+                let dy = y as f64 - sub_y;
+                let dist = (dx * dx + dy * dy).sqrt();
+                if dist < radius {
+                    let biome = map.biomes[y * w + x];
+                    if green_biomes.contains(&biome) {
+                        let temp = map.temperature[y * w + x];
+                        violations.push((x, y, biome, temp));
+                    }
+                }
+            }
+        }
+        assert!(violations.is_empty(),
+            "Found {} green biomes within 10% radius of sub-stellar. First 5: {:?}",
+            violations.len(), &violations[..violations.len().min(5)]);
     }
 }
