@@ -62,7 +62,10 @@ impl NoiseStrategy for LightLevelStrategy {
         let dist = (dx * dx + dy * dy).sqrt().min(1.0);
 
         // Cosine falloff: dist=0 => cos(0)=1 (full light), dist=1 => cos(PI/2)=0 (dark)
-        let base_light = (dist * std::f64::consts::FRAC_PI_2).cos();
+        // Extra darkening kicks in only past dist=0.5, ramping up toward antipodal
+        let far_dist = ((dist - 0.5) / 0.5).max(0.0);
+        let darkening = 1.0 + 1.5 * far_dist * far_dist;
+        let base_light = (dist * std::f64::consts::FRAC_PI_2).cos().powf(darkening);
 
         // Add atmospheric scatter noise
         let scatter = self.scatter_noise(x, y);
