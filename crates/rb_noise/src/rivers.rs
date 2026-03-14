@@ -137,8 +137,8 @@ pub struct Lake {
 /// Contains everything a chunk needs to render/carve a river segment.
 #[derive(Clone, Debug)]
 pub struct RiverConstraint {
-    /// Path points within the queried bounds (world coords + meander offset).
-    pub path: Vec<(f64, f64, f64)>, // (x, y, meander_offset)
+    /// Path points within the queried bounds (world coords).
+    pub path: Vec<(f64, f64)>,
     /// Drainage area for width/depth computation.
     pub drainage_area: u32,
     /// Character for rendering style.
@@ -149,6 +149,10 @@ pub struct RiverConstraint {
     pub depth: f64,
     /// Strahler stream order.
     pub strahler_order: u32,
+    /// Segment ID for deterministic seeding of refinement.
+    pub river_id: usize,
+    /// Position in upstream chain for deterministic seeding.
+    pub segment_index: usize,
 }
 
 // ─── Chunk Coordinate for Spatial Index ──────────────────────────────────────
@@ -253,10 +257,7 @@ impl RiverNetwork {
             seg.meander_offsets = vec![0.0; seg.path.len()];
         }
 
-        // Step 6: Apply meandering
-        for seg in &mut segments {
-            apply_meandering(seg, heightmap, peaks_valleys, width, height);
-        }
+        // Step 6: (meandering now applied per-tile in rasterize_from_network)
 
         // Step 7: Generate deltas at river mouths
         let deltas = generate_deltas(&segments, continentalness, width, height, sea_level);
@@ -336,15 +337,11 @@ impl RiverNetwork {
                         }
 
                         // Clip segment path to bounds
-                        let clipped_path: Vec<(f64, f64, f64)> = seg.path.iter()
-                            .enumerate()
-                            .filter(|(_, &(px, py))| {
+                        let clipped_path: Vec<(f64, f64)> = seg.path.iter()
+                            .filter(|&&(px, py)| {
                                 px >= min_x && px <= max_x && py >= min_y && py <= max_y
                             })
-                            .map(|(i, &(px, py))| {
-                                let offset = seg.meander_offsets.get(i).copied().unwrap_or(0.0);
-                                (px, py, offset)
-                            })
+                            .copied()
                             .collect();
 
                         if clipped_path.is_empty() {
@@ -358,6 +355,8 @@ impl RiverNetwork {
                             width: compute_river_width(seg.drainage_area, seg.character),
                             depth: compute_river_depth(seg.drainage_area),
                             strahler_order: seg.strahler_order,
+                            river_id: seg.id,
+                            segment_index: id,
                         });
                     }
                 }
@@ -384,43 +383,17 @@ impl RiverNetwork {
                 continue;
             }
 
-            // Build effective path by applying meander offsets
-            let effective_path: Vec<(f64, f64)> = seg.path.iter()
-                .enumerate()
-                .map(|(i, &(px, py))| {
-                    let offset = seg.meander_offsets.get(i).copied().unwrap_or(0.0);
-                    if offset.abs() < 0.001 {
-                        return (px, py);
-                    }
-                    // Compute perpendicular direction
-                    let (next_x, next_y) = if i + 1 < seg.path.len() {
-                        seg.path[i + 1]
-                    } else if i > 0 {
-                        let (prev_x, prev_y) = seg.path[i - 1];
-                        (px + (px - prev_x), py + (py - prev_y))
-                    } else {
-                        (px, py + 1.0)
-                    };
-                    let flow_dx = next_x - px;
-                    let flow_dy = next_y - py;
-                    let flow_len = (flow_dx * flow_dx + flow_dy * flow_dy).sqrt().max(0.001);
-                    let perp_x = -flow_dy / flow_len;
-                    let perp_y = flow_dx / flow_len;
-                    (px + offset * perp_x, py + offset * perp_y)
-                })
-                .collect();
-
-            if effective_path.len() < 2 {
+            if seg.path.len() < 2 {
                 continue;
             }
 
             // Uniform drainage along this segment (it's constant per segment)
-            let drainage_per_point = vec![seg.drainage_area; effective_path.len()];
+            let drainage_per_point = vec![seg.drainage_area; seg.path.len()];
             let max_half_width = 3.0 * seg.character.width_multiplier();
 
             rasterise_smooth_line(
                 &mut grid, width, height,
-                &effective_path, &drainage_per_point,
+                &seg.path, &drainage_per_point,
                 max_drainage, max_half_width,
             );
         }
@@ -526,7 +499,7 @@ pub fn rasterize_from_network(
     // Expand query bounds so that segments passing through the tile are captured
     // even if their path points lie just outside. Critical for small tiles (micro=0.25)
     // where river paths have ~1 point per world unit.
-    let margin = 1.5;
+    let margin = 2.0;
     let constraints = network.query_chunk(
         world_x - margin, world_y - margin,
         world_x + world_size + margin, world_y + world_size + margin,
@@ -546,39 +519,42 @@ pub fn rasterize_from_network(
 
     let scale = output_size as f64 / world_size;
 
+    let pixels_per_world_unit = output_size as f64 / world_size;
+
     for constraint in &constraints {
         if constraint.character == RiverCharacter::BuriedIce {
             continue;
         }
 
-        // Build pixel-space path from world-coordinate constraint,
-        // applying meander offsets perpendicular to flow direction.
-        let pixel_path: Vec<(f64, f64)> = constraint.path.iter()
-            .enumerate()
-            .map(|(i, &(wx, wy, meander_offset))| {
-                let mut px = (wx - world_x) * scale;
-                let mut py = (wy - world_y) * scale;
+        // Stage 1: Adaptive subdivision — ensure point spacing ≤ target
+        let target_spacing = 6.0 / pixels_per_world_unit;
+        let world_path = &constraint.path;
+        let subdivided = subdivide_to_spacing(world_path, target_spacing);
 
-                if meander_offset.abs() > 0.001 {
-                    // Compute perpendicular from flow direction using next/prev points
-                    let (next_wx, next_wy) = if i + 1 < constraint.path.len() {
-                        (constraint.path[i + 1].0, constraint.path[i + 1].1)
-                    } else if i > 0 {
-                        let (prev_wx, prev_wy, _) = constraint.path[i - 1];
-                        (wx + (wx - prev_wx), wy + (wy - prev_wy))
-                    } else {
-                        (wx, wy + 1.0)
-                    };
-                    let flow_dx = next_wx - wx;
-                    let flow_dy = next_wy - wy;
-                    let flow_len = (flow_dx * flow_dx + flow_dy * flow_dy).sqrt().max(0.001);
-                    let perp_x = -flow_dy / flow_len;
-                    let perp_y = flow_dx / flow_len;
-                    px += meander_offset * perp_x * scale;
-                    py += meander_offset * perp_y * scale;
-                }
+        // Stage 2: Sine-generated meanders for meso+ resolution
+        let meandered = if pixels_per_world_unit > 20.0 {
+            apply_sine_meander(
+                &subdivided,
+                constraint.drainage_area,
+                constraint.strahler_order,
+                constraint.river_id,
+                constraint.segment_index,
+            )
+        } else {
+            subdivided
+        };
 
-                (px, py)
+        // Stage 3: Fractal midpoint displacement for micro resolution
+        let refined = if pixels_per_world_unit > 500.0 {
+            fractal_refine(&meandered, constraint.river_id, 0.7, 0.15, 4)
+        } else {
+            meandered
+        };
+
+        // Convert refined world path to pixel coordinates
+        let pixel_path: Vec<(f64, f64)> = refined.iter()
+            .map(|&(wx, wy)| {
+                ((wx - world_x) * scale, (wy - world_y) * scale)
             })
             .collect();
 
@@ -1183,67 +1159,218 @@ fn build_river_tree(
     segments
 }
 
-// ─── Meandering ──────────────────────────────────────────────────────────────
+// ─── Per-Tile River Path Refinement ──────────────────────────────────────────
 
-/// Apply meandering to low-gradient stretches of a segment.
-fn apply_meandering(
-    segment: &mut RiverSegment,
-    heightmap: &[f64],
-    peaks_valleys: &[f64],
-    width: usize,
-    height: usize,
-) {
-    let slope_threshold = 0.02;
+/// FNV-1a hash of world-space coordinates for deterministic displacement.
+/// Quantises to 4 decimal places so identical positions hash identically
+/// regardless of floating-point accumulation order.
+fn world_space_hash(river_id: usize, ax: f64, ay: f64, bx: f64, by: f64, depth: u32) -> u64 {
+    const FNV_OFFSET: u64 = 14695981039346656037;
+    const FNV_PRIME: u64 = 1099511628211;
 
-    for i in 0..segment.path.len() {
-        let (px, py) = segment.path[i];
-        let ix = (px as usize).min(width.saturating_sub(1));
-        let iy = (py as usize).min(height.saturating_sub(1));
-        let idx = iy * width + ix;
+    let quantize = |v: f64| -> u64 { (v * 10000.0).round() as i64 as u64 };
 
-        // Compute local slope from heightmap
-        let slope = local_gradient(heightmap, ix, iy, width, height);
-
-        // Low slope + low relief = floodplain = meander
-        let pv = peaks_valleys.get(idx).copied().unwrap_or(0.0).abs();
-        let meander_strength = (1.0 - slope / slope_threshold).max(0.0)
-            * (1.0 - pv).max(0.0);
-
-        if meander_strength > 0.1 {
-            let amplitude = meander_strength
-                * (segment.drainage_area as f64).sqrt()
-                * 0.15; // scale factor (conservative for grid coords)
-            let wavelength = (amplitude * 8.0).max(4.0);
-
-            // Deterministic phase from segment ID and point index
-            let phase = deterministic_hash(segment.id, i);
-
-            let offset = (i as f64 / wavelength * std::f64::consts::TAU + phase).sin()
-                * amplitude;
-
-            if i < segment.meander_offsets.len() {
-                segment.meander_offsets[i] = offset;
-            }
-        }
+    let mut h = FNV_OFFSET;
+    for val in [river_id as u64, quantize(ax), quantize(ay), quantize(bx), quantize(by), depth as u64] {
+        h ^= val;
+        h = h.wrapping_mul(FNV_PRIME);
     }
+    h
 }
 
-/// Compute local gradient magnitude at a heightmap cell.
-fn local_gradient(heightmap: &[f64], x: usize, y: usize, width: usize, height: usize) -> f64 {
-    let idx = y * width + x;
-    let h = heightmap[idx];
+/// Convert a hash to a deterministic f64 in [-1, 1).
+fn hash_to_f64(h: u64) -> f64 {
+    ((h & 0xFFFFFFFF) as f64 / 0xFFFFFFFF_u64 as f64) * 2.0 - 1.0
+}
 
-    let mut max_drop = 0.0f64;
-    for (dx, dy) in D8_OFFSETS {
-        let nx = x as i32 + dx;
-        let ny = y as i32 + dy;
-        if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
-            let nidx = ny as usize * width + nx as usize;
-            let drop = (h - heightmap[nidx]).abs();
-            max_drop = max_drop.max(drop);
-        }
+/// Adaptive Chaikin subdivision until point spacing ≤ target.
+/// Pure, deterministic. Reuses existing `chaikin_smooth()`.
+fn subdivide_to_spacing(path: &[(f64, f64)], target: f64) -> Vec<(f64, f64)> {
+    if path.len() < 2 || target <= 0.0 {
+        return path.to_vec();
     }
-    max_drop
+
+    // Find max segment length
+    let max_len = path.windows(2)
+        .map(|w| {
+            let dx = w[1].0 - w[0].0;
+            let dy = w[1].1 - w[0].1;
+            (dx * dx + dy * dy).sqrt()
+        })
+        .fold(0.0f64, f64::max);
+
+    if max_len <= target {
+        return path.to_vec();
+    }
+
+    // Number of Chaikin passes needed: ceil(log2(max_len / target)), capped at 8
+    let passes = ((max_len / target).log2().ceil() as usize).min(8);
+    if passes == 0 {
+        return path.to_vec();
+    }
+
+    chaikin_smooth(path, passes)
+}
+
+/// Langbein-Leopold sine-generated curve meander.
+///
+/// Heading angle varies sinusoidally along arc length, producing realistic
+/// river bends. Width follows Leopold-Maddock: W = 0.08 * drainage^0.4.
+/// theta_max scales with Strahler order (15° for order 1, up to 95° for 6+).
+fn apply_sine_meander(
+    path: &[(f64, f64)],
+    drainage_area: u32,
+    strahler_order: u32,
+    river_id: usize,
+    segment_index: usize,
+) -> Vec<(f64, f64)> {
+    if path.len() < 3 || strahler_order < 2 {
+        return path.to_vec();
+    }
+
+    // Leopold-Maddock empirical width
+    let w = 0.08 * (drainage_area as f64).powf(0.4);
+    let lambda = 11.0 * w;
+
+    if lambda < 0.5 {
+        return path.to_vec();
+    }
+
+    // Compute total arc length
+    let mut arc_lengths = Vec::with_capacity(path.len());
+    arc_lengths.push(0.0);
+    for i in 1..path.len() {
+        let dx = path[i].0 - path[i - 1].0;
+        let dy = path[i].1 - path[i - 1].1;
+        arc_lengths.push(arc_lengths[i - 1] + (dx * dx + dy * dy).sqrt());
+    }
+
+    let total_arc = *arc_lengths.last().unwrap();
+    if total_arc < lambda * 0.5 {
+        return path.to_vec();
+    }
+
+    // theta_max from Strahler order: 15° (order 1) → 95° (order 6+)
+    let theta_max_deg: f64 = match strahler_order {
+        0 | 1 => 15.0,
+        2 => 30.0,
+        3 => 50.0,
+        4 => 70.0,
+        5 => 85.0,
+        _ => 95.0,
+    };
+    let theta_max = theta_max_deg.to_radians();
+
+    // Deterministic phase from segment identity
+    let phase = deterministic_hash(river_id, segment_index);
+
+    let mut result = Vec::with_capacity(path.len());
+    result.push(path[0]); // preserve first endpoint
+
+    for i in 1..path.len() - 1 {
+        let s = arc_lengths[i];
+        let t_norm = s / total_arc; // 0..1
+
+        // Endpoint taper: blend 0→1→1→0 over first/last 25%
+        let taper = if t_norm < 0.25 {
+            t_norm / 0.25
+        } else if t_norm > 0.75 {
+            (1.0 - t_norm) / 0.25
+        } else {
+            1.0
+        };
+
+        // Sine-generated displacement perpendicular to local direction
+        let amplitude = theta_max * taper;
+        let sine_val = (std::f64::consts::TAU * s / lambda + phase).sin();
+        let displacement = amplitude * sine_val * w * 0.5;
+
+        // Compute perpendicular direction from neighbors
+        let (prev_x, prev_y) = path[i - 1];
+        let (next_x, next_y) = path[i + 1];
+        let flow_dx = next_x - prev_x;
+        let flow_dy = next_y - prev_y;
+        let flow_len = (flow_dx * flow_dx + flow_dy * flow_dy).sqrt().max(0.001);
+        let perp_x = -flow_dy / flow_len;
+        let perp_y = flow_dx / flow_len;
+
+        result.push((
+            path[i].0 + displacement * perp_x,
+            path[i].1 + displacement * perp_y,
+        ));
+    }
+
+    result.push(*path.last().unwrap()); // preserve last endpoint
+    result
+}
+
+/// Fractal midpoint displacement with world-space-seeded FNV hash.
+///
+/// H = Hurst exponent (0.7 = moderate smoothness).
+/// roughness = base displacement amplitude.
+/// max_depth = recursion depth (4 for micro tiles).
+/// Displacement capped at 25% of segment length to prevent self-intersection.
+fn fractal_refine(
+    path: &[(f64, f64)],
+    river_id: usize,
+    h: f64,
+    roughness: f64,
+    max_depth: u32,
+) -> Vec<(f64, f64)> {
+    if path.len() < 2 || max_depth == 0 {
+        return path.to_vec();
+    }
+
+    // Start with the original path as indexed points
+    let mut points: Vec<(f64, f64)> = path.to_vec();
+
+    for depth in 0..max_depth {
+        let scale = roughness * (0.5f64).powf((depth as f64) * h);
+        let n = points.len();
+        if n < 2 {
+            break;
+        }
+
+        let mut new_points = Vec::with_capacity(n * 2);
+        new_points.push(points[0]);
+
+        for i in 0..n - 1 {
+            let (ax, ay) = points[i];
+            let (bx, by) = points[i + 1];
+
+            let seg_dx = bx - ax;
+            let seg_dy = by - ay;
+            let seg_len = (seg_dx * seg_dx + seg_dy * seg_dy).sqrt();
+
+            if seg_len < 1e-10 {
+                new_points.push(points[i + 1]);
+                continue;
+            }
+
+            // Midpoint
+            let mx = (ax + bx) * 0.5;
+            let my = (ay + by) * 0.5;
+
+            // Perpendicular direction
+            let perp_x = -seg_dy / seg_len;
+            let perp_y = seg_dx / seg_len;
+
+            // Deterministic displacement from world-space hash
+            let hash = world_space_hash(river_id, ax, ay, bx, by, depth);
+            let disp = hash_to_f64(hash) * scale * seg_len;
+
+            // Cap at 25% of segment length
+            let max_disp = seg_len * 0.25;
+            let clamped = disp.clamp(-max_disp, max_disp);
+
+            new_points.push((mx + clamped * perp_x, my + clamped * perp_y));
+            new_points.push(points[i + 1]);
+        }
+
+        points = new_points;
+    }
+
+    points
 }
 
 /// Deterministic hash for stable meander phase.
@@ -2322,29 +2449,71 @@ mod tests {
     }
 
     #[test]
-    fn test_meander_flat_terrain() {
-        let width = 20;
-        let height = 5;
-        // Flat terrain should produce meandering
-        let heightmap = vec![0.1; width * height];
-        let pv = vec![0.0; width * height]; // no relief
+    fn test_sine_meander_produces_displacement() {
+        // Straight horizontal path, Strahler order 3, decent drainage
+        let path: Vec<(f64, f64)> = (0..40).map(|x| (x as f64 * 0.5, 10.0)).collect();
+        let result = apply_sine_meander(&path, 500, 3, 42, 7);
 
-        let mut seg = RiverSegment {
-            id: 0,
-            path: (0..width).map(|x| (x as f64, 2.0)).collect(),
-            drainage_area: 200,
-            downstream: None,
-            upstream: vec![],
-            character: RiverCharacter::Permanent,
-            meander_offsets: vec![0.0; width],
-            strahler_order: 1,
-        };
+        // Some points should be displaced from the original y=10 line
+        let has_displacement = result.iter()
+            .any(|&(_x, y)| (y - 10.0).abs() > 0.01);
+        assert!(has_displacement, "Sine meander should displace points");
 
-        apply_meandering(&mut seg, &heightmap, &pv, width, height);
+        // Endpoints should be preserved
+        assert_eq!(result.first(), path.first());
+        assert_eq!(result.last(), path.last());
+    }
 
-        // Some offsets should be nonzero on flat terrain
-        let has_meander = seg.meander_offsets.iter().any(|&o| o.abs() > 0.01);
-        assert!(has_meander, "Flat terrain should produce meanders");
+    #[test]
+    fn test_sine_meander_skips_low_order() {
+        let path: Vec<(f64, f64)> = (0..20).map(|x| (x as f64, 5.0)).collect();
+        let result = apply_sine_meander(&path, 500, 1, 0, 0);
+        // Strahler order 1 should return path unchanged
+        assert_eq!(result, path);
+    }
+
+    #[test]
+    fn test_subdivide_to_spacing() {
+        let path = vec![(0.0, 0.0), (10.0, 0.0), (20.0, 0.0)];
+        let result = subdivide_to_spacing(&path, 2.0);
+        assert!(result.len() > path.len(), "Should add intermediate points");
+        assert_eq!(result.first(), Some(&(0.0, 0.0)));
+        assert_eq!(result.last(), Some(&(20.0, 0.0)));
+    }
+
+    #[test]
+    fn test_subdivide_no_op_for_short_segments() {
+        let path = vec![(0.0, 0.0), (0.5, 0.0)];
+        let result = subdivide_to_spacing(&path, 2.0);
+        assert_eq!(result, path, "Short segments need no subdivision");
+    }
+
+    #[test]
+    fn test_fractal_refine_adds_points() {
+        let path = vec![(0.0, 0.0), (10.0, 0.0), (20.0, 0.0)];
+        let result = fractal_refine(&path, 5, 0.7, 0.15, 3);
+        assert!(result.len() > path.len(), "Fractal refine should add midpoints");
+        // Endpoints preserved
+        assert_eq!(result.first(), Some(&(0.0, 0.0)));
+        assert_eq!(result.last(), Some(&(20.0, 0.0)));
+    }
+
+    #[test]
+    fn test_fractal_refine_deterministic() {
+        let path = vec![(0.0, 0.0), (10.0, 5.0), (20.0, 0.0)];
+        let a = fractal_refine(&path, 42, 0.7, 0.15, 4);
+        let b = fractal_refine(&path, 42, 0.7, 0.15, 4);
+        assert_eq!(a, b, "Fractal refine should be deterministic");
+    }
+
+    #[test]
+    fn test_world_space_hash_deterministic() {
+        let h1 = world_space_hash(1, 5.0, 10.0, 6.0, 10.0, 2);
+        let h2 = world_space_hash(1, 5.0, 10.0, 6.0, 10.0, 2);
+        assert_eq!(h1, h2);
+        // Different inputs should (almost certainly) differ
+        let h3 = world_space_hash(2, 5.0, 10.0, 6.0, 10.0, 2);
+        assert_ne!(h1, h3);
     }
 
     #[test]
