@@ -107,12 +107,12 @@ impl ErosionStrategy {
         // Lower continentalness (valleys/ocean) = more erosion
         // continentalness typically [-1, 1], where -1 = deep ocean, +1 = high mountains
         // We want valleys (low positive values near sea level) to erode most
-        let elevation_factor = if continentalness < -0.025 {
+        let elevation_factor = if continentalness < -0.01 {
             // Underwater - moderate erosion
             0.5
         } else if continentalness < 0.2 {
             // Low elevation - high erosion (water flows through)
-            0.8 + 0.2 * (1.0 - (continentalness + 0.025) / 0.225)
+            0.8 + 0.2 * (1.0 - (continentalness + 0.01) / 0.21)
         } else {
             // High elevation - lower erosion (harder rock, less water)
             0.3 + 0.5 * (1.0 - (continentalness - 0.2) / 0.8).max(0.0)

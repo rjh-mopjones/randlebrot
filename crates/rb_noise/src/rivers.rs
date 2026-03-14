@@ -21,7 +21,7 @@ use std::cmp::Ordering;
 
 /// Direction offsets for D8 neighbors (dx, dy).
 /// Order: N, NE, E, SE, S, SW, W, NW
-const D8_OFFSETS: [(i32, i32); 8] = [
+pub(crate) const D8_OFFSETS: [(i32, i32); 8] = [
     (0, -1),   // N
     (1, -1),   // NE
     (1, 0),    // E
@@ -33,7 +33,7 @@ const D8_OFFSETS: [(i32, i32); 8] = [
 ];
 
 /// Distance weights for diagonal vs cardinal directions.
-const D8_DISTANCES: [f64; 8] = [
+pub(crate) const D8_DISTANCES: [f64; 8] = [
     1.0,
     std::f64::consts::SQRT_2,
     1.0,
@@ -45,7 +45,7 @@ const D8_DISTANCES: [f64; 8] = [
 ];
 
 /// No flow direction (ocean or sink).
-const NO_FLOW: u8 = 255;
+pub(crate) const NO_FLOW: u8 = 255;
 
 // ─── River Character ─────────────────────────────────────────────────────────
 
@@ -83,7 +83,7 @@ impl RiverCharacter {
     /// Width multiplier for this character type.
     pub fn width_multiplier(&self) -> f64 {
         match self {
-            RiverCharacter::DryWadi => 1.2,
+            RiverCharacter::DryWadi => 0.0,
             RiverCharacter::SeasonalFlow => 0.6,
             RiverCharacter::Permanent => 1.0,
             RiverCharacter::Frozen => 0.9,
@@ -379,7 +379,9 @@ impl RiverNetwork {
             .unwrap_or(1);
 
         for seg in &self.segments {
-            if seg.character == RiverCharacter::BuriedIce {
+            if seg.character == RiverCharacter::BuriedIce
+                || seg.character == RiverCharacter::DryWadi
+            {
                 continue;
             }
 
@@ -522,7 +524,9 @@ pub fn rasterize_from_network(
     let pixels_per_world_unit = output_size as f64 / world_size;
 
     for constraint in &constraints {
-        if constraint.character == RiverCharacter::BuriedIce {
+        if constraint.character == RiverCharacter::BuriedIce
+            || constraint.character == RiverCharacter::DryWadi
+        {
             continue;
         }
 
@@ -619,7 +623,7 @@ impl Ord for FloodCell {
 /// O(n log n), guaranteed convergence in a single pass.
 /// Naturally assigns monotonically increasing elevations through filled areas,
 /// giving D8 flow clear drainage direction through flats.
-fn fill_depressions(elevation: &[f64], width: usize, height: usize, sea_level: f64) -> Vec<f64> {
+pub(crate) fn fill_depressions(elevation: &[f64], width: usize, height: usize, sea_level: f64) -> Vec<f64> {
     let total = width * height;
     let epsilon = 1e-4;
     let mut filled = elevation.to_vec();
@@ -720,7 +724,7 @@ fn condition_heightmap_for_drainage(
 }
 
 /// Simple separable box blur for a 2D grid.
-fn box_blur(data: &[f64], width: usize, height: usize, radius: usize) -> Vec<f64> {
+pub(crate) fn box_blur(data: &[f64], width: usize, height: usize, radius: usize) -> Vec<f64> {
     let mut temp = data.to_vec();
     let mut output = data.to_vec();
     let diameter = radius * 2 + 1;
@@ -922,7 +926,7 @@ fn compute_geology_aware_flow(
 
 /// Compute flow accumulation using topological sort.
 /// Each cell's accumulation = 1 + sum of all upstream cells.
-fn compute_flow_accumulation(
+pub(crate) fn compute_flow_accumulation(
     flow_dir: &[u8],
     elevation: &[f64],
     width: usize,
@@ -1849,7 +1853,7 @@ pub struct RiverGenerator {
 impl Default for RiverGenerator {
     fn default() -> Self {
         Self {
-            sea_level: -0.025,
+            sea_level: -0.01,
             min_accumulation: 100,
         }
     }

@@ -8,15 +8,15 @@ use rb_core::TileType;
 /// - humidity: [0, 1] where 1.0 = saturated
 /// - continentalness: distance from coast (negative = ocean, positive = inland)
 pub fn derive_temperature(light_level: f64, elevation: f64, humidity: f64, continentalness: f64) -> f64 {
-    // Map light [0,1] to temp [-80, +150]
-    let base_temp = light_level * 230.0 - 80.0;
+    // Map light [0,1] to temp [-80, +120]
+    let base_temp = light_level * 200.0 - 80.0;
     // Lapse rate: mountains are colder (only for positive elevation)
     let lapse_rate = elevation.max(0.0) * 60.0;
     // Moisture moderates extremes slightly
     let humidity_buffer = humidity * 5.0;
     let raw = base_temp - lapse_rate + humidity_buffer;
     // Coastal moderation: ocean proximity pulls temperature toward moderate
-    let inland_factor = ((continentalness + 0.025).max(0.0) * 5.0).clamp(0.0, 1.0);
+    let inland_factor = ((continentalness + 0.01).max(0.0) * 5.0).clamp(0.0, 1.0);
     let moderate_temp = 15.0;
     raw + (moderate_temp - raw) * (1.0 - inland_factor) * 0.3
 }
@@ -25,11 +25,9 @@ pub fn derive_temperature(light_level: f64, elevation: f64, humidity: f64, conti
 ///
 /// Combines continentalness (reduced to 80% for base), broad tectonic uplift,
 /// and peaks/valleys relief with coastal tapering.
-pub fn derive_heightmap(continentalness: f64, tectonic: f64, peaks_valleys: f64) -> f64 {
-    let stress = 1.0 - tectonic;
+pub fn derive_heightmap(continentalness: f64, _tectonic: f64, peaks_valleys: f64) -> f64 {
     let continental_base = continentalness * 0.95;
-    let broad_uplift = stress.powf(2.0) * 0.08;
-    let relief = peaks_valleys * 0.35;
+    let relief = peaks_valleys * 0.85;
     let coastal_taper = if continentalness < -0.05 {
         0.3
     } else if continentalness < 0.1 {
@@ -37,7 +35,7 @@ pub fn derive_heightmap(continentalness: f64, tectonic: f64, peaks_valleys: f64)
     } else {
         1.0
     };
-    (continental_base + broad_uplift + relief * coastal_taper).clamp(-1.0, 1.0)
+    (continental_base + relief * coastal_taper).clamp(-1.0, 1.0)
 }
 
 /// Erosion derived from heightmap, rock hardness, and humidity.
@@ -53,7 +51,7 @@ pub fn derive_erosion(heightmap: f64, rock_hardness: f64, humidity: f64) -> f64 
 
 /// Peaks amplified by tectonic stress, sustained by hard rock.
 ///
-/// Plate interiors get only 5% amplitude (subtle rolling terrain),
+/// Plate interiors get 25% amplitude (visible rolling terrain),
 /// boundaries get full amplitude for dramatic mountain ranges.
 ///
 /// - base_pv: raw peaks/valleys noise [-1, 1]
@@ -61,9 +59,10 @@ pub fn derive_erosion(heightmap: f64, rock_hardness: f64, humidity: f64) -> f64 
 /// - rock_hardness: [0, 1] where 1.0 = very hard
 pub fn derive_peaks_valleys(base_pv: f64, tectonic: f64, rock_hardness: f64) -> f64 {
     let stress = 1.0 - tectonic;
-    let stress_envelope = stress.powf(0.6);
-    let amplitude = 0.05 + stress_envelope * 0.95;
-    let hardness_factor = 0.6 + rock_hardness * 0.4;
+    // Cubic envelope: only cells very close to boundaries get significant amplitude
+    let stress_envelope = stress * stress * stress;
+    let amplitude = 0.02 + stress_envelope * 0.98;
+    let hardness_factor = 0.7 + rock_hardness * 0.3;
     (base_pv * amplitude * hardness_factor).clamp(-1.0, 1.0)
 }
 
@@ -108,15 +107,34 @@ pub fn derive_snowpack(precipitation_type: f64, temperature: f64, heightmap: f64
     // Altitude snow: peaks above threshold accumulate snow, but NOT in hot zones
     // No altitude snow if temperature > 30°C (too warm for snow to persist)
     // Snow line varies with light level (higher near sub-stellar, lower in twilight)
+    // Dark side has very low snow line (permanent ice at any elevation) but less moisture
     let temp_gate = ((30.0 - temperature) / 20.0).clamp(0.0, 1.0); // 1.0 below 10°C, 0.0 above 30°C
-    let snow_altitude = if light_level < 0.2 { 0.0 }
-        else if light_level < 0.5 { 0.02 + (light_level - 0.2) * 0.15 }
-        else { 0.065 + (light_level - 0.5) * 0.2 };
+    let snow_altitude = if light_level < 0.5 {
+        light_level * 0.1 // low snow line on dark side, rising toward terminator
+    } else {
+        0.05 + (light_level - 0.5) * 0.2 // higher snow line on sun side
+    };
+    let moisture_availability = (light_level * 3.0).clamp(0.2, 1.0);
     let altitude_snow = if heightmap > snow_altitude {
-        ((heightmap - snow_altitude) * 12.0).min(1.0) * temp_gate
+        ((heightmap - snow_altitude) * 12.0).min(1.0) * temp_gate * moisture_availability
     } else { 0.0 };
 
     temperature_snow.max(altitude_snow).clamp(0.0, 1.0)
+}
+
+/// Topographic Wetness Index — physically grounded measure of how wet a location is.
+///
+/// TWI = ln(A / tan(slope)), normalized to [0, 1].
+/// High values = flat areas with large drainage catchments (valleys, floodplains).
+/// Low values = steep slopes with small catchments (ridges, mountain sides).
+///
+/// - drainage_area: upstream contributing area (number of cells)
+/// - slope: local terrain gradient (radians or unitless)
+/// Output: [0, 1] where 1.0 = saturated ground, 0.0 = bone dry.
+pub fn derive_twi(drainage_area: f64, slope: f64) -> f64 {
+    let safe_slope = slope.max(0.001);
+    let safe_area = drainage_area.max(1.0);
+    (safe_area / safe_slope.tan()).ln().clamp(0.0, 15.0) / 15.0
 }
 
 /// Water table depth — combines multiple moisture sources into a single groundwater metric.
@@ -131,7 +149,7 @@ pub fn derive_water_table(
     let river_boost = (river_flow * 3.0).min(1.0) * 0.3;
     let elevation_boost = (1.0 - heightmap.max(0.0) * 2.0).max(0.0) * 0.2;
     let precip_boost = (-precipitation_type).max(0.0) * 0.1;
-    let sea_level = -0.025_f64;
+    let sea_level = -0.01_f64;
     let coastal_boost = (1.0 - (continentalness - sea_level).max(0.0) * 10.0).max(0.0) * 0.1;
     (humidity_base + river_boost + elevation_boost + precip_boost + coastal_boost).clamp(0.0, 1.0)
 }
@@ -272,14 +290,16 @@ mod tests {
         let at_boundary = derive_peaks_valleys(0.5, 0.0, 0.5);
         let at_center = derive_peaks_valleys(0.5, 1.0, 0.5);
         assert!(at_boundary > at_center, "Boundary peaks ({}) should be taller than center ({})", at_boundary, at_center);
+        assert!(at_boundary > at_center * 5.0, "Boundary/center ratio ({:.1}x) should be > 5x", at_boundary / at_center);
     }
 
     #[test]
-    fn heightmap_includes_tectonic_uplift() {
-        // At tectonic boundary (tectonic=0) vs center (tectonic=1)
-        let at_boundary = derive_heightmap(0.1, 0.0, 0.0);
-        let at_center = derive_heightmap(0.1, 1.0, 0.0);
-        assert!(at_boundary > at_center, "Boundary ({}) should have more uplift than center ({})", at_boundary, at_center);
+    fn heightmap_ignores_tectonic() {
+        // Tectonic no longer affects heightmap (uplift removed to eliminate Voronoi lines)
+        let at_boundary = derive_heightmap(0.1, 0.0, 0.3);
+        let at_center = derive_heightmap(0.1, 1.0, 0.3);
+        assert!((at_boundary - at_center).abs() < f64::EPSILON,
+            "Heightmap should be identical regardless of tectonic ({} vs {})", at_boundary, at_center);
     }
 
     #[test]

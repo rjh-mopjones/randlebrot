@@ -387,18 +387,18 @@ impl TectonicPlatesStrategy {
 
         // Stress field computation
         let (intensity, falloff) = match boundary_type {
-            BoundaryType::Convergent => (1.0, 12.0),
-            BoundaryType::Subduction => (0.8, 10.0),
-            BoundaryType::OceanicSubduction => (0.7, 9.0),
-            BoundaryType::Divergent => (0.4, 15.0),
-            BoundaryType::Transform => (0.25, 18.0),
-            BoundaryType::None => (0.0, 12.0),
+            BoundaryType::Convergent => (1.0, 5.0),
+            BoundaryType::Subduction => (0.8, 4.5),
+            BoundaryType::OceanicSubduction => (0.7, 4.0),
+            BoundaryType::Divergent => (0.4, 7.0),
+            BoundaryType::Transform => (0.25, 9.0),
+            BoundaryType::None => (0.0, 5.0),
         };
 
         let boundary_stress = intensity * (-perturbed_dist.abs() * falloff).exp();
 
         // Interior texture — plate cores have low-amplitude stress variation
-        let interior = self.interior_noise.get([sx * 1.5, sy * 1.5]).abs() * 0.15;
+        let interior = self.interior_noise.get([sx * 1.5, sy * 1.5]).abs() * 0.25;
         let plate_age = if !self.registry.plates.is_empty() {
             self.registry.plates[plate_a_idx].age
         } else {
@@ -411,82 +411,8 @@ impl TectonicPlatesStrategy {
         // backward compat: boundary_distance = 1 - stress
         let boundary_distance = 1.0 - stress;
 
-        // === Volcanism: 3 independent sources ===
-
-        // 1. Subduction arc volcanism
-        let arc_volcanism = if matches!(boundary_type, BoundaryType::Subduction | BoundaryType::OceanicSubduction) {
-            // Signed distance toward the overriding (denser) plate
-            let pa = &self.registry.plates[plate_a_idx];
-            let pb = &self.registry.plates[plate_b_idx];
-
-            // Direction from boundary midpoint toward the continental/denser plate
-            let overriding_center = if pa.density > pb.density {
-                nearest_center
-            } else {
-                second_center
-            };
-
-            // Distance from point to nearest boundary (approximated by midpoint of F1/F2)
-            let mid_x = (nearest_center.0 + second_center.0) / 2.0;
-            let mid_y = (nearest_center.1 + second_center.1) / 2.0;
-
-            // Direction toward overriding plate from boundary
-            let to_over_x = overriding_center.0 - mid_x;
-            let to_over_y = overriding_center.1 - mid_y;
-            let to_over_len = (to_over_x * to_over_x + to_over_y * to_over_y).sqrt().max(0.001);
-
-            // Project point's offset from boundary midpoint onto overriding direction
-            let point_from_mid_x = sx - mid_x;
-            let point_from_mid_y = sy - mid_y;
-            // Signed distance in cell units toward overriding plate
-            let signed_dist_cell = (point_from_mid_x * to_over_x + point_from_mid_y * to_over_y) / to_over_len;
-
-            // Convert to world units (approximate)
-            let signed_dist = signed_dist_cell / self.plate_scale;
-
-            let arc_min = 80.0;
-            let arc_max = 200.0;
-            let arc_peak = 130.0;
-
-            if signed_dist >= arc_min && signed_dist <= arc_max {
-                let t = 1.0 - ((signed_dist - arc_peak) / 60.0).powi(2);
-                let base = t.max(0.0) * 0.8;
-
-                // Break into discrete peaks
-                let mask = self.arc_mask_noise.get([x * 0.025, y * 0.025]);
-                let mask = (mask * 2.5).max(0.0).min(1.0);
-                base * mask
-            } else {
-                0.0
-            }
-        } else {
-            0.0
-        };
-
-        // 2. Rift volcanism (divergent boundaries only)
-        let rift_volcanism = if boundary_type == BoundaryType::Divergent {
-            let base = 0.4 * (-perturbed_dist.abs() * 30.0).exp(); // very tight falloff
-
-            let fissure = self.fissure_noise.get([x * 0.04, y * 0.04]);
-            let fissure_mask = (fissure - 0.3).max(0.0) * 3.0;
-            base * fissure_mask
-        } else {
-            0.0
-        };
-
-        // 3. Hotspot volcanism (independent of plate geometry)
-        let hotspot_volcanism: f64 = self.registry.hotspots.iter().map(|h| {
-            let dx = x - h.pos.0;
-            let dy = y - h.pos.1;
-            let d2 = dx * dx + dy * dy;
-            let base = h.intensity * (-d2 / (h.radius * h.radius)).exp();
-
-            let texture = self.interior_noise.get([x * 0.03 + h.pos.0, y * 0.03 + h.pos.1]) * 0.3;
-            (base + base * texture).clamp(0.0, 1.0)
-        }).sum::<f64>().min(1.0);
-
-        let volcanism = (arc_volcanism + rift_volcanism * 0.5 + hotspot_volcanism * 0.5)
-            .clamp(0.0, 1.0);
+        // Volcanism disabled — was creating distracting dark patches in biome map
+        let volcanism = 0.0;
 
         TectonicSample {
             plate_id,
@@ -603,30 +529,15 @@ mod tests {
     }
 
     #[test]
-    fn volcanism_is_not_always_at_boundaries() {
+    fn volcanism_is_always_zero() {
         let strategy = TectonicPlatesStrategy::new(42);
 
-        // Sample many points. With the new system, volcanism should sometimes
-        // occur away from boundaries (hotspots, offset arcs)
-        let mut volcanism_away_from_boundary = false;
-
-        for i in 0..2000 {
+        for i in 0..200 {
             let x = (i as f64 * 7.3) % 1000.0;
             let y = (i as f64 * 11.7) % 500.0;
             let sample = strategy.generate_full(x, y);
-
-            // High boundary_distance means far from boundary
-            if sample.volcanism > 0.1 && sample.boundary_distance > 0.5 {
-                volcanism_away_from_boundary = true;
-                break;
-            }
+            assert_eq!(sample.volcanism, 0.0, "Volcanism should always be 0.0");
         }
-
-        // This is expected due to hotspots
-        assert!(
-            volcanism_away_from_boundary,
-            "Should find volcanism away from plate boundaries (hotspots)"
-        );
     }
 
     #[test]

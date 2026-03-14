@@ -128,12 +128,12 @@ impl HumidityStrategy {
         };
 
         // Use continentalness as proxy for water distance
-        let water_factor = if continentalness < -0.025 {
+        let water_factor = if continentalness < -0.01 {
             // In water - high humidity (but reduced on sun side)
             1.0
         } else if continentalness < 0.05 {
             // Coastal
-            0.85 - (continentalness + 0.025) * 4.0
+            0.85 - (continentalness + 0.01) * 4.0
         } else if continentalness < 0.15 {
             // Near coast
             0.55 - (continentalness - 0.05) * 3.0
@@ -178,10 +178,10 @@ impl HumidityStrategy {
         };
 
         // Use continentalness as proxy for water distance
-        let water_factor = if continentalness < -0.025 {
+        let water_factor = if continentalness < -0.01 {
             1.0
         } else if continentalness < 0.05 {
-            0.85 - (continentalness + 0.025) * 4.0
+            0.85 - (continentalness + 0.01) * 4.0
         } else if continentalness < 0.15 {
             0.55 - (continentalness - 0.05) * 3.0
         } else {
@@ -212,7 +212,7 @@ impl HumidityStrategy {
 
         // Terminator ring: Gaussian peak at light_level ≈ 0.2 with width 0.15
         let terminator_center = 0.2;
-        let terminator_width = 0.25;
+        let terminator_width = 0.15;
         let terminator_peak = (-(light_level - terminator_center).powi(2)
             / (2.0 * terminator_width * terminator_width))
             .exp();
@@ -226,18 +226,18 @@ impl HumidityStrategy {
         };
 
         // Night-side cold trap: reduced moisture capacity for light_level < 0.05
-        let night_trap = if light_level < 0.05 {
-            let t = light_level / 0.05; // 0 at 0, 1 at 0.05
-            0.3 + t * 0.7 // 0.3 minimum (up to 0.7 reduction at edge)
+        let night_trap = if light_level < 0.15 {
+            let t = light_level / 0.15; // 0 at 0, 1 at 0.15
+            0.15 + t * 0.85 // 0.15 minimum (up to 0.85 reduction at edge)
         } else {
             1.0
         };
 
         // Continental moisture decay: ocean=1.0, coastal→0.5, inland→0.1
-        let moisture_source = if continentalness < -0.025 {
+        let moisture_source = if continentalness < -0.01 {
             1.0 // ocean
         } else if continentalness < 0.05 {
-            let t = (continentalness + 0.025) / 0.075; // 0 at -0.025, 1 at 0.05
+            let t = (continentalness + 0.01) / 0.06; // 0 at -0.01, 1 at 0.05
             1.0 - t * 0.5 // 1.0 to 0.5
         } else if continentalness < 0.2 {
             let t = (continentalness - 0.05) / 0.15; // 0 at 0.05, 1 at 0.2
@@ -269,12 +269,12 @@ impl HumidityStrategy {
         // Use continentalness as proxy for water distance
         // Negative continentalness = water (high humidity)
         // Positive continentalness = land (decreasing humidity inland)
-        let water_factor = if continentalness < -0.025 {
+        let water_factor = if continentalness < -0.01 {
             // In water - very high humidity
             1.0
         } else if continentalness < 0.05 {
             // Coastal - high humidity, gradual decrease
-            0.85 - (continentalness + 0.025) * 4.0
+            0.85 - (continentalness + 0.01) * 4.0
         } else if continentalness < 0.15 {
             // Near coast - moderate humidity
             0.55 - (continentalness - 0.05) * 3.0

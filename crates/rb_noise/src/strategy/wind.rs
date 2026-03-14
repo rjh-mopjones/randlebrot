@@ -75,6 +75,7 @@ pub fn advect_moisture(
     wind: &WindField,
     heightmap: &[f64],
     continentalness: &[f64],
+    light_level: &[f64],
     width: usize,
     height: usize,
     sea_level: f64,
@@ -91,9 +92,11 @@ pub fn advect_moisture(
             for x in 1..(width - 1) {
                 let idx = y * width + x;
 
-                // Ocean pixels maintain high humidity (moisture source)
+                // Ocean pixels maintain humidity scaled by light level
+                // Dark ocean has less evaporation (0.3), bright ocean up to 0.85
                 if continentalness[idx] < sea_level {
-                    humidity[idx] = humidity[idx].max(0.85);
+                    let ocean_floor = 0.3 + light_level[idx].min(0.4) * 1.375;
+                    humidity[idx] = humidity[idx].max(ocean_floor);
                     continue;
                 }
 
@@ -172,7 +175,7 @@ mod tests {
 
         let wind = WindField::generate(&light, &heightmap, width, height, (0.5, 1.0));
         let initial_mid = humidity[8 * width + 16];
-        advect_moisture(&mut humidity, &wind, &heightmap, &cont, width, height, -0.025, 3);
+        advect_moisture(&mut humidity, &wind, &heightmap, &cont, &light, width, height, -0.025, 3);
         // After advection, some moisture should have moved
         // (exact direction depends on wind, but values should change)
         let changed = humidity.iter().enumerate().any(|(i, &h)| (h - 0.3).abs() > 0.01 && cont[i] > -0.025);

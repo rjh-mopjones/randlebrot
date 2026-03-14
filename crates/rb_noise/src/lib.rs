@@ -4,6 +4,7 @@ pub mod biome_map;
 pub mod biome_splines;
 pub mod chunk_hierarchy;
 pub mod derived;
+pub mod erosion_sim;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod progress;
@@ -16,6 +17,7 @@ pub mod tidally_locked;
 pub mod visualization;
 
 pub use biome_map::{BiomeMap, NoiseBackend, SEA_LEVEL};
+pub use erosion_sim::{ErosionParams, ErosionResult, simulate_erosion};
 pub use biome_splines::BiomeSplines;
 pub use chunk_hierarchy::{
     CacheConfig, CacheStats, ChunkHierarchy, MacroChunk, MesoChunk, MicroChunk,
@@ -37,7 +39,7 @@ pub use terrain_render::NormalizationHints;
 pub use visualization::NoiseLayer;
 pub use derived::{
     derive_aridity, derive_erosion, derive_heightmap, derive_peaks_valleys,
-    derive_precipitation_type, derive_resource_richness, derive_water_table,
+    derive_precipitation_type, derive_resource_richness, derive_twi, derive_water_table,
     derive_snowpack, derive_soil_type, derive_temperature, derive_vegetation_density,
 };
 

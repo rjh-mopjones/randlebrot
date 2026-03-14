@@ -317,16 +317,16 @@ pub fn volcanism_to_rgba(volcanism: f64) -> [u8; 4] {
 /// Convert heightmap to RGBA.
 /// Deep blue (ocean) -> Green -> Brown -> White (alpine).
 pub fn heightmap_to_rgba(height: f64) -> [u8; 4] {
-    if height < -0.025 {
+    if height < -0.01 {
         // Ocean: deep blue to light blue
-        let t = ((height + 0.5) / 0.475).clamp(0.0, 1.0);
+        let t = ((height + 0.5) / 0.49).clamp(0.0, 1.0);
         let r = (t * 50.0) as u8;
         let g = (50.0 + t * 100.0) as u8;
         let b = (100.0 + t * 155.0) as u8;
         [r, g, b, 255]
     } else if height < 0.1 {
         // Low land: green
-        let t = ((height + 0.025) / 0.125).clamp(0.0, 1.0);
+        let t = ((height + 0.01) / 0.11).clamp(0.0, 1.0);
         let r = (50.0 + t * 80.0) as u8;
         let g = (150.0 + t * 50.0) as u8;
         let b = (50.0 + t * 20.0) as u8;

@@ -216,14 +216,14 @@ impl BiomeSplines {
 
         // Peak contribution only on land
         let peak_height = if is_land {
-            pv.max(0.0) * 0.15 * erosion_damp
+            pv.max(0.0) * 0.25 * erosion_damp
         } else {
             0.0
         };
 
         // Valleys carve into terrain
         let valley_depth = if is_land {
-            pv.min(0.0).abs() * 0.08
+            pv.min(0.0).abs() * 0.12
         } else {
             0.0
         };

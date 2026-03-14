@@ -515,7 +515,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let latitude_factor = abs(wy / params.world_height - 0.5) * 2.0;
 
     // Ocean proximity
-    let sea_level = -0.025;
+    let sea_level = -0.01;
     let ocean_proximity = select(0.0, clamp(1.0 - (cont - sea_level) * 5.0, 0.0, 1.0), cont >= sea_level);
 
     // Noise component (scale 0.015 matching CPU)

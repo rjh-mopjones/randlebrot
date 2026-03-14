@@ -11,7 +11,24 @@ cargo test                                       # workspace tests
 cargo run -p rb_noise --example noise_preview    # noise debug visualization
 cargo run -p rb_tilemap --example tile_render    # tile rendering test
 cargo run -p rb_editor --example editor_shell    # editor UI test
+cargo run --release -p rb_noise --example save_debug_layers  # regenerate debug_layers/ PNGs
 ```
+
+### Debug Layer Workflow
+
+After modifying noise, erosion, or biome code, regenerate and inspect debug layers:
+
+```bash
+cargo run --release -p rb_noise --example save_debug_layers
+# Inspect debug_layers/biome.png, derived/Heightmap.png, derived/River Flow.png, etc.
+```
+
+### Terrain Quality Constraints
+
+- Mountains concentrate at tectonic plate boundaries via cubic stress envelope — plate interiors are nearly flat
+- Stream power erosion sim (`erosion_sim.rs`) carves dendritic valleys through uplift vs erosion competition
+- Meso tiles sample the macro eroded heightmap and add fine-grained ridge/valley detail in mountain zones
+- Rivers form coherent drainage networks from mountains to coast
 
 ## Project Structure
 
