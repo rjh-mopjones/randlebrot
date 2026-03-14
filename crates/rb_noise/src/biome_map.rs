@@ -97,9 +97,78 @@ pub struct BiomeMap {
     pub world_height: f64,
 }
 
+/// Apply the polar ice cap override with jagged edges.
+///
+/// The deep core (light < 0.05) is solid White. The outer margin uses
+/// peaks_valleys + rock_hardness noise to perturb the 0.12 light threshold,
+/// creating irregular ice sheet coastlines with fjords and peninsulas.
+fn apply_polar_ice_cap(
+    biomes: &mut [TileType],
+    light_level: &[f64],
+    continentalness: &[f64],
+    peaks_valleys: &[f64],
+    rock_hardness: &[f64],
+    temperature: &[f64],
+    sea_level: f64,
+) {
+    for idx in 0..biomes.len() {
+        let light = light_level[idx];
+        let cont = continentalness[idx];
+        let rock = rock_hardness[idx];
+        let pv = peaks_valleys[idx];
+
+        if light < 0.05 {
+            // Deep polar core: always solid White
+            biomes[idx] = TileType::White;
+            continue;
+        }
+
+        // Phase 1: Perturbed light-level threshold for polar cap edge
+        // peaks_valleys: high-frequency jaggedness (fjords/peninsulas)
+        // rock_hardness: low-frequency lobes
+        // continentalness: ice extends further over land than water
+        let land_bonus = if cont >= sea_level { 0.02 } else { -0.02 };
+        let light_perturb = pv * 0.06 + (rock - 0.5) * 0.06 + land_bonus;
+        let light_threshold = 0.12 + light_perturb;
+        if light < light_threshold {
+            if cont < sea_level {
+                biomes[idx] = TileType::White;
+            } else {
+                biomes[idx] = TileType::IceSheet;
+            }
+            continue;
+        }
+
+        // Phase 2: Jagged frozen ocean edge
+        // The -15°C isotherm in ocean_biome() creates a smooth ice front because
+        // peaks_valleys has low amplitude over deep ocean. Use rock_hardness and
+        // continentalness as noise sources to perturb the frozen ocean boundary.
+        if cont < sea_level {
+            let temp = temperature[idx];
+            // Only perturb near the freezing boundary (-25°C to 5°C)
+            if temp > -25.0 && temp < 5.0 {
+                // rock_hardness has meaningful variation everywhere (independent fBm)
+                // continentalness provides depth-based variation (shallow water freezes first)
+                let depth = (sea_level - cont).clamp(0.0, 0.5);
+                let depth_factor = 1.0 - depth * 3.0; // shallow → freezes easily (+), deep → resists (-)
+                let rock_perturb = (rock - 0.5) * 15.0; // ±7.5°C
+                let cont_perturb = depth_factor * 5.0;   // shallow: +5°C (colder), deep: -5°C (warmer)
+                let pv_perturb = pv * 5.0;               // ±5°C (small over ocean but still helps)
+                let perturbed_threshold = -15.0 + rock_perturb + cont_perturb + pv_perturb;
+                if temp < perturbed_threshold {
+                    biomes[idx] = TileType::White;
+                } else if biomes[idx] == TileType::White {
+                    // Perturbation opened water where it was frozen — reclassify
+                    biomes[idx] = TileType::Sea;
+                }
+            }
+        }
+    }
+}
+
 /// Compute slope grid from heightmap using 3x3 finite differences.
 /// Returns gradient magnitude per cell.
-fn compute_slope_grid(heightmap: &[f64], width: usize, height: usize) -> Vec<f64> {
+pub(crate) fn compute_slope_grid(heightmap: &[f64], width: usize, height: usize) -> Vec<f64> {
     let total = width * height;
     let mut slope = vec![0.0f64; total];
 
@@ -405,19 +474,8 @@ impl BiomeMap {
             }
         }
 
-        // Polar ice cap override: unify fragmented arctic biomes
-        for idx in 0..total_pixels {
-            let light = light_level[idx];
-            if light < 0.05 {
-                biomes[idx] = TileType::White;
-            } else if light < 0.12 {
-                if continentalness[idx] < SEA_LEVEL {
-                    biomes[idx] = TileType::White;
-                } else {
-                    biomes[idx] = TileType::IceSheet;
-                }
-            }
-        }
+        // Polar ice cap override: jagged ice edge using noise perturbation
+        apply_polar_ice_cap(&mut biomes, &light_level, &continentalness, &peaks_valleys, &rock_hardness, &temperature, SEA_LEVEL);
 
         let vegetation_density: Vec<f64> = biomes.iter().zip(water_table.iter())
             .map(|(&b, &wt)| derived::derive_vegetation_density(b, wt)).collect();
@@ -627,19 +685,8 @@ impl BiomeMap {
             }
         }
 
-        // Polar ice cap override: unify fragmented arctic biomes
-        for idx in 0..total_pixels {
-            let light = gpu_light_level[idx];
-            if light < 0.05 {
-                biomes[idx] = TileType::White;
-            } else if light < 0.12 {
-                if continentalness[idx] < SEA_LEVEL {
-                    biomes[idx] = TileType::White;
-                } else {
-                    biomes[idx] = TileType::IceSheet;
-                }
-            }
-        }
+        // Polar ice cap override: jagged ice edge using noise perturbation
+        apply_polar_ice_cap(&mut biomes, &gpu_light_level, &continentalness, &peaks_valleys, &gpu_rock_hardness, &temperature, SEA_LEVEL);
 
         let gpu_slope_grid = compute_slope_grid(&heightmap_vec, width, height);
         let water_table: Vec<f64> = (0..total_pixels).map(|idx| {
@@ -1123,19 +1170,8 @@ impl BiomeMap {
             }
         }
 
-        // Polar ice cap override: unify fragmented arctic biomes
-        for idx in 0..total_pixels {
-            let light = light_level[idx];
-            if light < 0.05 {
-                biomes[idx] = TileType::White;
-            } else if light < 0.12 {
-                if continentalness[idx] < SEA_LEVEL {
-                    biomes[idx] = TileType::White;
-                } else {
-                    biomes[idx] = TileType::IceSheet;
-                }
-            }
-        }
+        // Polar ice cap override: jagged ice edge using noise perturbation
+        apply_polar_ice_cap(&mut biomes, &light_level, &continentalness, &peaks_valleys, &rock_hardness, &temperature, SEA_LEVEL);
 
         let vegetation_density: Vec<f64> = biomes.iter().zip(water_table.iter())
             .map(|(&b, &wt)| derived::derive_vegetation_density(b, wt)).collect();
@@ -1441,19 +1477,8 @@ impl BiomeMap {
             }
         }
 
-        // Polar ice cap override: unify fragmented arctic biomes
-        for idx in 0..total_pixels {
-            let light = light_level[idx];
-            if light < 0.05 {
-                biomes[idx] = TileType::White;
-            } else if light < 0.12 {
-                if continentalness[idx] < SEA_LEVEL {
-                    biomes[idx] = TileType::White;
-                } else {
-                    biomes[idx] = TileType::IceSheet;
-                }
-            }
-        }
+        // Polar ice cap override: jagged ice edge using noise perturbation
+        apply_polar_ice_cap(&mut biomes, &light_level, &continentalness, &peaks_valleys, &rock_hardness, &temperature, SEA_LEVEL);
 
         let vegetation_density: Vec<f64> = biomes.iter().zip(water_table.iter())
             .map(|(&b, &wt)| derived::derive_vegetation_density(b, wt)).collect();
@@ -1735,19 +1760,8 @@ impl BiomeMap {
             derived::derive_water_table(rivers[idx], gpu_humidity[idx], heightmap_vec[idx], precipitation_type[idx], continentalness[idx])
         }).collect();
 
-        // Polar ice cap override: unify fragmented arctic biomes
-        for idx in 0..total_pixels {
-            let light = gpu_light_level[idx];
-            if light < 0.05 {
-                biomes[idx] = TileType::White;
-            } else if light < 0.12 {
-                if continentalness[idx] < SEA_LEVEL {
-                    biomes[idx] = TileType::White;
-                } else {
-                    biomes[idx] = TileType::IceSheet;
-                }
-            }
-        }
+        // Polar ice cap override: jagged ice edge using noise perturbation
+        apply_polar_ice_cap(&mut biomes, &gpu_light_level, &continentalness, &peaks_valleys, &gpu_rock_hardness, &temperature, SEA_LEVEL);
 
         let vegetation_density: Vec<f64> = biomes.iter().zip(water_table.iter())
             .map(|(&b, &wt)| derived::derive_vegetation_density(b, wt)).collect();

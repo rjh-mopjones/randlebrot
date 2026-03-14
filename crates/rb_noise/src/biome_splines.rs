@@ -158,7 +158,15 @@ impl BiomeSplines {
         light_level: f64,
     ) -> TileType {
         // Step 1: Compute effective elevation with tectonic amplification
-        let elevation = self.compute_elevation(continentalness, peaks_valleys, erosion, tectonic);
+        let raw_elevation = self.compute_elevation(continentalness, peaks_valleys, erosion, tectonic);
+
+        // Step 1b: Irregular coastlines — perturb elevation near sea level.
+        // Hard rock resists erosion (headlands jut out), soft rock erodes (bays cut in).
+        // Fades to zero away from the coast so inland/deep-ocean biomes are unaffected.
+        let coast_perturb = (rock_hardness - 0.5) * 0.10 + peaks_valleys * 0.05;
+        let dist_to_coast = (raw_elevation - self.sea_level).abs();
+        let coast_fade = (1.0 - dist_to_coast * 10.0).clamp(0.0, 1.0);
+        let elevation = raw_elevation + coast_perturb * coast_fade;
 
         // Step 2: Check for ocean biomes first
         if elevation < self.sea_level {
@@ -192,8 +200,9 @@ impl BiomeSplines {
         }
 
         // Step 6: Check for special cases (volcanic, beach, coastal detail)
-        // Coastal zone
-        if above_sea < 0.02 {
+        // Coastal zone — width modulated by rock hardness and peaks for irregular coastlines
+        let coast_width = 0.01 + (1.0 - rock_hardness) * 0.02 + peaks_valleys.abs() * 0.005;
+        if above_sea < coast_width {
             return match climate {
                 ClimateClass::Frozen => TileType::Glacier,
                 ClimateClass::Cold => TileType::Snow,
@@ -209,8 +218,8 @@ impl BiomeSplines {
             };
         }
 
-        // Sea cliff: rugged terrain just above coastal zone
-        if above_sea >= 0.02 && above_sea < 0.05 && terrain == TerrainClass::Rugged {
+        // Sea cliff: rugged terrain just above modulated coastal zone
+        if above_sea >= coast_width && above_sea < coast_width + 0.03 && terrain == TerrainClass::Rugged {
             return TileType::SeaCliff;
         }
 
@@ -346,20 +355,26 @@ impl BiomeSplines {
         py: usize,
         light_level: f64,
     ) -> TileType {
-        // Perturb temperature using rock_hardness as a smooth noise source
-        // to break up climate band boundaries. Rock hardness is an independent
-        // fBm field that varies at a different scale than temperature.
-        // Don't perturb near the 45°C vegetation gate to preserve that hard stop.
-        let temp_perturb = (rock_hardness - 0.5) * 12.0; // ±6°C
-        let biome_temp = if temperature > 40.0 {
-            temperature // preserve 45°C gate zone
+        // Perturb temperature using two independent noise sources at different
+        // spatial frequencies to break up smooth climate band boundaries.
+        // Rock hardness is a low-frequency fBm; peaks_valleys adds high-frequency variation.
+        let rock_perturb = (rock_hardness - 0.5) * 20.0; // ±10°C
+        let pv_perturb = peaks_valleys * 8.0;              // ±8°C
+        let combined = rock_perturb * 0.7 + pv_perturb * 0.5; // ±15°C max
+
+        let biome_temp = if temperature > 45.0 {
+            temperature // above gate: no perturbation (preserves vegetation tests)
+        } else if temperature > 30.0 {
+            // Allow full cooling, fade out warming as we approach 45°C
+            let warming_fade = ((45.0 - temperature) / 15.0).clamp(0.0, 1.0);
+            let safe = if combined > 0.0 { combined * warming_fade } else { combined };
+            temperature + safe
         } else {
-            temperature + temp_perturb
+            temperature + combined
         };
 
-        // Perturb humidity using peaks_valleys as a smooth noise source
-        // to break up moisture class boundaries (forest→savanna, steppe→desert)
-        let humid_perturb = peaks_valleys * 0.08; // ±8% humidity shift
+        // Perturb humidity using two noise sources for complex boundary shapes
+        let humid_perturb = peaks_valleys * 0.12 + (rock_hardness - 0.5) * 0.08;
         let biome_humidity = (humidity + humid_perturb).clamp(0.0, 1.0);
 
         let base = self.evaluate_with_light(continentalness, biome_temp, tectonic, erosion, peaks_valleys, biome_humidity, aridity, rock_hardness, light_level);
@@ -468,7 +483,7 @@ impl BiomeSplines {
             Hot => match (moisture, elevation, terrain) {
                 (Humid | Saturated, Highland | Alpine, _) => TileType::CloudForest,
                 (Moderate, Highland | Alpine, _) => TileType::HighlandSavanna,
-                (_, Alpine, _) => TileType::Mountain,
+                (_, Alpine, _) => TileType::ScorchedRock,
                 (Arid, Highland, Rugged) => TileType::Badlands,
                 (Arid, _, Rugged) => if rock_hardness > 0.6 { TileType::ScorchedRock } else { TileType::Badlands },
                 (Arid, _, Flat) => if rock_hardness > 0.6 { TileType::Hamada } else { TileType::Erg },
@@ -535,8 +550,8 @@ mod tests {
     #[test]
     fn coastal_is_beach() {
         let s = splines();
-        // Low rock_hardness + low peaks = beach
-        let biome = s.evaluate(-0.01, 25.0, 0.5, 0.5, 0.0, 0.5, 0.3, 0.3);
+        // Soft rock pulls coast down (bay), so start higher to stay on land
+        let biome = s.evaluate(0.0, 25.0, 0.5, 0.5, 0.0, 0.5, 0.3, 0.3);
         assert_eq!(biome, TileType::Beach);
     }
 
@@ -838,8 +853,9 @@ mod tests {
     #[test]
     fn coastal_hard_rock_is_rocky_coast() {
         let s = splines();
-        // Coastal, temperate, hard rock
-        let biome = s.evaluate(-0.01, 25.0, 0.5, 0.5, 0.0, 0.5, 0.3, 0.8);
+        // Hard rock pushes coast up (headland) — start below sea level,
+        // the perturbation creates a rocky headland above the waterline
+        let biome = s.evaluate(-0.045, 25.0, 0.5, 0.5, 0.0, 0.5, 0.3, 0.8);
         assert_eq!(biome, TileType::RockyCoast);
     }
 
