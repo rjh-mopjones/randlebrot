@@ -15,6 +15,7 @@ pub mod strategy;
 pub mod terrain_render;
 pub mod tidally_locked;
 pub mod visualization;
+pub mod wrap;
 
 pub use biome_map::{BiomeMap, NoiseBackend, SEA_LEVEL};
 pub use erosion_sim::{ErosionParams, ErosionResult, simulate_erosion};

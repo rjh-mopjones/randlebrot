@@ -213,7 +213,7 @@ impl BiomeSplines {
         }
 
         // Step 7: Land biome selection
-        self.land_biome(climate, moisture, elev_class, terrain)
+        self.land_biome(climate, moisture, elev_class, terrain, rock_hardness)
     }
 
     /// Compute effective elevation with tectonic mountain chain amplification.
@@ -344,7 +344,18 @@ impl BiomeSplines {
         py: usize,
         light_level: f64,
     ) -> TileType {
-        let base = self.evaluate_with_light(continentalness, temperature, tectonic, erosion, peaks_valleys, humidity, aridity, rock_hardness, light_level);
+        // Perturb temperature using rock_hardness as a smooth noise source
+        // to break up climate band boundaries. Rock hardness is an independent
+        // fBm field that varies at a different scale than temperature.
+        // Don't perturb near the 45°C vegetation gate to preserve that hard stop.
+        let temp_perturb = (rock_hardness - 0.5) * 12.0; // ±6°C
+        let biome_temp = if temperature > 40.0 {
+            temperature // preserve 45°C gate zone
+        } else {
+            temperature + temp_perturb
+        };
+
+        let base = self.evaluate_with_light(continentalness, biome_temp, tectonic, erosion, peaks_valleys, humidity, aridity, rock_hardness, light_level);
 
         // Position hash for deterministic spatial noise
         let hash = (((px.wrapping_mul(374761393)) ^ (py.wrapping_mul(668265263))) & 0xFFFF) as f64 / 65535.0;
@@ -352,7 +363,7 @@ impl BiomeSplines {
         // Try small perturbations to detect boundary proximity
         let alt = self.evaluate(
             continentalness + (hash - 0.5) * 0.02,
-            temperature + (hash - 0.5) * 4.0,
+            biome_temp + (hash - 0.5) * 4.0,
             tectonic,
             erosion,
             peaks_valleys,
@@ -375,6 +386,7 @@ impl BiomeSplines {
         moisture: MoistureClass,
         elevation: ElevationClass,
         terrain: TerrainClass,
+        rock_hardness: f64,
     ) -> TileType {
         use ClimateClass::*;
         use ElevationClass::*;
@@ -445,14 +457,15 @@ impl BiomeSplines {
             },
 
             // Hot zone (approaching sun side)
+            // Note: 45°C gate forces moisture to Arid for all Hot temps (55-80°C)
             Hot => match (moisture, elevation, terrain) {
                 (Humid | Saturated, Highland | Alpine, _) => TileType::CloudForest,
                 (Moderate, Highland | Alpine, _) => TileType::HighlandSavanna,
                 (_, Alpine, _) => TileType::Mountain,
                 (Arid, Highland, Rugged) => TileType::Badlands,
-                (Arid, _, Rugged) => TileType::Badlands,
-                (Arid, _, Flat) => TileType::Erg,
-                (Arid, _, _) => TileType::Sahara,
+                (Arid, _, Rugged) => if rock_hardness > 0.6 { TileType::ScorchedRock } else { TileType::Badlands },
+                (Arid, _, Flat) => if rock_hardness > 0.6 { TileType::Hamada } else { TileType::Erg },
+                (Arid, _, _) => if rock_hardness > 0.6 { TileType::Hamada } else { TileType::Sahara },
                 (Dry, _, Rugged) => TileType::Hamada,
                 (Dry, _, _) => TileType::Desert,
                 (Moderate, _, _) => TileType::Savanna,
@@ -460,11 +473,12 @@ impl BiomeSplines {
             },
 
             // Scorching zone (sun side of tidally locked planet)
+            // Note: 45°C gate forces moisture to Arid for all Scorching temps (>80°C)
             Scorching => match (moisture, elevation, terrain) {
                 (_, Alpine | Highland, _) => TileType::ScorchedRock,
-                (Arid, _, Flat) => TileType::SaltFlat,
-                (Arid, _, Rugged) => TileType::MoltenWaste,
-                (Arid, _, _) => TileType::Sahara,
+                (Arid, _, Flat) => if rock_hardness < 0.4 { TileType::Erg } else { TileType::SaltFlat },
+                (Arid, _, Rugged) => if rock_hardness > 0.6 { TileType::ScorchedRock } else { TileType::MoltenWaste },
+                (Arid, _, _) => if rock_hardness > 0.6 { TileType::Hamada } else { TileType::Sahara },
                 (Dry, _, Rugged) => TileType::Hamada,
                 (Dry, _, _) => TileType::Erg,
                 (_, _, _) => TileType::Desert,

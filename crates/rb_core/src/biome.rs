@@ -86,11 +86,11 @@ impl TileType {
             Self::SeaCliff => [140, 140, 160],  // Light slate - coastal cliff
 
             // Frozen biomes
-            Self::White => [255, 255, 255],        // Pure white (frozen ocean)
-            Self::Glacier => [200, 220, 255],      // Ice blue - glacial ice
-            Self::Snow => [211, 211, 211],         // Light gray
-            Self::IceSheet => [220, 235, 255],     // Pale ice blue
-            Self::FrozenBog => [160, 180, 170],    // Muted teal-gray
+            Self::White => [250, 252, 255],        // Bright ice white
+            Self::Glacier => [230, 240, 255],      // Pale ice blue
+            Self::Snow => [240, 244, 250],         // Bright snow white
+            Self::IceSheet => [235, 245, 255],     // Pale ice blue
+            Self::FrozenBog => [200, 215, 210],    // Pale frost-teal
             Self::Tundra => [176, 196, 176],       // Grayish green - permafrost
             Self::Taiga => [34, 85, 68],           // Dark teal - cold coniferous forest
             Self::AlpineMeadow => [140, 200, 140], // Soft green

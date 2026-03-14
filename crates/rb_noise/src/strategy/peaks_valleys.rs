@@ -13,6 +13,7 @@ pub struct PeaksAndValleysStrategy {
     frequency: f64,
     persistence: f64,
     lacunarity: f64,
+    world_width: f64,
 }
 
 impl PeaksAndValleysStrategy {
@@ -24,7 +25,14 @@ impl PeaksAndValleysStrategy {
             frequency: 1.5,
             persistence: 0.6,
             lacunarity: 2.0,
+            world_width: 0.0,
         }
+    }
+
+    pub fn new_wrapping(seed: u32, world_width: f64) -> Self {
+        let mut s = Self::new(seed);
+        s.world_width = world_width;
+        s
     }
 
     pub fn with_params(
@@ -41,6 +49,7 @@ impl PeaksAndValleysStrategy {
             frequency,
             persistence,
             lacunarity,
+            world_width: 0.0,
         }
     }
 
@@ -56,12 +65,17 @@ impl PeaksAndValleysStrategy {
         let total_octaves = self.octaves + detail_level;
 
         for _ in 0..total_octaves {
-            let nx = x * freq * 0.01;
-            let ny = y * freq * 0.01;
-
             // Get absolute value of noise and invert it
             // This creates sharp ridges where the noise crosses zero
-            let signal = 1.0 - self.noise.get([nx, ny]).abs();
+            let raw = if self.world_width > 0.0 {
+                let [cx, cz, cy] = crate::wrap::cylindrical_noise_coords(x, y, freq, 0.01, self.world_width);
+                self.noise.get([cx, cz, cy])
+            } else {
+                let nx = x * freq * 0.01;
+                let ny = y * freq * 0.01;
+                self.noise.get([nx, ny])
+            };
+            let signal = 1.0 - raw.abs();
 
             // Square to make ridges sharper
             let signal = signal * signal;
@@ -91,11 +105,15 @@ impl PeaksAndValleysStrategy {
         let total_octaves = self.octaves + detail_level;
 
         for _ in 0..total_octaves {
-            let nx = x * freq * 0.01;
-            let ny = y * freq * 0.01;
-
             // Get noise and take absolute value for valleys
-            let n = self.noise.get([nx, ny]).abs();
+            let n = if self.world_width > 0.0 {
+                let [cx, cz, cy] = crate::wrap::cylindrical_noise_coords(x, y, freq, 0.01, self.world_width);
+                self.noise.get([cx, cz, cy]).abs()
+            } else {
+                let nx = x * freq * 0.01;
+                let ny = y * freq * 0.01;
+                self.noise.get([nx, ny]).abs()
+            };
             value += (1.0 - n) * amplitude;
 
             max_amplitude += amplitude;

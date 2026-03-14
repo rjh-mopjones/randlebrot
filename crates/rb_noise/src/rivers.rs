@@ -634,7 +634,7 @@ pub(crate) fn fill_depressions(elevation: &[f64], width: usize, height: usize, s
     for y in 0..height {
         for x in 0..width {
             let idx = y * width + x;
-            let is_boundary = x == 0 || x == width - 1 || y == 0 || y == height - 1;
+            let is_boundary = y == 0 || y == height - 1;
             if elevation[idx] <= sea_level || is_boundary {
                 heap.push(FloodCell { elevation: elevation[idx], index: idx });
                 resolved[idx] = true;
@@ -648,9 +648,9 @@ pub(crate) fn fill_depressions(elevation: &[f64], width: usize, height: usize, s
         let y = cell.index / width;
 
         for &(dx, dy) in &D8_OFFSETS {
-            let nx = x as i32 + dx;
+            let nx = crate::wrap::wrap_grid_x(x as i32 + dx, width);
             let ny = y as i32 + dy;
-            if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
+            if ny < 0 || ny >= height as i32 {
                 continue;
             }
             let nidx = ny as usize * width + nx as usize;
@@ -827,9 +827,9 @@ fn identify_lakes(
             let y = idx / width;
 
             for (dx, dy) in D8_OFFSETS {
-                let nx = x as i32 + dx;
+                let nx = crate::wrap::wrap_grid_x(x as i32 + dx, width);
                 let ny = y as i32 + dy;
-                if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
+                if ny < 0 || ny >= height as i32 {
                     continue;
                 }
                 let nidx = ny as usize * width + nx as usize;
@@ -891,10 +891,10 @@ fn compute_geology_aware_flow(
             let mut best_dir = NO_FLOW;
 
             for (dir, (dx, dy)) in D8_OFFSETS.iter().enumerate() {
-                let nx = x as i32 + dx;
+                let nx = crate::wrap::wrap_grid_x(x as i32 + dx, width);
                 let ny = y as i32 + dy;
 
-                if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
+                if ny < 0 || ny >= height as i32 {
                     continue;
                 }
 
@@ -951,11 +951,11 @@ pub(crate) fn compute_flow_accumulation(
         let x = idx % width;
         let y = idx / width;
         let (dx, dy) = D8_OFFSETS[flow_dir[idx] as usize];
-        let nx = (x as i32 + dx) as usize;
+        let nx = crate::wrap::wrap_grid_x(x as i32 + dx, width);
         let ny = (y as i32 + dy) as usize;
 
-        if nx < width && ny < height {
-            let target_idx = ny * width + nx;
+        if ny < height {
+            let target_idx = ny * width + nx as usize;
             accumulation[target_idx] = accumulation[target_idx].saturating_add(accumulation[idx]);
         }
     }
@@ -992,9 +992,9 @@ fn build_river_tree(
         let x = idx % width;
         let y = idx / width;
         let (dx, dy) = D8_OFFSETS[flow_dir[idx] as usize];
-        let nx = x as i32 + dx;
+        let nx = crate::wrap::wrap_grid_x(x as i32 + dx, width);
         let ny = y as i32 + dy;
-        if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
+        if ny >= 0 && ny < height as i32 {
             let nidx = ny as usize * width + nx as usize;
             if is_river[nidx] {
                 river_inflow_count[nidx] += 1;
@@ -1074,10 +1074,10 @@ fn build_river_tree(
             let x = current % width;
             let y = current / width;
             let (dx, dy) = D8_OFFSETS[flow_dir[current] as usize];
-            let nx = x as i32 + dx;
+            let nx = crate::wrap::wrap_grid_x(x as i32 + dx, width);
             let ny = y as i32 + dy;
 
-            if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
+            if ny < 0 || ny >= height as i32 {
                 break;
             }
 
@@ -1133,10 +1133,10 @@ fn build_river_tree(
         let x = last_idx % width;
         let y = last_idx / width;
         let (dx, dy) = D8_OFFSETS[flow_dir[last_idx] as usize];
-        let nx = x as i32 + dx;
+        let nx = crate::wrap::wrap_grid_x(x as i32 + dx, width);
         let ny = y as i32 + dy;
 
-        if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
+        if ny < 0 || ny >= height as i32 {
             continue;
         }
 
@@ -1454,9 +1454,9 @@ fn trace_river_paths(
         let x = idx % width;
         let y = idx / width;
         let (dx, dy) = D8_OFFSETS[flow_dir[idx] as usize];
-        let nx = x as i32 + dx;
+        let nx = crate::wrap::wrap_grid_x(x as i32 + dx, width);
         let ny = y as i32 + dy;
-        if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
+        if ny >= 0 && ny < height as i32 {
             let nidx = ny as usize * width + nx as usize;
             if is_river[nidx] {
                 river_inflow_count[nidx] += 1;
@@ -1508,10 +1508,10 @@ fn trace_river_paths(
             let x = current % width;
             let y = current / width;
             let (dx, dy) = D8_OFFSETS[flow_dir[current] as usize];
-            let nx = x as i32 + dx;
+            let nx = crate::wrap::wrap_grid_x(x as i32 + dx, width);
             let ny = y as i32 + dy;
 
-            if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
+            if ny < 0 || ny >= height as i32 {
                 break;
             }
 
@@ -1986,11 +1986,11 @@ impl RiverGenerator {
             let x = idx % width;
             let y = idx / width;
             let (dx, dy) = D8_OFFSETS[flow_dir[idx] as usize];
-            let nx = (x as i32 + dx) as usize;
+            let nx = crate::wrap::wrap_grid_x(x as i32 + dx, width);
             let ny = (y as i32 + dy) as usize;
 
-            if nx < width && ny < height {
-                let target_idx = ny * width + nx;
+            if ny < height {
+                let target_idx = ny * width + nx as usize;
                 accumulation[target_idx] =
                     accumulation[target_idx].saturating_add(accumulation[idx]);
             }
@@ -2133,11 +2133,11 @@ impl RiverGenerator {
             let x = idx % width;
             let y = idx / width;
             let (dx, dy) = D8_OFFSETS[flow_dir[idx] as usize];
-            let nx = (x as i32 + dx) as usize;
+            let nx = crate::wrap::wrap_grid_x(x as i32 + dx, width);
             let ny = (y as i32 + dy) as usize;
 
-            if nx < width && ny < height {
-                let target_idx = ny * width + nx;
+            if ny < height {
+                let target_idx = ny * width + nx as usize;
                 accumulation[target_idx] =
                     accumulation[target_idx].saturating_add(accumulation[idx]);
             }
@@ -2162,10 +2162,10 @@ impl RiverGenerator {
                 let mut best_dir = NO_FLOW;
 
                 for (dir, (dx, dy)) in D8_OFFSETS.iter().enumerate() {
-                    let nx = x as i32 + dx;
+                    let nx = crate::wrap::wrap_grid_x(x as i32 + dx, width);
                     let ny = y as i32 + dy;
 
-                    if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
+                    if ny < 0 || ny >= height as i32 {
                         continue;
                     }
 

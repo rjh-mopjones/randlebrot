@@ -425,12 +425,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let nx = wx / map_width;
     let ny = wy / params.world_height;
 
-    let dx = nx - 0.5;
-    let dy = ny - 1.0;
-    let dist = min(sqrt(dx * dx + dy * dy), 1.0);
+    // Domain-warp isotherms: two passes for irregular/organic climate zones
+    // Pass 1: large-scale sweeping bends
+    let warp1_x = open_simplex_2d(wx * 0.0015, wy * 0.0015 + 50.0) * 0.12;
+    let warp1_y = open_simplex_2d(wx * 0.0015 + 150.0, wy * 0.0015) * 0.12;
+    // Pass 2: medium-scale irregularity
+    let warp2_x = open_simplex_2d(wx * 0.005, wy * 0.005 + 100.0) * 0.06;
+    let warp2_y = open_simplex_2d(wx * 0.005 + 200.0, wy * 0.005) * 0.06;
+    let warp_x = warp1_x + warp2_x;
+    let warp_y = warp1_y + warp2_y;
 
-    // Cosine falloff: dist=0 => cos(0)=1, dist=1 => cos(PI/2)=0
-    let base_light = cos(dist * 1.5707963);
+    // Horizontal wrapping: shortest path around the cylinder
+    var raw_dx = nx - 0.5 + warp_x;
+    if (raw_dx > 0.5) { raw_dx = raw_dx - 1.0; }
+    if (raw_dx < -0.5) { raw_dx = raw_dx + 1.0; }
+    let dy = ny - 1.0 + warp_y;
+    let dist = min(sqrt(raw_dx * raw_dx + dy * dy), 1.0);
+
+    // Cosine falloff with extra darkening past dist=0.5 (matching CPU)
+    let far_dist = max((dist - 0.5) / 0.5, 0.0);
+    let darkening = 1.0 + 1.5 * far_dist * far_dist;
+    let base_light = pow(cos(dist * 1.5707963), darkening);
 
     // Atmospheric scatter noise (~5% variation)
     let scatter = fbm_open_simplex(wx * 0.005, wy * 0.005, params.octaves, params.frequency, params.persistence, params.lacunarity) * 0.05;

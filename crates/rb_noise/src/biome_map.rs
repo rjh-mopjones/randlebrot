@@ -126,10 +126,11 @@ fn compute_slope_grid(heightmap: &[f64], width: usize, height: usize) -> Vec<f64
 }
 
 /// Bilinear sample a f64 grid at fractional pixel coordinates.
+/// x wraps horizontally for cylindrical world.
 fn sample_bilinear(data: &[f64], width: usize, height: usize, fx: f64, fy: f64) -> f64 {
     let x0 = (fx.floor() as usize).min(width - 1);
     let y0 = (fy.floor() as usize).min(height - 1);
-    let x1 = (x0 + 1).min(width - 1);
+    let x1 = (x0 + 1) % width; // wrap x horizontally
     let y1 = (y0 + 1).min(height - 1);
     let tx = fx - fx.floor();
     let ty = fy - fy.floor();
@@ -143,10 +144,11 @@ fn sample_bilinear(data: &[f64], width: usize, height: usize, fx: f64, fy: f64) 
 }
 
 /// Bilinear sample a u32 grid (returns f64 for interpolation).
+/// x wraps horizontally for cylindrical world.
 fn sample_bilinear_u32(data: &[u32], width: usize, height: usize, fx: f64, fy: f64) -> f64 {
     let x0 = (fx.floor() as usize).min(width - 1);
     let y0 = (fy.floor() as usize).min(height - 1);
-    let x1 = (x0 + 1).min(width - 1);
+    let x1 = (x0 + 1) % width; // wrap x horizontally
     let y1 = (y0 + 1).min(height - 1);
     let tx = fx - fx.floor();
     let ty = fy - fy.floor();
@@ -162,23 +164,25 @@ fn sample_bilinear_u32(data: &[u32], width: usize, height: usize, fx: f64, fy: f
 impl BiomeMap {
     /// Sample a macro-level field at arbitrary world coordinates.
     /// Uses nearest-neighbor to preserve sharp ridge/valley edges from erosion.
+    /// X wraps horizontally for cylindrical world.
     pub fn sample_heightmap_at(&self, wx: f64, wy: f64) -> f64 {
         if self.heightmap.is_empty() { return 0.0; }
-        let x = (wx.clamp(0.0, self.world_width - 1.0).round() as usize).min(self.width - 1);
+        let wrapped_x = crate::wrap::wrap_x(wx, self.world_width);
+        let x = (wrapped_x.round() as usize).min(self.width - 1);
         let y = (wy.clamp(0.0, self.world_height - 1.0).round() as usize).min(self.height - 1);
         self.heightmap[y * self.width + x]
     }
 
     pub fn sample_drainage_at(&self, wx: f64, wy: f64) -> f64 {
         if self.drainage_area.is_empty() { return 1.0; }
-        let fx = wx.clamp(0.0, self.world_width - 1.0);
+        let fx = crate::wrap::wrap_x(wx, self.world_width);
         let fy = wy.clamp(0.0, self.world_height - 1.0);
         sample_bilinear_u32(&self.drainage_area, self.width, self.height, fx, fy)
     }
 
     pub fn sample_sediment_at(&self, wx: f64, wy: f64) -> f64 {
         if self.sediment.is_empty() { return 0.0; }
-        let fx = wx.clamp(0.0, self.world_width - 1.0);
+        let fx = crate::wrap::wrap_x(wx, self.world_width);
         let fy = wy.clamp(0.0, self.world_height - 1.0);
         sample_bilinear(&self.sediment, self.width, self.height, fx, fy)
     }
@@ -188,12 +192,11 @@ impl BiomeMap {
         seed: u32,
         width: usize,
         height: usize,
-        backend: NoiseBackend,
+        _backend: NoiseBackend,
     ) -> Self {
-        match backend {
-            NoiseBackend::Cpu => Self::generate(seed, width, height),
-            NoiseBackend::Gpu => Self::generate_gpu(seed, width, height),
-        }
+        // Force CPU backend: GPU shaders use 2D noise which doesn't wrap horizontally.
+        // TODO: implement 3D OpenSimplex in WGSL, then restore GPU path.
+        Self::generate(seed, width, height)
     }
 
     /// Generate a biome map with all terrain layers using parallel processing.
@@ -210,10 +213,10 @@ impl BiomeMap {
         sub_stellar_y: f64,
     ) -> Self {
         // Create all strategies
-        let cont_strategy = ContinentalnessStrategy::new(seed);
-        let tectonic_strategy = TectonicPlatesStrategy::new(seed.wrapping_add(2));
-        let raw_peaks_strategy = PeaksAndValleysStrategy::new(seed.wrapping_add(4));
-        let humidity_strategy = HumidityStrategy::new(seed.wrapping_add(5));
+        let cont_strategy = ContinentalnessStrategy::new_wrapping(seed, width as f64);
+        let tectonic_strategy = TectonicPlatesStrategy::new_wrapping(seed.wrapping_add(2), width as f64);
+        let raw_peaks_strategy = PeaksAndValleysStrategy::new_wrapping(seed.wrapping_add(4), width as f64);
+        let humidity_strategy = HumidityStrategy::new_wrapping(seed.wrapping_add(5), width as f64);
         let light_level_strategy = LightLevelStrategy::new(
             seed.wrapping_add(6),
             sub_stellar_x,
@@ -221,7 +224,7 @@ impl BiomeMap {
             width as f64,
             height as f64,
         );
-        let rock_hardness_strategy = RockHardnessStrategy::new(seed.wrapping_add(7));
+        let rock_hardness_strategy = RockHardnessStrategy::new_wrapping(seed.wrapping_add(7), width as f64);
 
         let total_pixels = width * height;
 
@@ -402,6 +405,20 @@ impl BiomeMap {
             }
         }
 
+        // Polar ice cap override: unify fragmented arctic biomes
+        for idx in 0..total_pixels {
+            let light = light_level[idx];
+            if light < 0.05 {
+                biomes[idx] = TileType::White;
+            } else if light < 0.12 {
+                if continentalness[idx] < SEA_LEVEL {
+                    biomes[idx] = TileType::White;
+                } else {
+                    biomes[idx] = TileType::IceSheet;
+                }
+            }
+        }
+
         let vegetation_density: Vec<f64> = biomes.iter().zip(water_table.iter())
             .map(|(&b, &wt)| derived::derive_vegetation_density(b, wt)).collect();
         let soil_type: Vec<f64> = biomes.iter().zip(erosion.iter()).zip(rock_hardness.iter())
@@ -480,9 +497,9 @@ impl BiomeMap {
         let gpu_rock_hardness: Vec<f64> = layers.rock_hardness.iter().map(|&v| v as f64).collect();
 
         // Tectonic, peaks, and humidity computed on CPU for boundary alignment and terminator model
-        let tectonic_strategy = TectonicPlatesStrategy::new(seed.wrapping_add(2));
-        let raw_peaks_strategy = PeaksAndValleysStrategy::new(seed.wrapping_add(4));
-        let humidity_strategy = HumidityStrategy::new(seed.wrapping_add(5));
+        let tectonic_strategy = TectonicPlatesStrategy::new_wrapping(seed.wrapping_add(2), width as f64);
+        let raw_peaks_strategy = PeaksAndValleysStrategy::new_wrapping(seed.wrapping_add(4), width as f64);
+        let humidity_strategy = HumidityStrategy::new_wrapping(seed.wrapping_add(5), width as f64);
         let cpu_data: Vec<_> = (0..total_pixels)
             .into_par_iter()
             .map(|idx| {
@@ -607,6 +624,20 @@ impl BiomeMap {
                 && temperature[idx] < 45.0
             {
                 biomes[idx] = TileType::River;
+            }
+        }
+
+        // Polar ice cap override: unify fragmented arctic biomes
+        for idx in 0..total_pixels {
+            let light = gpu_light_level[idx];
+            if light < 0.05 {
+                biomes[idx] = TileType::White;
+            } else if light < 0.12 {
+                if continentalness[idx] < SEA_LEVEL {
+                    biomes[idx] = TileType::White;
+                } else {
+                    biomes[idx] = TileType::IceSheet;
+                }
             }
         }
 
@@ -985,14 +1016,14 @@ impl BiomeMap {
         sub_stellar_y: f64,
     ) -> Self {
         let world_width = world_height * 2.0;
-        let cont_strategy = ContinentalnessStrategy::new(seed);
-        let tectonic_strategy = TectonicPlatesStrategy::new(seed.wrapping_add(2));
-        let raw_peaks_strategy = PeaksAndValleysStrategy::new(seed.wrapping_add(4));
-        let humidity_strategy = HumidityStrategy::new(seed.wrapping_add(5));
+        let cont_strategy = ContinentalnessStrategy::new_wrapping(seed, world_width);
+        let tectonic_strategy = TectonicPlatesStrategy::new_wrapping(seed.wrapping_add(2), world_width);
+        let raw_peaks_strategy = PeaksAndValleysStrategy::new_wrapping(seed.wrapping_add(4), world_width);
+        let humidity_strategy = HumidityStrategy::new_wrapping(seed.wrapping_add(5), world_width);
         let light_level_strategy = LightLevelStrategy::new(
             seed.wrapping_add(6), sub_stellar_x, sub_stellar_y, world_width, world_height,
         );
-        let rock_hardness_strategy = RockHardnessStrategy::new(seed.wrapping_add(7));
+        let rock_hardness_strategy = RockHardnessStrategy::new_wrapping(seed.wrapping_add(7), world_width);
         let splines = BiomeSplines::new(SEA_LEVEL);
 
         let total_pixels = output_size * output_size;
@@ -1092,6 +1123,20 @@ impl BiomeMap {
             }
         }
 
+        // Polar ice cap override: unify fragmented arctic biomes
+        for idx in 0..total_pixels {
+            let light = light_level[idx];
+            if light < 0.05 {
+                biomes[idx] = TileType::White;
+            } else if light < 0.12 {
+                if continentalness[idx] < SEA_LEVEL {
+                    biomes[idx] = TileType::White;
+                } else {
+                    biomes[idx] = TileType::IceSheet;
+                }
+            }
+        }
+
         let vegetation_density: Vec<f64> = biomes.iter().zip(water_table.iter())
             .map(|(&b, &wt)| derived::derive_vegetation_density(b, wt)).collect();
         let soil_type: Vec<f64> = biomes.iter().zip(erosion.iter()).zip(rock_hardness.iter())
@@ -1152,7 +1197,7 @@ impl BiomeMap {
         detail_level: u32,
     ) -> Vec<u8> {
         let world_width = world_height * 2.0;
-        let cont_strategy = ContinentalnessStrategy::new(seed);
+        let cont_strategy = ContinentalnessStrategy::new_wrapping(seed, world_width);
         let light_strategy = LightLevelStrategy::new(
             seed.wrapping_add(6), 0.5, 1.0, world_width, world_height,
         );
@@ -1192,14 +1237,14 @@ impl BiomeMap {
         river_network: Option<&Arc<RiverNetwork>>,
     ) -> Self {
         let world_width = world_height * 2.0;
-        let cont_strategy = ContinentalnessStrategy::new(seed);
-        let tectonic_strategy = TectonicPlatesStrategy::new(seed.wrapping_add(2));
-        let raw_peaks_strategy = PeaksAndValleysStrategy::new(seed.wrapping_add(4));
-        let humidity_strategy = HumidityStrategy::new(seed.wrapping_add(5));
+        let cont_strategy = ContinentalnessStrategy::new_wrapping(seed, world_width);
+        let tectonic_strategy = TectonicPlatesStrategy::new_wrapping(seed.wrapping_add(2), world_width);
+        let raw_peaks_strategy = PeaksAndValleysStrategy::new_wrapping(seed.wrapping_add(4), world_width);
+        let humidity_strategy = HumidityStrategy::new_wrapping(seed.wrapping_add(5), world_width);
         let light_level_strategy = LightLevelStrategy::new(
             seed.wrapping_add(6), 0.5, 1.0, world_width, world_height,
         );
-        let rock_hardness_strategy = RockHardnessStrategy::new(seed.wrapping_add(7));
+        let rock_hardness_strategy = RockHardnessStrategy::new_wrapping(seed.wrapping_add(7), world_width);
         let splines = BiomeSplines::new(SEA_LEVEL);
 
         let total_pixels = output_size * output_size;
@@ -1396,6 +1441,20 @@ impl BiomeMap {
             }
         }
 
+        // Polar ice cap override: unify fragmented arctic biomes
+        for idx in 0..total_pixels {
+            let light = light_level[idx];
+            if light < 0.05 {
+                biomes[idx] = TileType::White;
+            } else if light < 0.12 {
+                if continentalness[idx] < SEA_LEVEL {
+                    biomes[idx] = TileType::White;
+                } else {
+                    biomes[idx] = TileType::IceSheet;
+                }
+            }
+        }
+
         let vegetation_density: Vec<f64> = biomes.iter().zip(water_table.iter())
             .map(|(&b, &wt)| derived::derive_vegetation_density(b, wt)).collect();
         let soil_type: Vec<f64> = biomes.iter().zip(erosion.iter()).zip(rock_hardness.iter())
@@ -1454,11 +1513,13 @@ impl BiomeMap {
         world_height: f64,
         detail_level: u32,
         progress: Option<&Arc<LayerProgress>>,
-        backend: NoiseBackend,
+        _backend: NoiseBackend,
         macro_map: Option<&BiomeMap>,
         river_network: Option<&Arc<RiverNetwork>>,
     ) -> Self {
-        match backend {
+        // Force CPU backend: GPU shaders use 2D noise which doesn't wrap horizontally.
+        // TODO: implement 3D OpenSimplex in WGSL, then restore GPU path.
+        match NoiseBackend::Cpu {
             NoiseBackend::Cpu => Self::generate_meso_full(
                 seed, world_x, world_y, world_size, output_size, world_height, detail_level, progress, macro_map, river_network,
             ),
@@ -1511,9 +1572,9 @@ impl BiomeMap {
         let gpu_rock_hardness: Vec<f64> = layers.rock_hardness.iter().map(|&v| v as f64).collect();
 
         // Tectonic, peaks, and humidity computed on CPU for boundary alignment and terminator model
-        let tectonic_strategy = TectonicPlatesStrategy::new(seed.wrapping_add(2));
-        let raw_peaks_strategy = PeaksAndValleysStrategy::new(seed.wrapping_add(4));
-        let humidity_strategy = HumidityStrategy::new(seed.wrapping_add(5));
+        let tectonic_strategy = TectonicPlatesStrategy::new_wrapping(seed.wrapping_add(2), world_width);
+        let raw_peaks_strategy = PeaksAndValleysStrategy::new_wrapping(seed.wrapping_add(4), world_width);
+        let humidity_strategy = HumidityStrategy::new_wrapping(seed.wrapping_add(5), world_width);
         let cpu_data: Vec<_> = (0..total_pixels)
             .into_par_iter()
             .map(|idx| {
@@ -1673,6 +1734,21 @@ impl BiomeMap {
         let water_table: Vec<f64> = (0..total_pixels).map(|idx| {
             derived::derive_water_table(rivers[idx], gpu_humidity[idx], heightmap_vec[idx], precipitation_type[idx], continentalness[idx])
         }).collect();
+
+        // Polar ice cap override: unify fragmented arctic biomes
+        for idx in 0..total_pixels {
+            let light = gpu_light_level[idx];
+            if light < 0.05 {
+                biomes[idx] = TileType::White;
+            } else if light < 0.12 {
+                if continentalness[idx] < SEA_LEVEL {
+                    biomes[idx] = TileType::White;
+                } else {
+                    biomes[idx] = TileType::IceSheet;
+                }
+            }
+        }
+
         let vegetation_density: Vec<f64> = biomes.iter().zip(water_table.iter())
             .map(|(&b, &wt)| derived::derive_vegetation_density(b, wt)).collect();
         let soil_type: Vec<f64> = biomes.iter().zip(erosion.iter()).zip(gpu_rock_hardness.iter())
@@ -1874,6 +1950,27 @@ mod tests {
         }
         assert!(violations.is_empty(),
             "Found {} green biomes within 10% radius of sub-stellar. First 5: {:?}",
+            violations.len(), &violations[..violations.len().min(5)]);
+    }
+
+    #[test]
+    fn polar_cap_is_uniform() {
+        // At very low light levels (dark pole), ALL biomes should be White.
+        // No fragmented IceSheet/Snow/Glacier/FrozenBog mix — solid ice cap.
+        let map = BiomeMap::generate(42, 256, 128);
+        let mut violations = Vec::new();
+        for y in 0..map.height {
+            for x in 0..map.width {
+                let idx = y * map.width + x;
+                let light = map.light_level[idx];
+                let biome = map.biomes[idx];
+                if light < 0.05 && biome != TileType::White {
+                    violations.push((x, y, biome, light));
+                }
+            }
+        }
+        assert!(violations.is_empty(),
+            "Found {} non-White biomes in polar cap (light < 0.05). First 5: {:?}",
             violations.len(), &violations[..violations.len().min(5)]);
     }
 }

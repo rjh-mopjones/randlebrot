@@ -98,6 +98,26 @@ pub fn render_terrain(map: &BiomeMap, hints: Option<&NormalizationHints>) -> Vec
                     }
                 }
 
+                // 2b. Sub-biome tinting for desert biomes
+                //     Uses rock hardness + temperature to break up monotonous banding
+                if is_desert_biome(biome) {
+                    let rock = map.rock_hardness[idx];
+                    let temp = map.temperature[idx];
+
+                    // Hard rock → darker reddish-brown, soft rock → lighter sandy
+                    if rock > 0.6 {
+                        pixel = lerp_rgb(pixel, [140, 90, 60], (rock - 0.6) * 0.5);
+                    } else if rock < 0.4 {
+                        pixel = lerp_rgb(pixel, [230, 210, 170], (0.4 - rock) * 0.4);
+                    }
+
+                    // Hotter → redder tint
+                    if temp > 80.0 {
+                        let heat = ((temp - 80.0) / 40.0).clamp(0.0, 1.0);
+                        pixel = lerp_rgb(pixel, [200, 120, 60], heat * 0.2);
+                    }
+                }
+
                 // 3. Modulate brightness by normalized height (±15% around base)
                 let hn = norm_height[idx];
                 let brightness = 0.85 + hn * 0.30;
@@ -166,9 +186,10 @@ pub fn render_terrain(map: &BiomeMap, hints: Option<&NormalizationHints>) -> Vec
                     ];
                 }
 
-                // 9. Aerial perspective
+                // 9. Aerial perspective — reduced for frozen biomes to avoid gray wash
                 let ll = map.light_level[idx];
-                let haze_amount = (1.0 - ll) * 0.15;
+                let haze_strength = if is_polar_ice(biome, ll) { 0.05 } else { 0.15 };
+                let haze_amount = (1.0 - ll) * haze_strength;
                 if haze_amount > 0.001 {
                     let haze_color = lerp_rgb([180, 200, 220], [220, 200, 170], ll);
                     pixel = lerp_rgb(pixel, haze_color, haze_amount);
@@ -216,6 +237,25 @@ fn is_water_biome(b: TileType) -> bool {
             | TileType::White
             | TileType::CoralReef
     )
+}
+
+/// Check if this pixel is in the polar ice cap zone (should render bright white).
+fn is_polar_ice(b: TileType, light_level: f64) -> bool {
+    // Deep polar zone: everything is ice
+    if light_level < 0.12 {
+        return matches!(b,
+            TileType::White | TileType::IceSheet | TileType::Snow
+            | TileType::Glacier | TileType::FrozenBog | TileType::Mountain
+            | TileType::Tundra
+        );
+    }
+    // Transition zone: only explicitly frozen biomes
+    if light_level < 0.20 {
+        return matches!(b,
+            TileType::White | TileType::IceSheet | TileType::Snow | TileType::Glacier
+        );
+    }
+    false
 }
 
 fn is_desert_biome(b: TileType) -> bool {
@@ -294,14 +334,18 @@ fn render_ocean(continentalness: f64, light_level: f64, temperature: f64) -> [u8
 
     let mut pixel = lerp_rgb(shallow, deep, depth_norm);
 
-    // Frozen ocean
+    // Frozen ocean — bright ice replaces dark water
     if temperature < -15.0 {
         let ice_factor = ((-15.0 - temperature) / 20.0).clamp(0.0, 1.0);
-        pixel = lerp_rgb(pixel, [220, 235, 255], ice_factor);
+        pixel = lerp_rgb(pixel, [235, 245, 255], ice_factor);
     }
 
-    // Light-level modulation: darken on dark side
-    let brightness = 0.5 + light_level * 0.5;
+    // Light-level modulation: darken on dark side, but less for frozen ocean
+    let brightness = if temperature < -15.0 {
+        0.75 + light_level * 0.25 // frozen: brighter minimum
+    } else {
+        0.5 + light_level * 0.5
+    };
     pixel = [
         (pixel[0] as f64 * brightness) as u8,
         (pixel[1] as f64 * brightness) as u8,

@@ -217,6 +217,10 @@ pub struct TectonicPlatesStrategy {
     fissure_noise: OpenSimplex,
     plate_scale: f64,
     registry: PlateRegistry,
+    /// World width for horizontal wrapping. 0 = no wrapping.
+    world_width: f64,
+    /// Number of Voronoi cells across the world width (for hash wrapping).
+    cell_period: i32,
 }
 
 impl TectonicPlatesStrategy {
@@ -234,7 +238,16 @@ impl TectonicPlatesStrategy {
             fissure_noise: OpenSimplex::new(seed.wrapping_add(600)),
             plate_scale,
             registry: PlateRegistry::from_seed(seed, plate_scale),
+            world_width: 0.0,
+            cell_period: 0,
         }
+    }
+
+    pub fn new_wrapping(seed: u32, world_width: f64) -> Self {
+        let mut s = Self::new(seed);
+        s.world_width = world_width;
+        s.cell_period = (world_width * s.plate_scale).round() as i32;
+        s
     }
 
     pub fn with_scale(seed: u32, plate_scale: f64) -> Self {
@@ -250,11 +263,23 @@ impl TectonicPlatesStrategy {
             fissure_noise: OpenSimplex::new(seed.wrapping_add(600)),
             plate_scale,
             registry: PlateRegistry::from_seed(seed, plate_scale),
+            world_width: 0.0,
+            cell_period: 0,
+        }
+    }
+
+    /// Wrap cell x-coordinate for horizontal tiling.
+    fn wrap_cell_ix(&self, ix: i32) -> i32 {
+        if self.cell_period > 0 {
+            ((ix % self.cell_period) + self.cell_period) % self.cell_period
+        } else {
+            ix
         }
     }
 
     /// Hash function to generate pseudo-random cell center offsets.
     fn hash(&self, ix: i32, iy: i32) -> (f64, f64) {
+        let ix = self.wrap_cell_ix(ix);
         let n = (ix.wrapping_mul(374761393) as u32)
             .wrapping_add((iy.wrapping_mul(668265263)) as u32)
             .wrapping_add(self.seed);
@@ -270,6 +295,7 @@ impl TectonicPlatesStrategy {
 
     /// Generate plate ID hash for coloring.
     fn plate_id_hash(&self, ix: i32, iy: i32) -> f64 {
+        let ix = self.wrap_cell_ix(ix);
         let n = (ix.wrapping_mul(127) as u32)
             .wrapping_add((iy.wrapping_mul(311)) as u32)
             .wrapping_add(self.seed);
@@ -279,13 +305,24 @@ impl TectonicPlatesStrategy {
 
     /// 2-pass domain warping for irregular, fractured plate boundaries.
     fn warp_coordinates(&self, x: f64, y: f64) -> (f64, f64) {
-        // Pass 1: large-scale — bends overall boundary paths
-        let w1x = self.warp1_x.get([x * 0.002, y * 0.002]) * 120.0;
-        let w1y = self.warp1_y.get([x * 0.002 + 43.7, y * 0.002 + 17.3]) * 120.0;
-
-        // Pass 2: medium-scale — adds kinks and fault offsets
-        let w2x = self.warp2_x.get([x * 0.008, y * 0.008]) * 40.0;
-        let w2y = self.warp2_y.get([x * 0.008 + 91.2, y * 0.008 + 55.8]) * 40.0;
+        let (w1x, w1y, w2x, w2y) = if self.world_width > 0.0 {
+            // 3D cylindrical noise for seamless horizontal wrapping
+            let [cx1, cz1, cy1] = crate::wrap::cylindrical_noise_coords(x, y, 1.0, 0.002, self.world_width);
+            let [cx2, cz2, cy2] = crate::wrap::cylindrical_noise_coords(x, y, 1.0, 0.008, self.world_width);
+            (
+                self.warp1_x.get([cx1, cz1, cy1]) * 120.0,
+                self.warp1_y.get([cx1 + 43.7, cz1 + 17.3, cy1]) * 120.0,
+                self.warp2_x.get([cx2, cz2, cy2]) * 40.0,
+                self.warp2_y.get([cx2 + 91.2, cz2 + 55.8, cy2]) * 40.0,
+            )
+        } else {
+            (
+                self.warp1_x.get([x * 0.002, y * 0.002]) * 120.0,
+                self.warp1_y.get([x * 0.002 + 43.7, y * 0.002 + 17.3]) * 120.0,
+                self.warp2_x.get([x * 0.008, y * 0.008]) * 40.0,
+                self.warp2_y.get([x * 0.008 + 91.2, y * 0.008 + 55.8]) * 40.0,
+            )
+        };
 
         let wx = x + w1x + w2x;
         let wy = y + w1y + w2y;
@@ -315,7 +352,16 @@ impl TectonicPlatesStrategy {
 
     /// Generate full tectonic sample with stress, boundary type, and volcanism.
     pub fn generate_full(&self, x: f64, y: f64) -> TectonicSample {
-        let (sx, sy) = self.warp_coordinates(x, y);
+        let (mut sx, sy) = self.warp_coordinates(x, y);
+
+        // Wrap sx for horizontal tiling
+        let cp_f = if self.cell_period > 0 {
+            let cp = self.world_width * self.plate_scale;
+            sx = ((sx % cp) + cp) % cp;
+            cp
+        } else {
+            0.0
+        };
 
         let ix = sx.floor() as i32;
         let iy = sy.floor() as i32;
@@ -338,7 +384,13 @@ impl TectonicPlatesStrategy {
                 let cx = cell_x as f64 + ox;
                 let cy = cell_y as f64 + oy;
 
-                let dist = ((sx - cx).powi(2) + (sy - cy).powi(2)).sqrt();
+                // Shortest-path distance considering horizontal wrapping
+                let mut ddx = sx - cx;
+                if cp_f > 0.0 {
+                    if ddx > cp_f * 0.5 { ddx -= cp_f; }
+                    if ddx < -cp_f * 0.5 { ddx += cp_f; }
+                }
+                let dist = (ddx.powi(2) + (sy - cy).powi(2)).sqrt();
 
                 if dist < min_dist {
                     second_dist = min_dist;
@@ -355,9 +407,9 @@ impl TectonicPlatesStrategy {
             }
         }
 
-        // Look up which plates own these cells
-        let plate_a_idx = self.registry.plate_for_cell(nearest_cell.0, nearest_cell.1);
-        let plate_b_idx = self.registry.plate_for_cell(second_cell.0, second_cell.1);
+        // Look up which plates own these cells (wrap cell x for horizontal tiling)
+        let plate_a_idx = self.registry.plate_for_cell(self.wrap_cell_ix(nearest_cell.0), nearest_cell.1);
+        let plate_b_idx = self.registry.plate_for_cell(self.wrap_cell_ix(second_cell.0), second_cell.1);
 
         let plate_id = self.plate_id_hash(nearest_cell.0, nearest_cell.1);
 
@@ -365,7 +417,12 @@ impl TectonicPlatesStrategy {
         let f2_minus_f1 = second_dist - min_dist;
 
         // Boundary perturbation — makes boundary position wobble locally
-        let perturb = self.boundary_perturb.get([x * 0.015, y * 0.015]) * 0.15;
+        let perturb = if self.world_width > 0.0 {
+            let [cx, cz, cy] = crate::wrap::cylindrical_noise_coords(x, y, 1.0, 0.015, self.world_width);
+            self.boundary_perturb.get([cx, cz, cy]) * 0.15
+        } else {
+            self.boundary_perturb.get([x * 0.015, y * 0.015]) * 0.15
+        };
         let perturbed_dist = f2_minus_f1 + perturb;
 
         // Determine boundary type and tangent

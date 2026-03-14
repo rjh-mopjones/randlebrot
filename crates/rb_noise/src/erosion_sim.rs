@@ -79,9 +79,9 @@ fn compute_d8_flow(elevation: &[f64], width: usize, height: usize) -> Vec<u8> {
             let mut best_dir = NO_FLOW;
 
             for (d, &(dx, dy)) in D8_OFFSETS.iter().enumerate() {
-                let nx = x as i32 + dx;
+                let nx = crate::wrap::wrap_grid_x(x as i32 + dx, width);
                 let ny = y as i32 + dy;
-                if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
+                if ny < 0 || ny >= height as i32 {
                     continue;
                 }
                 let nidx = ny as usize * width + nx as usize;
@@ -101,17 +101,18 @@ fn compute_d8_flow(elevation: &[f64], width: usize, height: usize) -> Vec<u8> {
 }
 
 /// Get the index of the receiver cell for a given cell and flow direction.
-fn receiver_index(idx: usize, dir: u8, width: usize) -> Option<usize> {
+fn receiver_index(idx: usize, dir: u8, width: usize, height: usize) -> Option<usize> {
     if dir == NO_FLOW {
         return None;
     }
     let (dx, dy) = D8_OFFSETS[dir as usize];
     let x = (idx % width) as i32 + dx;
     let y = (idx / width) as i32 + dy;
-    if x < 0 || y < 0 {
+    if y < 0 || y >= height as i32 {
         return None;
     }
-    Some(y as usize * width + x as usize)
+    let wrapped_x = crate::wrap::wrap_grid_x(x, width);
+    Some(y as usize * width + wrapped_x as usize)
 }
 
 /// Run the stream power erosion simulation.
@@ -174,7 +175,7 @@ pub fn simulate_erosion(
                 continue;
             }
 
-            let Some(recv_idx) = receiver_index(idx, dir, width) else {
+            let Some(recv_idx) = receiver_index(idx, dir, width, height) else {
                 h[idx] += params.dt * uplift[idx];
                 continue;
             };
@@ -210,9 +211,9 @@ pub fn simulate_erosion(
                 let y = idx / width;
 
                 for (d, &(dx, dy)) in D8_OFFSETS.iter().enumerate() {
-                    let nx = x as i32 + dx;
+                    let nx = crate::wrap::wrap_grid_x(x as i32 + dx, width);
                     let ny = y as i32 + dy;
-                    if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
+                    if ny < 0 || ny >= height as i32 {
                         continue;
                     }
                     let nidx = ny as usize * width + nx as usize;
