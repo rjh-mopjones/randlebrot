@@ -224,9 +224,10 @@ impl HumidityStrategy {
     ) -> f64 {
         let base_noise = (self.fbm(x, y, detail_level) + 1.0) * 0.5;
 
-        // Terminator ring: Gaussian peak at light_level ≈ 0.2 with width 0.15
+        // Terminator ring: Gaussian peak at light_level ≈ 0.2 with width 0.22
+        // Wider peak covers more of the map with appreciable humidity
         let terminator_center = 0.2;
-        let terminator_width = 0.15;
+        let terminator_width = 0.22;
         let terminator_peak = (-(light_level - terminator_center).powi(2)
             / (2.0 * terminator_width * terminator_width))
             .exp();

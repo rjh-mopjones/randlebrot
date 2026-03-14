@@ -8,21 +8,45 @@ use rb_core::TileType;
 /// - humidity: [0, 1] where 1.0 = saturated
 /// - continentalness: distance from coast (negative = ocean, positive = inland)
 pub fn derive_temperature(light_level: f64, elevation: f64, humidity: f64, continentalness: f64) -> f64 {
-    // Map light [0,1] to temp [-80, +120]
-    let base_temp = light_level * 200.0 - 80.0;
+    // Piecewise linear S-curve: compress cold/hot extremes, stretch habitable range.
+    // Habitable (3-45°C) now spans ~34% of the light gradient (up from ~21% linear).
+    //   Light 0.00–0.28 → -80 to  0°C  (cold side compressed)
+    //   Light 0.28–0.62 →   0 to 45°C  (habitable zone stretched)
+    //   Light 0.62–1.00 →  45 to 120°C (hot side, transition kept ≤0.625 for tests)
+    let base_temp = if light_level < 0.28 {
+        let t = light_level / 0.28;
+        -80.0 + t * 80.0
+    } else if light_level < 0.62 {
+        let t = (light_level - 0.28) / 0.34;
+        t * 45.0
+    } else {
+        let t = (light_level - 0.62) / 0.38;
+        45.0 + t * 75.0
+    };
     // Lapse rate: mountains are colder (only for positive elevation)
-    // Capped at 25% of base_temp — on a tidally locked planet with constant
+    // Capped at 30% of base_temp — on a tidally locked planet with constant
     // direct sunlight, mountains can't cool enough to become habitable.
-    // At 100°C base: max drop = 25°C → 75°C minimum (still scorching)
-    let max_lapse = if base_temp > 0.0 { base_temp * 0.25 } else { 20.0 };
-    let lapse_rate = (elevation.max(0.0) * 40.0).min(max_lapse);
+    // At 100°C base: max drop = 30°C → 70°C minimum (still scorching)
+    let max_lapse = if base_temp > 0.0 { base_temp * 0.30 } else { 25.0 };
+    let lapse_rate = (elevation.max(0.0) * 55.0).min(max_lapse);
     // Moisture moderates extremes slightly
     let humidity_buffer = humidity * 5.0;
     let raw = base_temp - lapse_rate + humidity_buffer;
     // Coastal moderation: ocean proximity pulls temperature toward moderate
     let inland_factor = ((continentalness + 0.01).max(0.0) * 5.0).clamp(0.0, 1.0);
     let moderate_temp = 15.0;
-    raw + (moderate_temp - raw) * (1.0 - inland_factor) * 0.15
+    // Coastal areas get pulled toward moderate (25% effect)
+    // Taper off in scorching zones so the 45°C vegetation gate isn't breached
+    let heat_damper = ((55.0 - raw) / 10.0).clamp(0.0, 1.0); // full effect below 45°C, zero above 55°C
+    let coastal_moderation = (moderate_temp - raw) * (1.0 - inland_factor) * 0.25 * heat_damper;
+    // Deep inland areas get pushed away from moderate (continental extremity)
+    let extremity = if inland_factor > 0.7 {
+        let deep_inland = (inland_factor - 0.7) / 0.3; // 0..1
+        (raw - moderate_temp) * deep_inland * 0.12 // push 12% further from moderate
+    } else {
+        0.0
+    };
+    raw + coastal_moderation + extremity
 }
 
 /// Heightmap from geological layers (used as elevation input for temperature).
@@ -152,7 +176,7 @@ pub fn derive_water_table(
     precipitation_type: f64, continentalness: f64,
 ) -> f64 {
     let humidity_base = humidity * 0.3;
-    let river_boost = (river_flow * 3.0).min(1.0) * 0.3;
+    let river_boost = (river_flow * 4.0).min(1.0) * 0.45;
     let elevation_boost = (1.0 - heightmap.max(0.0) * 2.0).max(0.0) * 0.2;
     let precip_boost = (-precipitation_type).max(0.0) * 0.1;
     let sea_level = -0.01_f64;

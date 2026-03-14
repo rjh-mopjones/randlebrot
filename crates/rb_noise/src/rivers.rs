@@ -83,7 +83,7 @@ impl RiverCharacter {
     /// Width multiplier for this character type.
     pub fn width_multiplier(&self) -> f64 {
         match self {
-            RiverCharacter::DryWadi => 0.0,
+            RiverCharacter::DryWadi => 0.3,
             RiverCharacter::SeasonalFlow => 0.6,
             RiverCharacter::Permanent => 1.0,
             RiverCharacter::Frozen => 0.9,
@@ -214,19 +214,20 @@ impl RiverNetwork {
         );
 
         // Step 1: Identify natural lakes (diff pre-fill vs post-fill, using ORIGINAL heightmap)
-        let filled = fill_depressions(&conditioned, width, height, sea_level);
+        let filled = fill_depressions(&conditioned, width, height, sea_level, Some(continentalness));
         let lakes = identify_lakes(heightmap, &filled, continentalness, light_level, width, height, sea_level);
 
         // Step 2: Geology-aware D8 flow direction (on conditioned + filled heightmap)
         let flow_dir = compute_geology_aware_flow(
-            &filled, rock_hardness, tectonic_stress, width, height, sea_level,
+            &filled, rock_hardness, tectonic_stress, width, height, sea_level, Some(continentalness),
         );
 
         // Step 3: Flow accumulation
         let accumulation = compute_flow_accumulation(&flow_dir, &filled, width, height);
 
         // Step 4: Build river tree
-        let min_accumulation = ((total as f64) * 0.0003).max(20.0) as u32;
+        // Lower threshold shows more tributaries on the macro map
+        let min_accumulation = ((total as f64) * 0.0002).max(15.0) as u32;
         let mut segments = build_river_tree(
             &flow_dir, &accumulation, continentalness, width, height, sea_level, min_accumulation,
         );
@@ -379,9 +380,7 @@ impl RiverNetwork {
             .unwrap_or(1);
 
         for seg in &self.segments {
-            if seg.character == RiverCharacter::BuriedIce
-                || seg.character == RiverCharacter::DryWadi
-            {
+            if seg.character == RiverCharacter::BuriedIce {
                 continue;
             }
 
@@ -411,9 +410,9 @@ impl RiverNetwork {
 
 // ─── LOD Drainage Thresholds ────────────────────────────────────────────────
 
-/// Drainage threshold for macro-level rendering (trunk rivers).
+/// Drainage threshold for macro-level rendering (trunk rivers + major tributaries).
 /// Set relative to typical max accumulation (~5000 on 1024×512 grids).
-pub const LOD_THRESHOLD_MACRO: u32 = 300;
+pub const LOD_THRESHOLD_MACRO: u32 = 150;
 /// Drainage threshold for meso-level rendering (major tributaries).
 pub const LOD_THRESHOLD_MESO: u32 = 50;
 /// Drainage threshold for micro-level rendering (full network).
@@ -524,9 +523,7 @@ pub fn rasterize_from_network(
     let pixels_per_world_unit = output_size as f64 / world_size;
 
     for constraint in &constraints {
-        if constraint.character == RiverCharacter::BuriedIce
-            || constraint.character == RiverCharacter::DryWadi
-        {
+        if constraint.character == RiverCharacter::BuriedIce {
             continue;
         }
 
@@ -623,19 +620,26 @@ impl Ord for FloodCell {
 /// O(n log n), guaranteed convergence in a single pass.
 /// Naturally assigns monotonically increasing elevations through filled areas,
 /// giving D8 flow clear drainage direction through flats.
-pub(crate) fn fill_depressions(elevation: &[f64], width: usize, height: usize, sea_level: f64) -> Vec<f64> {
+pub(crate) fn fill_depressions(elevation: &[f64], width: usize, height: usize, sea_level: f64, continentalness: Option<&[f64]>) -> Vec<f64> {
     let total = width * height;
     let epsilon = 1e-4;
     let mut filled = elevation.to_vec();
     let mut resolved = vec![false; total];
     let mut heap = BinaryHeap::new();
 
-    // Seed the heap with all ocean cells and grid-boundary cells
+    // Seed the heap with all ocean cells and grid-boundary cells.
+    // When continentalness is provided, use it for ocean classification
+    // instead of the (possibly smoothed) heightmap.
     for y in 0..height {
         for x in 0..width {
             let idx = y * width + x;
             let is_boundary = y == 0 || y == height - 1;
-            if elevation[idx] <= sea_level || is_boundary {
+            let is_ocean = if let Some(cont) = continentalness {
+                cont[idx] <= sea_level
+            } else {
+                elevation[idx] <= sea_level
+            };
+            if is_ocean || is_boundary {
                 heap.push(FloodCell { elevation: elevation[idx], index: idx });
                 resolved[idx] = true;
             }
@@ -699,13 +703,13 @@ fn condition_heightmap_for_drainage(
     // Step 1: Create a heavily smoothed heightmap that shows only large-scale terrain.
     // D8 flow on this surface follows macro-scale gradients (highlands → coast)
     // rather than chasing every noise wiggle.
-    let smoothed = box_blur(heightmap, width, height, 32);
+    let smoothed = box_blur(heightmap, width, height, 48);
 
     // Step 2: Blend original and smoothed heightmaps.
     // The smoothed version controls large-scale flow direction;
     // the original adds local variation for natural-looking river courses.
     // blend = 0.0 → pure original (fragmented), 1.0 → pure smooth (too straight)
-    let blend = 0.65;
+    let blend = 0.80;
     let mut conditioned = Vec::with_capacity(total);
     for idx in 0..total {
         conditioned.push(heightmap[idx] * (1.0 - blend) + smoothed[idx] * blend);
@@ -876,6 +880,7 @@ fn compute_geology_aware_flow(
     width: usize,
     height: usize,
     sea_level: f64,
+    continentalness: Option<&[f64]>,
 ) -> Vec<u8> {
     let mut flow_dir = vec![NO_FLOW; width * height];
 
@@ -883,7 +888,12 @@ fn compute_geology_aware_flow(
         for x in 0..width {
             let idx = y * width + x;
 
-            if elevation[idx] <= sea_level {
+            let is_ocean = if let Some(cont) = continentalness {
+                cont[idx] <= sea_level
+            } else {
+                elevation[idx] <= sea_level
+            };
+            if is_ocean {
                 continue;
             }
 
@@ -1082,11 +1092,6 @@ fn build_river_tree(
             }
 
             let next = ny as usize * width + nx as usize;
-
-            // If next cell is below threshold, terminate
-            if !is_river[next] && continentalness.get(next).copied().unwrap_or(0.0) >= sea_level {
-                break;
-            }
 
             current = next;
         }
@@ -1902,7 +1907,7 @@ impl RiverGenerator {
     /// Used by macro-level generation where we don't have per-pixel geological data
     /// separately (it's baked into the heightmap).
     pub fn generate(&self, elevation: &[f64], width: usize, height: usize) -> Vec<f64> {
-        let filled = fill_depressions(elevation, width, height, self.sea_level);
+        let filled = fill_depressions(elevation, width, height, self.sea_level, None);
         let flow_dir = self.compute_flow_directions_simple(&filled, width, height);
         let accumulation = compute_flow_accumulation(&flow_dir, &filled, width, height);
         self.generate_smooth_rivers(&flow_dir, &accumulation, width, height, None)
@@ -1918,7 +1923,7 @@ impl RiverGenerator {
         width: usize,
         height: usize,
     ) -> Vec<f64> {
-        let filled = fill_depressions(elevation, width, height, self.sea_level);
+        let filled = fill_depressions(elevation, width, height, self.sea_level, None);
         let flow_dir = self.compute_flow_directions_simple(&filled, width, height);
         let accumulation = compute_flow_accumulation(&flow_dir, &filled, width, height);
         let climate_threshold = self.compute_climate_threshold(light_level, humidity, width * height);
@@ -1940,7 +1945,7 @@ impl RiverGenerator {
         light_level: &[f64],
         humidity: &[f64],
     ) -> Vec<f64> {
-        let filled = fill_depressions(elevation, width, height, self.sea_level);
+        let filled = fill_depressions(elevation, width, height, self.sea_level, None);
         let flow_dir = self.compute_flow_directions_simple(&filled, width, height);
 
         let total = width * height;
@@ -1999,6 +2004,7 @@ impl RiverGenerator {
         let climate_threshold = self.compute_climate_threshold(light_level, humidity, total);
         self.generate_smooth_rivers(&flow_dir, &accumulation, width, height, Some(&climate_threshold))
     }
+
 
     /// Compute per-cell climate threshold for river visibility.
     fn compute_climate_threshold(&self, light_level: &[f64], humidity: &[f64], total: usize) -> Vec<u32> {
@@ -2087,7 +2093,7 @@ impl RiverGenerator {
         world_y: f64,
         world_size: f64,
     ) -> Vec<f64> {
-        let filled = fill_depressions(elevation, width, height, self.sea_level);
+        let filled = fill_depressions(elevation, width, height, self.sea_level, None);
         let flow_dir = self.compute_flow_directions_simple(&filled, width, height);
 
         let total = width * height;
@@ -2224,7 +2230,7 @@ mod tests {
             0.1, 0.1, 0.1, 0.1, 0.1,
         ];
 
-        let filled = fill_depressions(&elevation, width, height, sea_level);
+        let filled = fill_depressions(&elevation, width, height, sea_level, None);
         let center_idx = 2 * width + 2;
         assert!(
             filled[center_idx] >= elevation[center_idx],
@@ -2324,11 +2330,12 @@ mod tests {
             rock_banded[y * width + 4] = 0.95;
         }
 
+        let continentalness = elevation.clone(); // use elevation as continentalness for this test
         let flow_uniform = compute_geology_aware_flow(
-            &elevation, &rock_uniform, &tect_zero, width, height, sea_level,
+            &elevation, &rock_uniform, &tect_zero, width, height, sea_level, Some(&continentalness),
         );
         let flow_banded = compute_geology_aware_flow(
-            &elevation, &rock_banded, &tect_zero, width, height, sea_level,
+            &elevation, &rock_banded, &tect_zero, width, height, sea_level, Some(&continentalness),
         );
 
         // With banded hardness, some flow directions should differ
@@ -2409,7 +2416,7 @@ mod tests {
         original[4 * width + 3] = 0.0;
         original[4 * width + 4] = 0.0;
 
-        let filled = fill_depressions(&original, width, height, sea_level);
+        let filled = fill_depressions(&original, width, height, sea_level, None);
         let continentalness = vec![0.2; width * height]; // all land
         let light_level = vec![0.3; width * height];
 

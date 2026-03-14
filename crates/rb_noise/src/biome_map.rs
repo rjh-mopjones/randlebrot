@@ -386,7 +386,7 @@ impl BiomeMap {
         let water_table: Vec<f64> = (0..total_pixels).map(|idx| {
             let twi = derived::derive_twi(erosion_result.drainage_area[idx] as f64, slope_grid[idx]);
             // Blend TWI with river flow for riparian boost
-            let river_boost = (rivers[idx] * 3.0).min(1.0) * 0.3;
+            let river_boost = (rivers[idx] * 4.0).min(1.0) * 0.45;
             (twi + river_boost).clamp(0.0, 1.0)
         }).collect();
 
@@ -644,7 +644,7 @@ impl BiomeMap {
         let gpu_slope_grid = compute_slope_grid(&heightmap_vec, width, height);
         let water_table: Vec<f64> = (0..total_pixels).map(|idx| {
             let twi = derived::derive_twi(gpu_erosion_result.drainage_area[idx] as f64, gpu_slope_grid[idx]);
-            let river_boost = (rivers[idx] * 3.0).min(1.0) * 0.3;
+            let river_boost = (rivers[idx] * 4.0).min(1.0) * 0.45;
             (twi + river_boost).clamp(0.0, 1.0)
         }).collect();
         let vegetation_density: Vec<f64> = biomes.iter().zip(water_table.iter())

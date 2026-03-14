@@ -178,8 +178,10 @@ impl BiomeSplines {
         let elev_class = ElevationClass::from_elevation(above_sea);
         let terrain = TerrainClass::from_erosion(erosion);
 
-        // Step 5b: Hard temperature gate — above 45°C, no vegetation. Period.
-        if temperature > 45.0 {
+        // Step 5b: Temperature gate — above ~45°C, no vegetation.
+        // Gate varies ±3°C with rock_hardness for a fuzzy transition.
+        let gate_temp = 45.0 + (rock_hardness - 0.5) * 6.0; // 42-48°C
+        if temperature > gate_temp {
             moisture = MoistureClass::Arid;
         } else if aridity > 0.75 {
             moisture = MoistureClass::Arid;
@@ -355,7 +357,12 @@ impl BiomeSplines {
             temperature + temp_perturb
         };
 
-        let base = self.evaluate_with_light(continentalness, biome_temp, tectonic, erosion, peaks_valleys, humidity, aridity, rock_hardness, light_level);
+        // Perturb humidity using peaks_valleys as a smooth noise source
+        // to break up moisture class boundaries (forest→savanna, steppe→desert)
+        let humid_perturb = peaks_valleys * 0.08; // ±8% humidity shift
+        let biome_humidity = (humidity + humid_perturb).clamp(0.0, 1.0);
+
+        let base = self.evaluate_with_light(continentalness, biome_temp, tectonic, erosion, peaks_valleys, biome_humidity, aridity, rock_hardness, light_level);
 
         // Position hash for deterministic spatial noise
         let hash = (((px.wrapping_mul(374761393)) ^ (py.wrapping_mul(668265263))) & 0xFFFF) as f64 / 65535.0;
@@ -367,7 +374,7 @@ impl BiomeSplines {
             tectonic,
             erosion,
             peaks_valleys,
-            humidity + (hash - 0.5) * 0.06,
+            biome_humidity + (hash - 0.5) * 0.06,
             aridity,
             rock_hardness,
         );

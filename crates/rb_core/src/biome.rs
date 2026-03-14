@@ -120,15 +120,15 @@ impl TileType {
             Self::Jungle => [0, 80, 32],        // Very dark green - hot humid forest
             Self::Desert => [255, 215, 0],      // Gold
             Self::Sahara => [255, 165, 0],      // Orange
-            Self::Erg => [240, 200, 120],       // Sand sea yellow
-            Self::Hamada => [180, 140, 100],    // Rocky desert tan
-            Self::SaltFlat => [222, 205, 165],  // Warm desert salt crust
-            Self::Badlands => [178, 102, 68],   // Rust brown - eroded arid terrain
-            Self::Oasis => [60, 180, 60],       // Verdant green
-            Self::Volcanic => [64, 32, 32],     // Dark red-brown - active volcanic
-            Self::LavaField => [80, 40, 30],    // Cooled lava dark
-            Self::MoltenWaste => [120, 50, 20], // Hot volcanic brown
-            Self::ScorchedRock => [90, 70, 60], // Heat-blasted gray-brown
+            Self::Erg => [235, 210, 140],       // Bright sandy yellow — distinct from Sahara orange
+            Self::Hamada => [130, 95, 70],       // Dark rocky brown — exposed bedrock pavement
+            Self::SaltFlat => [240, 235, 220],   // Near-white salt crust — bright, bleached
+            Self::Badlands => [178, 102, 68],    // Rust brown - eroded arid terrain
+            Self::Oasis => [60, 180, 60],        // Verdant green
+            Self::Volcanic => [64, 32, 32],      // Dark red-brown - active volcanic
+            Self::LavaField => [80, 40, 30],     // Cooled lava dark
+            Self::MoltenWaste => [100, 30, 15],  // Red-black volcanic — darker, more menacing
+            Self::ScorchedRock => [60, 55, 50],  // Dark charcoal — heat-blasted basalt
         }
     }
 

@@ -145,7 +145,7 @@ pub fn simulate_erosion(
     for iter in 0..params.iterations {
         // Fill depressions periodically (expensive, not needed every iteration)
         if iter % 5 == 0 {
-            h = fill_depressions(&h, width, height, params.sea_level);
+            h = fill_depressions(&h, width, height, params.sea_level, None);
         }
 
         // Compute D8 flow directions on current terrain
@@ -238,7 +238,7 @@ pub fn simulate_erosion(
     }
 
     // Final drainage computation on sculpted terrain
-    h = fill_depressions(&h, width, height, params.sea_level);
+    h = fill_depressions(&h, width, height, params.sea_level, None);
     flow_dir = compute_d8_flow(&h, width, height);
     accumulation = compute_flow_accumulation(&flow_dir, &h, width, height);
 

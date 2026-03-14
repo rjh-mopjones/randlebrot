@@ -143,8 +143,8 @@ pub fn render_terrain(map: &BiomeMap, hints: Option<&NormalizationHints>) -> Vec
                 }
                 let rmoist = map.water_table[idx];
                 let temp_here = map.temperature[idx];
-                if rmoist > 0.1 && river <= 0.02 && temp_here < 45.0 {
-                    let green_tint = ((rmoist - 0.1) * 0.15).clamp(0.0, 0.1);
+                if rmoist > 0.05 && river <= 0.02 && temp_here < 45.0 {
+                    let green_tint = ((rmoist - 0.05) * 0.25).clamp(0.0, 0.15);
                     pixel = lerp_rgb(pixel, [60, 160, 60], green_tint);
                 }
 
@@ -282,6 +282,8 @@ fn coastal_fringe(continentalness: f64) -> f64 {
 /// Lambertian hillshading on contrast-stretched heightmap.
 /// Since the input is normalized [0,1], derivatives are meaningful and
 /// z_factor controls how dramatic the relief shading appears.
+/// Edge pixels use clamped coordinates instead of flat defaults to avoid
+/// visible grid seams when tiles are stitched together.
 fn compute_hillshade(
     norm_height: &[f64],
     x: usize,
@@ -291,17 +293,22 @@ fn compute_hillshade(
     light_dir: [f64; 3],
 ) -> f64 {
     let r = 2usize;
-    if x < r || x + r >= w || y < r || y + r >= h {
-        return 0.8;
-    }
-    let get = |xi: usize, yi: usize| norm_height[yi * w + xi];
+    let get = |xi: usize, yi: usize| norm_height[yi.min(h - 1) * w + xi.min(w - 1)];
 
     // High z_factor because normalized heightmap has full [0,1] range
     // and we want dramatic terrain relief
     let z_factor = 30.0;
 
-    let dx = (get(x + r, y) - get(x - r, y)) / (2 * r) as f64;
-    let dy = (get(x, y + r) - get(x, y - r)) / (2 * r) as f64;
+    // Clamp at edges instead of returning a default — eliminates tile boundary seams
+    let x_lo = x.saturating_sub(r);
+    let x_hi = (x + r).min(w - 1);
+    let y_lo = y.saturating_sub(r);
+    let y_hi = (y + r).min(h - 1);
+    let x_span = (x_hi - x_lo).max(1) as f64;
+    let y_span = (y_hi - y_lo).max(1) as f64;
+
+    let dx = (get(x_hi, y) - get(x_lo, y)) / x_span;
+    let dy = (get(x, y_hi) - get(x, y_lo)) / y_span;
 
     let normal = normalize([-dx * z_factor, -dy * z_factor, 1.0]);
     let dot = normal[0] * light_dir[0] + normal[1] * light_dir[1] + normal[2] * light_dir[2];
@@ -310,14 +317,15 @@ fn compute_hillshade(
 }
 
 /// Approximate ambient occlusion from heightmap curvature.
+/// Edge pixels use clamped coordinates to avoid tile boundary seams.
 fn compute_ao(norm_height: &[f64], x: usize, y: usize, w: usize, h: usize) -> f64 {
     let r = 2usize;
-    if x < r || x + r >= w || y < r || y + r >= h {
-        return 1.0;
-    }
-    let get = |xi: usize, yi: usize| norm_height[yi * w + xi];
+    let get = |xi: usize, yi: usize| norm_height[yi.min(h - 1) * w + xi.min(w - 1)];
     let center = get(x, y);
-    let neighbors = get(x - r, y) + get(x + r, y) + get(x, y - r) + get(x, y + r);
+    let neighbors = get(x.saturating_sub(r), y)
+        + get((x + r).min(w - 1), y)
+        + get(x, y.saturating_sub(r))
+        + get(x, (y + r).min(h - 1));
     let laplacian = neighbors / 4.0 - center;
 
     // Normalized heightmap so curvature values are larger → visible AO
@@ -335,14 +343,16 @@ fn render_ocean(continentalness: f64, light_level: f64, temperature: f64) -> [u8
     let mut pixel = lerp_rgb(shallow, deep, depth_norm);
 
     // Frozen ocean — bright ice replaces dark water
-    if temperature < -15.0 {
-        let ice_factor = ((-15.0 - temperature) / 20.0).clamp(0.0, 1.0);
+    // Start at -10°C for a wider, more gradual transition from ice cap to open water
+    if temperature < -10.0 {
+        let ice_factor = ((-10.0 - temperature) / 25.0).clamp(0.0, 1.0);
         pixel = lerp_rgb(pixel, [235, 245, 255], ice_factor);
     }
 
     // Light-level modulation: darken on dark side, but less for frozen ocean
-    let brightness = if temperature < -15.0 {
-        0.75 + light_level * 0.25 // frozen: brighter minimum
+    // Higher minimum brightness (0.85) eliminates the dark gray band
+    let brightness = if temperature < -10.0 {
+        0.85 + light_level * 0.15 // frozen: bright minimum, small range
     } else {
         0.5 + light_level * 0.5
     };

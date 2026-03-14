@@ -53,9 +53,9 @@ impl WindField {
                 let light = light_level[idx];
                 let base_speed = (light * 0.6 + 0.1).min(0.8);
 
-                // Mountains block wind
+                // Mountains block wind — stronger blocking for visible rain shadows
                 let elev = heightmap[idx].max(0.0);
-                let mountain_block = (1.0 - elev * 3.0).max(0.1);
+                let mountain_block = (1.0 - elev * 5.0).max(0.05);
 
                 speed[idx] = (base_speed * mountain_block).clamp(0.0, 1.0);
             }
@@ -119,10 +119,11 @@ pub fn advect_moisture(
 
                 let deposit = if elev_diff > 0.01 {
                     // Windward slope: orographic lift deposits moisture
-                    (elev_diff * 2.0).min(0.3) * upwind_moisture
+                    // Stronger factor creates visible rain shadows behind mountains
+                    (elev_diff * 4.0).min(0.5) * upwind_moisture
                 } else if elev_diff < -0.01 {
-                    // Lee slope: rain shadow dries air
-                    elev_diff * 0.5 // negative, reduces moisture
+                    // Lee slope: rain shadow dries air (stronger drying)
+                    elev_diff * 1.0 // negative, reduces moisture
                 } else {
                     0.0
                 };
