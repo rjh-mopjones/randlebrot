@@ -79,7 +79,7 @@ pub fn generate_with_progress(
     // Phase 1: Analysis grids (all independent)
     let river_dist = analysis::compute_river_distance_field(terrain);
     let habitability = analysis::compute_habitability(terrain, &river_dist);
-    let navigation_cost = analysis::compute_navigation_cost(terrain);
+    let navigation_cost = analysis::compute_navigation_cost(terrain, &river_dist);
     let resource_desirability = analysis::compute_resource_desirability(terrain);
 
     let hab_nonzero = habitability.iter().filter(|&&v| v > 0.01).count();

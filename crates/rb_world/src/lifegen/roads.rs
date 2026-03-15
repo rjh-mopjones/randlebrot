@@ -28,7 +28,9 @@ pub fn build_roads(
         .flat_map(|&(a, b)| [(a.min(b), a.max(b))])
         .collect();
 
-    // Capital-to-capital highways (distance-capped to avoid impossibly long A* searches)
+    // Capital-to-capital imperial network: MST over capitals for the backbone,
+    // plus each capital gets up to 1 extra nearest-capital edge for redundancy.
+    // This produces a sparse arterial network rather than a dense mesh.
     let capital_indices: Vec<usize> = settlements
         .iter()
         .enumerate()
@@ -38,15 +40,51 @@ pub fn build_roads(
         .map(|(i, _)| i)
         .collect();
 
-    for i in 0..capital_indices.len() {
-        for j in (i + 1)..capital_indices.len() {
-            let a = capital_indices[i];
-            let b = capital_indices[j];
+    if capital_indices.len() >= 2 {
+        // Build a sub-slice of just capital settlements for MST
+        let capital_settlements: Vec<SettlementSeed> = capital_indices
+            .iter()
+            .map(|&i| settlements[i].clone())
+            .collect();
+        let capital_mst = prim_mst(&capital_settlements);
+
+        // Map MST edges back to original settlement indices
+        for (local_a, local_b) in &capital_mst {
+            let a = capital_indices[*local_a];
+            let b = capital_indices[*local_b];
             let key = (a.min(b), a.max(b));
             if !existing.contains(&key) {
-                let dist = euclidean_dist(settlements[a].position, settlements[b].position);
+                edges.push((a, b));
+            }
+        }
+
+        // Each capital gets up to 1 extra nearest-capital edge (beyond MST)
+        let existing_caps: HashSet<(usize, usize)> = edges
+            .iter()
+            .flat_map(|&(a, b)| [(a.min(b), a.max(b))])
+            .collect();
+
+        for &ci in &capital_indices {
+            let mut nearest: Option<(usize, f64)> = None;
+            for &cj in &capital_indices {
+                if ci == cj {
+                    continue;
+                }
+                let key = (ci.min(cj), ci.max(cj));
+                if existing_caps.contains(&key) {
+                    continue;
+                }
+                let dist = euclidean_dist(settlements[ci].position, settlements[cj].position);
                 if dist <= 1500.0 {
-                    edges.push((a, b));
+                    if nearest.map_or(true, |(_, nd)| dist < nd) {
+                        nearest = Some((cj, dist));
+                    }
+                }
+            }
+            if let Some((cj, _)) = nearest {
+                let key = (ci.min(cj), ci.max(cj));
+                if !existing_caps.contains(&key) {
+                    edges.push((ci, cj));
                 }
             }
         }
@@ -83,12 +121,42 @@ pub fn build_roads(
         }
     }
 
-    // --- Step 3 & 4 & 5: A* each edge (parallel), simplify, convert to RoadSegments ---
-    let road_segments: Vec<RoadSegment> = edges
+    // --- Step 3: Expand imperial edges through intermediate settlements ---
+    // Imperial roads (capital-to-capital) are routed through intermediate
+    // town+ settlements within a corridor, like real Roman roads.
+    let mut expanded_edges: Vec<(usize, usize, u8)> = Vec::new(); // (a, b, road_type)
+
+    for &(idx_a, idx_b) in &edges {
+        let sa = &settlements[idx_a];
+        let sb = &settlements[idx_b];
+        let road_type = classify_road(sa, sb);
+
+        if road_type == 0 {
+            // Imperial: find intermediate waypoints
+            let waypoints = find_imperial_waypoints(
+                idx_a, idx_b, settlements,
+            );
+            if waypoints.is_empty() {
+                expanded_edges.push((idx_a, idx_b, 0));
+            } else {
+                let mut chain = vec![idx_a];
+                chain.extend(waypoints);
+                chain.push(idx_b);
+                for pair in chain.windows(2) {
+                    expanded_edges.push((pair[0], pair[1], 0));
+                }
+            }
+        } else {
+            expanded_edges.push((idx_a, idx_b, road_type));
+        }
+    }
+
+    // --- Step 4 & 5: A* each edge (parallel), simplify, convert to RoadSegments ---
+    let road_segments: Vec<RoadSegment> = expanded_edges
         .par_iter()
-        .flat_map_iter(|(idx_a, idx_b)| {
-            let sa = &settlements[*idx_a];
-            let sb = &settlements[*idx_b];
+        .flat_map_iter(|&(idx_a, idx_b, road_type_id)| {
+            let sa = &settlements[idx_a];
+            let sb = &settlements[idx_b];
 
             let from = (
                 (sa.position.0.round() as usize).min(width.saturating_sub(1)),
@@ -120,7 +188,6 @@ pub fn build_roads(
             };
 
             let simplified = simplify_path(&path, 3.0);
-            let road_type_id = classify_road(sa, sb);
 
             simplified
                 .windows(2)
@@ -418,6 +485,82 @@ fn classify_road(a: &SettlementSeed, b: &SettlementSeed) -> u8 {
     }
 
     2 // Trail
+}
+
+/// Find intermediate town+ settlements along an imperial road corridor.
+///
+/// Searches for settlements within 200px perpendicular distance of the line
+/// between the two capitals. Returns settlement indices sorted by projection
+/// along the line (nearest to `idx_a` first).
+fn find_imperial_waypoints(
+    idx_a: usize,
+    idx_b: usize,
+    settlements: &[SettlementSeed],
+) -> Vec<usize> {
+    const CORRIDOR_WIDTH: f64 = 200.0;
+
+    let a_pos = settlements[idx_a].position;
+    let b_pos = settlements[idx_b].position;
+
+    let dx = b_pos.0 - a_pos.0;
+    let dy = b_pos.1 - a_pos.1;
+    let line_len_sq = dx * dx + dy * dy;
+    if line_len_sq < 1.0 {
+        return Vec::new();
+    }
+    let line_len = line_len_sq.sqrt();
+
+    // Unit direction and normal
+    let dir_x = dx / line_len;
+    let dir_y = dy / line_len;
+
+    let mut candidates: Vec<(usize, f64)> = Vec::new(); // (index, projection_along_line)
+
+    for (i, s) in settlements.iter().enumerate() {
+        if i == idx_a || i == idx_b {
+            continue;
+        }
+
+        // Only route through towns or larger
+        if !is_town_or_larger(s.size_class) {
+            continue;
+        }
+
+        // Vector from A to this settlement
+        let vx = s.position.0 - a_pos.0;
+        let vy = s.position.1 - a_pos.1;
+
+        // Projection along the line (0 = at A, line_len = at B)
+        let proj = vx * dir_x + vy * dir_y;
+
+        // Must be between A and B (with small margin)
+        if proj < 30.0 || proj > line_len - 30.0 {
+            continue;
+        }
+
+        // Perpendicular distance from the line
+        let perp = (vx * (-dir_y) + vy * dir_x).abs();
+        if perp > CORRIDOR_WIDTH {
+            continue;
+        }
+
+        candidates.push((i, proj));
+    }
+
+    // Sort by projection along the line
+    candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Greedily select waypoints with minimum spacing to avoid clustering
+    let min_spacing = 60.0;
+    let mut selected: Vec<(usize, f64)> = Vec::new();
+    for (idx, proj) in candidates {
+        let too_close = selected.iter().any(|&(_, sp)| (proj - sp).abs() < min_spacing);
+        if !too_close {
+            selected.push((idx, proj));
+        }
+    }
+
+    selected.into_iter().map(|(idx, _)| idx).collect()
 }
 
 /// Check if a settlement's size class is Town or larger.

@@ -154,8 +154,10 @@ pub fn compute_habitability(terrain: &dyn TerrainQuery, river_dist: &[f32]) -> V
 ///
 /// 0.0 = impassable, 1.0 = trivially easy traversal.
 /// Based on biome traversability minus slope and elevation penalties.
+/// River crossings are expensive (bridge cost), but near-river pixels
+/// get a bonus (valley roads).
 /// Ocean pixels are 0.0.
-pub fn compute_navigation_cost(terrain: &dyn TerrainQuery) -> Vec<f32> {
+pub fn compute_navigation_cost(terrain: &dyn TerrainQuery, river_dist: &[f32]) -> Vec<f32> {
     let w = terrain.width();
     let h = terrain.height();
     let mut grid = vec![0.0f32; w * h];
@@ -182,7 +184,20 @@ pub fn compute_navigation_cost(terrain: &dyn TerrainQuery) -> Vec<f32> {
                     0.0
                 };
 
-                let result = (biome_cost - slope_penalty - elev_penalty).clamp(0.0, 1.0);
+                let mut result = (biome_cost - slope_penalty - elev_penalty).clamp(0.0, 1.0);
+
+                // River interaction: crossing is expensive, following alongside is cheap
+                let idx = y * w + x;
+                let rd = river_dist[idx];
+                if rd < 1.0 {
+                    // On a river pixel: heavy crossing penalty (bridge cost)
+                    result *= 0.15;
+                } else if rd < 20.0 {
+                    // Near river: valley bonus — roads prefer to follow rivers
+                    let bonus = 0.15 * (1.0 - rd as f64 / 20.0);
+                    result = (result + bonus).min(1.0);
+                }
+
                 row[x] = result as f32;
             }
         });
