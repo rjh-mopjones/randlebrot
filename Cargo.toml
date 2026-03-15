@@ -12,8 +12,8 @@ members = [
 ]
 
 [workspace.dependencies]
-bevy = { version = "0.15", default-features = true }
-bevy_egui = "0.31"
+bevy = { version = "0.18", default-features = true }
+bevy_egui = "0.39"
 image = { version = "0.25", default-features = false, features = ["png"] }
 noise = "0.9"
 serde = { version = "1", features = ["derive"] }

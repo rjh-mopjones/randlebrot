@@ -20,7 +20,10 @@ impl Plugin for RbEditorPlugin {
     fn build(&self, app: &mut App) {
         // Only add EguiPlugin if not already added
         if !app.is_plugin_added::<EguiPlugin>() {
-            app.add_plugins(EguiPlugin);
+            app.add_plugins(EguiPlugin {
+                enable_multipass_for_primary_context: false,
+                ..Default::default()
+            });
         }
 
         app

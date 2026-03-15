@@ -74,7 +74,7 @@ pub fn mode_bar_system(
     current_mode: Res<State<AppMode>>,
     mut next_mode: ResMut<NextState<AppMode>>,
 ) {
-    egui::TopBottomPanel::top("mode_bar").show(contexts.ctx_mut(), |ui| {
+    egui::TopBottomPanel::top("mode_bar").show(contexts.ctx_mut().unwrap(), |ui| {
         ui.horizontal(|ui| {
             for mode in AppMode::all() {
                 let is_selected = current_mode.get() == mode;
@@ -103,7 +103,7 @@ pub fn terrain_panel_system(
 
     egui::SidePanel::left("generator_panel")
         .default_width(180.0)
-        .show(contexts.ctx_mut(), |ui| {
+        .show(contexts.ctx_mut().unwrap(), |ui| {
             ui.heading("World Generator");
             ui.separator();
 
@@ -270,7 +270,7 @@ pub fn terrain_panel_system(
         egui::Window::new("Load World")
             .collapsible(false)
             .resizable(true)
-            .show(contexts.ctx_mut(), |ui| {
+            .show(contexts.ctx_mut().unwrap(), |ui| {
                 ui.label("Select a world to load:");
                 ui.separator();
 

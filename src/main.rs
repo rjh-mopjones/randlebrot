@@ -23,7 +23,7 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Randlebrot - World Editor".into(),
-                resolution: (MAP_WIDTH as f32, MAP_HEIGHT as f32).into(),
+                resolution: bevy::window::WindowResolution::new(MAP_WIDTH as u32, MAP_HEIGHT as u32),
                 ..default()
             }),
             ..default()
@@ -31,7 +31,7 @@ fn main() {
         // State and events
         .init_state::<AppMode>()
         .init_state::<AppPhase>()
-        .add_event::<ModeTransitionEvent>()
+        .add_message::<ModeTransitionEvent>()
         .init_resource::<CurrentLayer>()
         .init_resource::<GeneratorParams>()
         .init_resource::<CursorWorldPos>()
@@ -215,6 +215,21 @@ const MAX_CONCURRENT_TILES: usize = 16;
 
 /// Meso tile world size (8×8 world units).
 const MESO_WORLD_SIZE: f64 = 8.0;
+
+/// Helper: get the orthographic scale from a Projection enum.
+fn ortho_scale(projection: &Projection) -> f32 {
+    match projection {
+        Projection::Orthographic(o) => o.scale,
+        _ => 1.0,
+    }
+}
+
+/// Helper: set the orthographic scale on a Projection enum.
+fn set_ortho_scale(projection: &mut Projection, scale: f32) {
+    if let Projection::Orthographic(ref mut o) = *projection {
+        o.scale = scale;
+    }
+}
 
 /// Number of meso tiles per macro chunk edge (64/8 = 8).
 const MESO_GRID_SIZE: i32 = 8;
@@ -527,7 +542,7 @@ fn config_ui(
     mut next_phase: ResMut<NextState<AppPhase>>,
     mut commands: Commands,
 ) {
-    let ctx = contexts.ctx_mut();
+    let ctx = contexts.ctx_mut().unwrap();
 
     egui::CentralPanel::default()
         .frame(egui::Frame::default().fill(egui::Color32::from_rgb(30, 30, 30)))
@@ -927,7 +942,7 @@ fn macro_pregen_progress_ui(
     mut contexts: EguiContexts,
     pregen: Res<MacroPregenState>,
 ) {
-    let ctx = contexts.ctx_mut();
+    let ctx = contexts.ctx_mut().unwrap();
 
     egui::CentralPanel::default()
         .frame(egui::Frame::default().fill(egui::Color32::from_rgb(30, 30, 30)))
@@ -1031,7 +1046,7 @@ fn lifegen_progress_ui(
     mut contexts: EguiContexts,
     task: Res<LifeGenTask>,
 ) {
-    let ctx = contexts.ctx_mut();
+    let ctx = contexts.ctx_mut().unwrap();
 
     egui::CentralPanel::default()
         .frame(egui::Frame::default().fill(egui::Color32::from_rgb(30, 30, 30)))
@@ -1109,7 +1124,7 @@ fn meso_pregen_progress_ui(
     mut contexts: EguiContexts,
     pregen: Res<MesoPregenState>,
 ) {
-    let ctx = contexts.ctx_mut();
+    let ctx = contexts.ctx_mut().unwrap();
     egui::Window::new("Generating Meso Tiles")
         .collapsible(false)
         .resizable(false)
@@ -1162,7 +1177,7 @@ fn enqueue_and_dispatch_tiles(
     global_rivers: Option<Res<GlobalRiverNetwork>>,
 ) {
     let Some(world_textures) = world_textures else { return };
-    let Ok(camera_transform) = camera_query.get_single() else { return };
+    let Ok(camera_transform) = camera_query.single() else { return };
     let camera_pos = camera_transform.translation;
 
     let seed = world_def.seed;
@@ -1390,7 +1405,7 @@ fn handle_layer_change(
 }
 
 fn log_mode_transition(
-    mut events: EventReader<ModeTransitionEvent>,
+    mut events: MessageReader<ModeTransitionEvent>,
 ) {
     for event in events.read() {
         println!("Mode: {} → {}", event.from.name(), event.to.name());
@@ -1407,7 +1422,7 @@ fn highlight_info_ui(
         .anchor(egui::Align2::RIGHT_TOP, [-8.0, 8.0])
         .resizable(false)
         .collapsible(false)
-        .show(contexts.ctx_mut(), |ui| {
+        .show(contexts.ctx_mut().unwrap(), |ui| {
             if let Some(ref sel) = selected_chunk {
                 let (sx, sy) = sel.chunk_coord;
                 ui.label(format!("Selected: ({sx}, {sy})"));
@@ -1559,7 +1574,7 @@ fn manage_lifegen_overlay(
     let image = create_image(lifegen.width, lifegen.height, rgba_data);
     let image_handle = images.add(image);
 
-    if let Ok((_entity, mut sprite)) = overlay_query.get_single_mut() {
+    if let Ok((_entity, mut sprite)) = overlay_query.single_mut() {
         sprite.image = image_handle;
     } else {
         commands.spawn((
@@ -1600,8 +1615,8 @@ fn show_lifegen_overlay(
 // ─── Camera & Input ──────────────────────────────────────────────────────────
 
 fn camera_zoom(
-    mut scroll_events: EventReader<MouseWheel>,
-    mut query: Query<&mut OrthographicProjection, With<Camera2d>>,
+    mut scroll_events: MessageReader<MouseWheel>,
+    mut query: Query<&mut Projection, With<Camera2d>>,
 ) {
     let mut scroll_delta = 0.0;
 
@@ -1618,15 +1633,16 @@ fn camera_zoom(
 
     for mut projection in &mut query {
         let zoom_factor = 1.0 - scroll_delta;
-        projection.scale = (projection.scale * zoom_factor).clamp(0.05, 10.0);
+        let new_scale = (ortho_scale(&projection) * zoom_factor).clamp(0.05, 10.0);
+        set_ortho_scale(&mut projection, new_scale);
     }
 }
 
 fn camera_pan(
     keyboard: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    mut motion_events: EventReader<bevy::input::mouse::MouseMotion>,
-    mut query: Query<(&mut Transform, &OrthographicProjection), With<Camera2d>>,
+    mut motion_events: MessageReader<bevy::input::mouse::MouseMotion>,
+    mut query: Query<(&mut Transform, &Projection), With<Camera2d>>,
     time: Res<Time>,
     mut contexts: EguiContexts,
 ) {
@@ -1646,7 +1662,7 @@ fn camera_pan(
         pan_delta.y -= pan_speed * time.delta_secs();
     }
 
-    let over_ui = contexts.ctx_mut().is_pointer_over_area();
+    let over_ui = contexts.ctx_mut().unwrap().is_pointer_over_area();
     if mouse.pressed(MouseButton::Left) && !over_ui {
         for event in motion_events.read() {
             pan_delta.x -= event.delta.x;
@@ -1661,8 +1677,9 @@ fn camera_pan(
     }
 
     for (mut transform, projection) in &mut query {
-        transform.translation.x += pan_delta.x * projection.scale;
-        transform.translation.y += pan_delta.y * projection.scale;
+        let scale = ortho_scale(projection);
+        transform.translation.x += pan_delta.x * scale;
+        transform.translation.y += pan_delta.y * scale;
     }
 }
 
@@ -1671,9 +1688,9 @@ fn update_cursor_world_pos(
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
     mut cursor_pos: ResMut<CursorWorldPos>,
 ) {
-    let Ok(window) = windows.get_single() else { return };
+    let Ok(window) = windows.single() else { return };
     let Some(cursor_screen_pos) = window.cursor_position() else { return };
-    let Ok((camera, camera_transform)) = camera_query.get_single() else { return };
+    let Ok((camera, camera_transform)) = camera_query.single() else { return };
 
     if let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_screen_pos) {
         cursor_pos.0 = world_pos;
@@ -1687,9 +1704,9 @@ fn update_chunk_highlight(
     mut contexts: EguiContexts,
     mut highlight_info: ResMut<HighlightInfo>,
 ) {
-    let Ok((mut highlight_transform, mut highlight_sprite)) = highlight_query.get_single_mut() else { return };
+    let Ok((mut highlight_transform, mut highlight_sprite)) = highlight_query.single_mut() else { return };
 
-    if contexts.ctx_mut().is_pointer_over_area() {
+    if contexts.ctx_mut().unwrap().is_pointer_over_area() {
         highlight_transform.translation.x = -10000.0;
         highlight_info.active = false;
         return;
@@ -1732,16 +1749,16 @@ fn update_chunk_highlight(
 
 /// Calculate which chunks are visible in the camera viewport.
 fn calculate_visible_chunks(
-    camera_query: Query<(&Transform, &OrthographicProjection), With<Camera2d>>,
+    camera_query: Query<(&Transform, &Projection), With<Camera2d>>,
     windows: Query<&Window>,
     mut visible_range: ResMut<VisibleChunkRange>,
     world_def: Res<WorldDefinition>,
 ) {
-    let Ok((camera_transform, projection)) = camera_query.get_single() else { return };
-    let Ok(window) = windows.get_single() else { return };
+    let Ok((camera_transform, projection)) = camera_query.single() else { return };
+    let Ok(window) = windows.single() else { return };
 
     let camera_pos = camera_transform.translation;
-    let scale = projection.scale;
+    let scale = ortho_scale(projection);
 
     let half_viewport_width = (window.width() / 2.0) * scale;
     let half_viewport_height = (window.height() / 2.0) * scale;
@@ -1829,7 +1846,7 @@ fn level_chunk_load_system(
     global_rivers: Option<Res<GlobalRiverNetwork>>,
 ) {
     let Some(world_textures) = world_textures else { return };
-    let Ok(player_transform) = player_query.get_single() else { return };
+    let Ok(player_transform) = player_query.single() else { return };
 
     let player_pos = player_transform.translation;
     let player_chunk_x = (player_pos.x / LEVEL_CHUNK_TILES).floor() as i32;
@@ -1936,7 +1953,7 @@ fn level_chunk_unload_system(
     mut loaded_chunks: ResMut<LoadedChunks>,
     player_query: Query<&Transform, With<Player>>,
 ) {
-    let Ok(player_transform) = player_query.get_single() else { return };
+    let Ok(player_transform) = player_query.single() else { return };
 
     let player_pos = player_transform.translation;
     let player_chunk_x = (player_pos.x / LEVEL_CHUNK_TILES).floor() as i32;
@@ -1974,13 +1991,13 @@ fn click_to_select_chunk(
         return;
     }
 
-    if contexts.ctx_mut().is_pointer_over_area() {
+    if contexts.ctx_mut().unwrap().is_pointer_over_area() {
         return;
     }
 
-    let Ok(window) = windows.get_single() else { return };
+    let Ok(window) = windows.single() else { return };
     let Some(cursor_pos) = window.cursor_position() else { return };
-    let Ok((camera, camera_transform)) = camera_query.get_single() else { return };
+    let Ok((camera, camera_transform)) = camera_query.single() else { return };
     let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else { return };
 
     let map_x = world_pos.x + (world_def.width as f32 / 2.0);
@@ -2012,7 +2029,7 @@ fn update_chunk_selection_highlight(
     world_def: Res<WorldDefinition>,
     mut query: Query<(&mut Transform, &mut Visibility), With<ChunkSelectionHighlight>>,
 ) {
-    let Ok((mut transform, mut vis)) = query.get_single_mut() else { return };
+    let Ok((mut transform, mut vis)) = query.single_mut() else { return };
 
     let Some(selected) = selected else {
         *vis = Visibility::Hidden;
@@ -2039,7 +2056,7 @@ fn enter_launcher_macro_view(
     mut commands: Commands,
     selected: Option<Res<SelectedChunk>>,
     tile_cache: Option<Res<TileCache>>,
-    mut camera_query: Query<(&mut Transform, &mut OrthographicProjection), With<Camera2d>>,
+    mut camera_query: Query<(&mut Transform, &mut Projection), With<Camera2d>>,
     mut pool_query: Query<&mut Visibility, With<PoolSlot>>,
     mut highlight_query: Query<&mut Visibility, (With<ChunkHighlight>, Without<PoolSlot>, Without<ChunkSelectionHighlight>)>,
     mut selection_query: Query<&mut Visibility, (With<ChunkSelectionHighlight>, Without<PoolSlot>, Without<ChunkHighlight>)>,
@@ -2060,7 +2077,7 @@ fn enter_launcher_macro_view(
 
     let Some(selected) = selected else { return };
     let Some(tile_cache) = tile_cache else { return };
-    let Ok((mut cam_transform, mut projection)) = camera_query.get_single_mut() else { return };
+    let Ok((mut cam_transform, mut projection)) = camera_query.single_mut() else { return };
 
     // Show the macro tile as a large centered sprite
     if let Some(cached) = tile_cache.macro_tiles.get(&selected.chunk_coord) {
@@ -2077,7 +2094,7 @@ fn enter_launcher_macro_view(
 
     // Center camera
     cam_transform.translation = Vec3::new(0.0, 0.0, cam_transform.translation.z);
-    projection.scale = 1.0;
+    set_ortho_scale(&mut projection, 1.0);
 }
 
 /// Handle "Generate Mesomap" — start async generation of 64 meso tiles.
@@ -2229,8 +2246,8 @@ fn poll_meso_pregen(
 
 /// Allow zoom in meso view.
 fn launcher_camera_zoom(
-    mut scroll_events: EventReader<MouseWheel>,
-    mut query: Query<&mut OrthographicProjection, With<Camera2d>>,
+    mut scroll_events: MessageReader<MouseWheel>,
+    mut query: Query<&mut Projection, With<Camera2d>>,
 ) {
     let mut scroll_delta = 0.0;
     for event in scroll_events.read() {
@@ -2242,7 +2259,8 @@ fn launcher_camera_zoom(
     if scroll_delta == 0.0 { return; }
     for mut projection in &mut query {
         let zoom_factor = 1.0 - scroll_delta;
-        projection.scale = (projection.scale * zoom_factor).clamp(0.2, 3.0);
+        let new_scale = (ortho_scale(&projection) * zoom_factor).clamp(0.2, 3.0);
+        set_ortho_scale(&mut projection, new_scale);
     }
 }
 
@@ -2256,12 +2274,12 @@ fn click_to_select_meso_tile(
     mut contexts: EguiContexts,
 ) {
     if !mouse.just_pressed(MouseButton::Left) { return; }
-    if contexts.ctx_mut().is_pointer_over_area() { return; }
+    if contexts.ctx_mut().unwrap().is_pointer_over_area() { return; }
     let Some(selected_chunk) = selected_chunk else { return };
 
-    let Ok(window) = windows.get_single() else { return };
+    let Ok(window) = windows.single() else { return };
     let Some(cursor_pos) = window.cursor_position() else { return };
-    let Ok((camera, camera_transform)) = camera_query.get_single() else { return };
+    let Ok((camera, camera_transform)) = camera_query.single() else { return };
     let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else { return };
 
     let grid_size = MESO_GRID_SIZE as f32 * MESO_TILE_DISPLAY_PX;
@@ -2292,19 +2310,19 @@ fn update_meso_highlight(
     camera_query: Query<(&Camera, &GlobalTransform)>,
     mut contexts: EguiContexts,
 ) {
-    let Ok(mut highlight_tf) = highlight_query.get_single_mut() else { return };
+    let Ok(mut highlight_tf) = highlight_query.single_mut() else { return };
 
-    if contexts.ctx_mut().is_pointer_over_area() {
+    if contexts.ctx_mut().unwrap().is_pointer_over_area() {
         highlight_tf.translation.x = -10000.0;
         return;
     }
 
-    let Ok(window) = windows.get_single() else { return };
+    let Ok(window) = windows.single() else { return };
     let Some(cursor_screen) = window.cursor_position() else {
         highlight_tf.translation.x = -10000.0;
         return;
     };
-    let Ok((camera, camera_transform)) = camera_query.get_single() else { return };
+    let Ok((camera, camera_transform)) = camera_query.single() else { return };
     let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_screen) else { return };
 
     let grid_size = MESO_GRID_SIZE as f32 * MESO_TILE_DISPLAY_PX;
@@ -2503,7 +2521,7 @@ fn micro_pregen_progress_ui(
     mut contexts: EguiContexts,
     pregen: Res<MicroPregenState>,
 ) {
-    let ctx = contexts.ctx_mut();
+    let ctx = contexts.ctx_mut().unwrap();
     egui::Window::new("Generating Micro Tiles")
         .collapsible(false)
         .resizable(false)
@@ -2529,12 +2547,12 @@ fn click_to_select_micro_tile(
     mut contexts: EguiContexts,
 ) {
     if !mouse.just_pressed(MouseButton::Left) { return; }
-    if contexts.ctx_mut().is_pointer_over_area() { return; }
+    if contexts.ctx_mut().unwrap().is_pointer_over_area() { return; }
     let Some(selected_meso) = selected_meso else { return };
 
-    let Ok(window) = windows.get_single() else { return };
+    let Ok(window) = windows.single() else { return };
     let Some(cursor_pos) = window.cursor_position() else { return };
-    let Ok((camera, camera_transform)) = camera_query.get_single() else { return };
+    let Ok((camera, camera_transform)) = camera_query.single() else { return };
     let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) else { return };
 
     let grid_size = MICRO_GRID_SIZE as f32 * MICRO_TILE_DISPLAY_PX;
@@ -2565,19 +2583,19 @@ fn update_micro_highlight(
     camera_query: Query<(&Camera, &GlobalTransform)>,
     mut contexts: EguiContexts,
 ) {
-    let Ok(mut highlight_tf) = highlight_query.get_single_mut() else { return };
+    let Ok(mut highlight_tf) = highlight_query.single_mut() else { return };
 
-    if contexts.ctx_mut().is_pointer_over_area() {
+    if contexts.ctx_mut().unwrap().is_pointer_over_area() {
         highlight_tf.translation.x = -10000.0;
         return;
     }
 
-    let Ok(window) = windows.get_single() else { return };
+    let Ok(window) = windows.single() else { return };
     let Some(cursor_screen) = window.cursor_position() else {
         highlight_tf.translation.x = -10000.0;
         return;
     };
-    let Ok((camera, camera_transform)) = camera_query.get_single() else { return };
+    let Ok((camera, camera_transform)) = camera_query.single() else { return };
     let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_screen) else { return };
 
     let grid_size = MICRO_GRID_SIZE as f32 * MICRO_TILE_DISPLAY_PX;

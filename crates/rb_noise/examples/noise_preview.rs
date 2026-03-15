@@ -16,7 +16,7 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Noise Preview".into(),
-                resolution: (1024.0, 512.0).into(),
+                resolution: bevy::window::WindowResolution::new(1024, 512),
                 ..default()
             }),
             ..default()
@@ -143,8 +143,9 @@ fn update_noise_textures(
     let offset_y = camera_offset.y;
 
     // Update continentalness texture
-    if let Ok(sprite) = continentalness_query.get_single() {
+    if let Ok(sprite) = continentalness_query.single() {
         if let Some(image) = images.get_mut(&sprite.image) {
+            let data = image.data.as_mut().unwrap();
             for y in 0..PREVIEW_HEIGHT {
                 for x in 0..PREVIEW_WIDTH {
                     let world_x = offset_x + (x as f64) * WORLD_SCALE;
@@ -156,18 +157,19 @@ fn update_noise_textures(
                     let gray = ((value + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0) as u8;
 
                     let idx = ((y * PREVIEW_WIDTH + x) * 4) as usize;
-                    image.data[idx] = gray;     // R
-                    image.data[idx + 1] = gray; // G
-                    image.data[idx + 2] = gray; // B
-                    image.data[idx + 3] = 255;  // A
+                    data[idx] = gray;     // R
+                    data[idx + 1] = gray; // G
+                    data[idx + 2] = gray; // B
+                    data[idx + 3] = 255;  // A
                 }
             }
         }
     }
 
     // Update temperature texture
-    if let Ok(sprite) = temperature_query.get_single() {
+    if let Ok(sprite) = temperature_query.single() {
         if let Some(image) = images.get_mut(&sprite.image) {
+            let data = image.data.as_mut().unwrap();
             for y in 0..PREVIEW_HEIGHT {
                 for x in 0..PREVIEW_WIDTH {
                     let world_x = offset_x + (x as f64) * WORLD_SCALE;
@@ -184,10 +186,10 @@ fn update_noise_textures(
                     let g = ((1.0 - (normalized - 0.5).abs() * 2.0) * 128.0) as u8;
 
                     let idx = ((y * PREVIEW_WIDTH + x) * 4) as usize;
-                    image.data[idx] = r;       // R
-                    image.data[idx + 1] = g;   // G
-                    image.data[idx + 2] = b;   // B
-                    image.data[idx + 3] = 255; // A
+                    data[idx] = r;       // R
+                    data[idx + 1] = g;   // G
+                    data[idx + 2] = b;   // B
+                    data[idx + 3] = 255; // A
                 }
             }
         }

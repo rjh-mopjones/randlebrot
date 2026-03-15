@@ -48,7 +48,7 @@ impl GpuNoiseContext {
     /// Create a new GPU context.
     pub async fn new() -> Result<Self, GpuInitError> {
         // Request adapter
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
@@ -60,19 +60,18 @@ impl GpuNoiseContext {
                 force_fallback_adapter: false,
             })
             .await
-            .ok_or(GpuInitError::NoAdapter)?;
+            .map_err(|_| GpuInitError::NoAdapter)?;
 
         // Request device
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("rb_noise GPU device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    memory_hints: wgpu::MemoryHints::Performance,
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("rb_noise GPU device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
+                experimental_features: Default::default(),
+            })
             .await
             .map_err(GpuInitError::DeviceRequest)?;
 
@@ -249,7 +248,7 @@ impl GpuNoiseContext {
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             tx.send(result).unwrap();
         });
-        self.device.poll(wgpu::Maintain::Wait);
+        self.device.poll(wgpu::PollType::Wait { timeout: None, submission_index: None }).ok();
         rx.recv().unwrap().unwrap();
 
         let data = buffer_slice.get_mapped_range();

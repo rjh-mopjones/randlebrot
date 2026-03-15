@@ -16,9 +16,9 @@ rayon = "1.10"
 smallvec = "1.13"
 
 # GPU compute (optional)
-wgpu = { version = "23", optional = true }
+wgpu = { version = "27", optional = true }
 bytemuck = { version = "1.14", features = ["derive"], optional = true }
-pollster = { version = "0.3", optional = true }
+pollster = { version = "0.4", optional = true }
 rand = { version = "0.8", optional = true }
 rand_xorshift = { version = "0.3", optional = true }
 

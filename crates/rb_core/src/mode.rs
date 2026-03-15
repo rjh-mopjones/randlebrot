@@ -56,8 +56,8 @@ impl AppMode {
     }
 }
 
-/// Event fired when transitioning between modes.
-#[derive(Event, Clone, Debug)]
+/// Message fired when transitioning between modes.
+#[derive(Message, Clone, Debug)]
 pub struct ModeTransitionEvent {
     pub from: AppMode,
     pub to: AppMode,
@@ -68,11 +68,11 @@ pub fn handle_mode_shortcuts(
     keyboard: Res<ButtonInput<KeyCode>>,
     current_mode: Res<State<AppMode>>,
     mut next_mode: ResMut<NextState<AppMode>>,
-    mut events: EventWriter<ModeTransitionEvent>,
+    mut events: MessageWriter<ModeTransitionEvent>,
 ) {
     for mode in AppMode::all() {
         if keyboard.just_pressed(mode.shortcut()) && current_mode.get() != mode {
-            events.send(ModeTransitionEvent {
+            events.write(ModeTransitionEvent {
                 from: current_mode.get().clone(),
                 to: mode.clone(),
             });

@@ -37,7 +37,7 @@ impl Plugin for RbPlayerPlugin {
 fn spawn_player(
     mut commands: Commands,
     level: Res<PlayableLevel>,
-    mut camera_query: Query<(Entity, &mut OrthographicProjection, &mut Transform), With<Camera2d>>,
+    mut camera_query: Query<(Entity, &mut Projection, &mut Transform), With<Camera2d>>,
 ) {
     // Spawn player at center of selected macro chunk in level space
     // Level chunk (0,0) is at the origin; player starts at center of chunk grid
@@ -55,14 +55,20 @@ fn spawn_player(
     ));
 
     // Save camera state and set up for play mode
-    if let Ok((entity, mut projection, mut transform)) = camera_query.get_single_mut() {
+    if let Ok((entity, mut projection, mut transform)) = camera_query.single_mut() {
+        let current_scale = match &*projection {
+            Projection::Orthographic(o) => o.scale,
+            _ => 1.0,
+        };
         commands.insert_resource(SavedCameraState {
-            scale: projection.scale,
+            scale: current_scale,
             position: transform.translation,
         });
 
         // Set camera for street-level view (~30 tiles visible on screen)
-        projection.scale = 0.035;
+        if let Projection::Orthographic(ref mut o) = *projection {
+            o.scale = 0.035;
+        }
         transform.translation = Vec3::new(player_x, player_y, transform.translation.z);
 
         commands.entity(entity).insert(PlayerCamera);
@@ -79,16 +85,18 @@ fn spawn_player(
 fn despawn_player(
     mut commands: Commands,
     player_query: Query<Entity, With<Player>>,
-    mut camera_query: Query<(Entity, &mut OrthographicProjection, &mut Transform), With<PlayerCamera>>,
+    mut camera_query: Query<(Entity, &mut Projection, &mut Transform), With<PlayerCamera>>,
     saved_state: Option<Res<SavedCameraState>>,
 ) {
     for entity in &player_query {
         commands.entity(entity).despawn();
     }
 
-    if let Ok((entity, mut projection, mut transform)) = camera_query.get_single_mut() {
+    if let Ok((entity, mut projection, mut transform)) = camera_query.single_mut() {
         if let Some(saved) = saved_state {
-            projection.scale = saved.scale;
+            if let Projection::Orthographic(ref mut o) = *projection {
+                o.scale = saved.scale;
+            }
             transform.translation = saved.position;
         }
         commands.entity(entity).remove::<PlayerCamera>();
@@ -124,8 +132,8 @@ fn camera_follow_player(
     mut camera_query: Query<&mut Transform, With<PlayerCamera>>,
     time: Res<Time>,
 ) {
-    let Ok(player_transform) = player_query.get_single() else { return };
-    let Ok(mut camera_transform) = camera_query.get_single_mut() else { return };
+    let Ok(player_transform) = player_query.single() else { return };
+    let Ok(mut camera_transform) = camera_query.single_mut() else { return };
 
     let target = Vec3::new(
         player_transform.translation.x,

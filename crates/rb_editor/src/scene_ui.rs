@@ -52,7 +52,7 @@ pub fn scene_panel_system(
 ) {
     egui::SidePanel::left("scene_panel")
         .default_width(180.0)
-        .show(contexts.ctx_mut(), |ui| {
+        .show(contexts.ctx_mut().unwrap(), |ui| {
             ui.heading("Scene Inspector");
             ui.separator();
 

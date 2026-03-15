@@ -42,7 +42,7 @@ pub fn launcher_ui_system(
     phase: Option<Res<LauncherPhase>>,
     playing: Option<Res<PlayableLevel>>,
 ) {
-    let ctx = contexts.ctx_mut();
+    let ctx = contexts.ctx_mut().unwrap();
     let phase = phase.map(|p| *p).unwrap_or(LauncherPhase::MacroView);
 
     egui::SidePanel::left("launcher_panel")

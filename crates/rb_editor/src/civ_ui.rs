@@ -117,7 +117,7 @@ pub fn civ_panel_system(
 
     egui::SidePanel::left("civ_panel")
         .default_width(180.0)
-        .show(contexts.ctx_mut(), |ui| {
+        .show(contexts.ctx_mut().unwrap(), |ui| {
             ui.heading("Civilization Generator");
             ui.separator();
 
