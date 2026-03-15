@@ -111,9 +111,35 @@ pub fn place_capitals(
     selected
 }
 
+/// Compute a province budget for a faction based on its capital province.
+///
+/// All factions are capped at 25 provinces max. Better capitals get
+/// slightly larger budgets within that cap.
+fn province_budget(capital: &Province, rng: &mut ChaCha8Rng) -> usize {
+    let mut score: f32 = capital.habitability;
+    if capital.is_coastal {
+        score += 0.1;
+    }
+    if capital.is_river_junction {
+        score += 0.1;
+    }
+
+    let (lo, hi) = if score > 0.75 {
+        (15, 25)
+    } else if score > 0.55 {
+        (10, 18)
+    } else {
+        (5, 12)
+    };
+
+    rng.gen_range(lo..=hi)
+}
+
 /// Expand factions outward from capitals through neighboring provinces.
 ///
 /// Uses priority-queue flood fill with terrain-cost-based expansion.
+/// Each faction has a province budget based on its capital quality, creating
+/// a hierarchy from empires (25-35 provinces) to city-states (4-8 provinces).
 /// Provinces with habitability < 0.1 are never claimed (stay Uninhabited).
 /// After all factions expand, remaining provinces with habitability >= 0.1 become Unclaimed.
 pub fn grow_factions(
@@ -137,6 +163,21 @@ pub fn grow_factions(
         }
     }
 
+    // Compute province budget for each faction
+    let mut faction_budget: std::collections::HashMap<u32, usize> =
+        std::collections::HashMap::new();
+    let mut faction_claimed: std::collections::HashMap<u32, usize> =
+        std::collections::HashMap::new();
+    for &(faction_id, capital_pid) in capitals {
+        let budget = if let Some(idx) = id_to_idx.get(capital_pid as usize).copied() {
+            province_budget(&provinces[idx], &mut rng)
+        } else {
+            10
+        };
+        faction_budget.insert(faction_id, budget);
+        faction_claimed.insert(faction_id, 0);
+    }
+
     // Multi-source Dijkstra: all factions expand simultaneously from one queue.
     // Whichever faction reaches a province first (cheapest cumulative path) claims it.
     let mut claimed: Vec<bool> = vec![false; num_provinces + 1];
@@ -150,6 +191,7 @@ pub fn grow_factions(
         if (capital_pid as usize) < claimed.len() {
             claimed[capital_pid as usize] = true;
             best_cost[capital_pid as usize] = 0.0;
+            *faction_claimed.get_mut(&faction_id).unwrap() += 1;
         }
         if let Some(idx) = id_to_idx.get(capital_pid as usize).copied() {
             if let Some(p) = provinces.get_mut(idx) {
@@ -174,7 +216,7 @@ pub fn grow_factions(
                     let dx = neighbor.site.0 - capital_site.0;
                     let dy = neighbor.site.1 - capital_site.1;
                     let hop_dist = (dx * dx + dy * dy).sqrt() as f32;
-                    let cost = neighbor.terrain_cost * 5.0 + hop_dist * 0.01;
+                    let cost = neighbor.terrain_cost * 5.0 + hop_dist * 0.05;
                     pq.push((Reverse(OrderedFloat(cost)), neighbor_id, faction_id));
                 }
             }
@@ -189,6 +231,13 @@ pub fn grow_factions(
 
         // Already claimed by any faction — skip
         if claimed[pid as usize] {
+            continue;
+        }
+
+        // Faction hit its province budget — stop expanding
+        let budget = faction_budget.get(&faction_id).copied().unwrap_or(0);
+        let count = faction_claimed.get(&faction_id).copied().unwrap_or(0);
+        if count >= budget {
             continue;
         }
 
@@ -211,10 +260,16 @@ pub fn grow_factions(
 
         // Claim this province
         claimed[pid as usize] = true;
+        *faction_claimed.get_mut(&faction_id).unwrap() += 1;
         if let Some(idx) = id_to_idx.get(pid as usize).copied() {
             if let Some(p) = provinces.get_mut(idx) {
                 p.political_state = PoliticalState::Claimed { faction_id };
             }
+        }
+
+        // Check if faction is now full
+        if faction_claimed[&faction_id] >= budget {
+            continue; // Don't push more neighbors
         }
 
         // Get current province site for hop distance calculation
@@ -236,7 +291,7 @@ pub fn grow_factions(
                         let dx = neighbor.site.0 - current_site.0;
                         let dy = neighbor.site.1 - current_site.1;
                         let hop_dist = (dx * dx + dy * dy).sqrt() as f32;
-                        let hop_cost = neighbor.terrain_cost * 5.0 + hop_dist * 0.01;
+                        let hop_cost = neighbor.terrain_cost * 5.0 + hop_dist * 0.05;
                         let total = cost + hop_cost;
                         if total < best_cost.get(neighbor_id as usize).copied().unwrap_or(f32::MAX) {
                             pq.push((
@@ -251,11 +306,74 @@ pub fn grow_factions(
         }
     }
 
-    // Mark remaining unclaimed provinces
+    // Absorb remaining habitable provinces into adjacent factions.
+    // Prefer the smallest adjacent faction so large factions don't keep growing.
+    // Repeat until no more provinces can be absorbed (handles chains of unclaimed).
+    let mut faction_sizes: std::collections::HashMap<u32, usize> =
+        std::collections::HashMap::new();
+    for p in provinces.iter() {
+        if let PoliticalState::Claimed { faction_id } = p.political_state {
+            *faction_sizes.entry(faction_id).or_insert(0) += 1;
+        }
+    }
+
+    loop {
+        let mut changed = false;
+        for pi in 0..provinces.len() {
+            let p_id = provinces[pi].id;
+            if !matches!(provinces[pi].political_state, PoliticalState::Uninhabited) {
+                continue;
+            }
+            if provinces[pi].habitability < 0.1 {
+                continue;
+            }
+            if claimed.get(p_id as usize).copied().unwrap_or(false) {
+                continue;
+            }
+
+            // Find adjacent factions under 25 provinces, pick the smallest one
+            let mut best_faction: Option<u32> = None;
+            let mut best_size = usize::MAX;
+            if (p_id as usize) < adjacency.len() {
+                for &nid in &adjacency[p_id as usize] {
+                    if let Some(&ni) = id_to_idx.get(nid as usize) {
+                        if let PoliticalState::Claimed { faction_id } =
+                            provinces[ni].political_state
+                        {
+                            let size = faction_sizes.get(&faction_id).copied().unwrap_or(0);
+                            if size < 25 && size < best_size {
+                                best_size = size;
+                                best_faction = Some(faction_id);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(fid) = best_faction {
+                provinces[pi].political_state = PoliticalState::Claimed { faction_id: fid };
+                if (p_id as usize) < claimed.len() {
+                    claimed[p_id as usize] = true;
+                }
+                *faction_sizes.entry(fid).or_insert(0) += 1;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Any remaining habitable provinces that couldn't be absorbed become
+    // independent single-province factions
+    let mut next_faction_id = capitals.iter().map(|&(fid, _)| fid).max().unwrap_or(0) + 1;
     for p in provinces.iter_mut() {
         if matches!(p.political_state, PoliticalState::Uninhabited) {
             if p.habitability >= 0.1 && !claimed.get(p.id as usize).copied().unwrap_or(false) {
-                p.political_state = PoliticalState::Unclaimed;
+                p.political_state = PoliticalState::Claimed {
+                    faction_id: next_faction_id,
+                };
+                next_faction_id += 1;
             }
         }
     }
@@ -475,10 +593,10 @@ mod tests {
             provinces[2].political_state,
             PoliticalState::Uninhabited
         ));
-        // Province 4 is blocked by province 3, so it should be unclaimed
+        // Province 4 is blocked by province 3, becomes its own independent faction
         assert!(matches!(
             provinces[3].political_state,
-            PoliticalState::Unclaimed
+            PoliticalState::Claimed { .. }
         ));
     }
 
