@@ -2,8 +2,8 @@ use bevy::prelude::*;
 
 /// Application mode state for the Randlebrot editor.
 ///
-/// The editor operates in one of two modes: world generation/viewing
-/// and play-testing at street level.
+/// The editor operates in one of four modes: world generation/viewing,
+/// civilization design, scene inspection, and play-testing at street level.
 #[derive(States, Default, Clone, Eq, PartialEq, Hash, Debug)]
 pub enum AppMode {
     /// Generate procedural world maps from noise parameters.
@@ -11,6 +11,12 @@ pub enum AppMode {
     /// Tools: Seed input, noise params, layer toggle, save/load
     #[default]
     WorldGenerator,
+
+    /// Civilization generator — design provinces, factions, settlements.
+    CivGenerator,
+
+    /// Scene inspector — view micro-level tile generation.
+    SceneInspector,
 
     /// Test gameplay at a clicked location.
     /// Primary view: Playable chunk with player
@@ -23,6 +29,8 @@ impl AppMode {
     pub fn name(&self) -> &'static str {
         match self {
             Self::WorldGenerator => "Generator",
+            Self::CivGenerator => "Civilization",
+            Self::SceneInspector => "Scene",
             Self::LevelLauncher => "Launcher",
         }
     }
@@ -31,6 +39,8 @@ impl AppMode {
     pub fn shortcut(&self) -> KeyCode {
         match self {
             Self::WorldGenerator => KeyCode::F1,
+            Self::CivGenerator => KeyCode::F2,
+            Self::SceneInspector => KeyCode::F3,
             Self::LevelLauncher => KeyCode::F4,
         }
     }
@@ -39,6 +49,8 @@ impl AppMode {
     pub fn all() -> &'static [AppMode] {
         &[
             Self::WorldGenerator,
+            Self::CivGenerator,
+            Self::SceneInspector,
             Self::LevelLauncher,
         ]
     }
@@ -78,6 +90,11 @@ mod tests {
         let shortcuts: Vec<_> = AppMode::all().iter().map(|m| m.shortcut()).collect();
         let unique: std::collections::HashSet<_> = shortcuts.iter().collect();
         assert_eq!(shortcuts.len(), unique.len());
+    }
+
+    #[test]
+    fn all_modes_count() {
+        assert_eq!(AppMode::all().len(), 4);
     }
 
     #[test]

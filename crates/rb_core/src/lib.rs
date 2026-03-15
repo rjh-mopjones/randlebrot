@@ -2,15 +2,19 @@ use bevy::prelude::*;
 
 pub mod biome;
 pub mod coords;
+pub mod lifegen_query;
 pub mod mode;
 pub mod noise;
 pub mod resource_type;
+pub mod terrain_query;
 
 pub use biome::{BiomeType, TileType};
 pub use coords::{ChunkCoord, DetailLevel, TileCoord, WorldPos};
+pub use lifegen_query::LifeGenQuery;
 pub use mode::{AppMode, ModeTransitionEvent, handle_mode_shortcuts};
 pub use noise::NoiseStrategy;
 pub use resource_type::{ResourceType, TerrainBias};
+pub use terrain_query::TerrainQuery;
 
 /// Active playable level state. Inserted when entering play mode, removed on exit.
 #[derive(Resource)]

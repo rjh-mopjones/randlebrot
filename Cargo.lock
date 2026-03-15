@@ -4075,9 +4075,11 @@ name = "rb_world"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "image",
  "pathfinding",
  "rand",
  "rand_chacha",
+ "rayon",
  "rb_core",
  "rb_noise",
  "ron",

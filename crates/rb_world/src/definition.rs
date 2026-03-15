@@ -16,6 +16,9 @@ pub struct WorldDefinition {
     pub name: String,
     /// World seed for procedural generation.
     pub seed: u32,
+    /// Civilisation seed (allows iterating on politics without regenerating terrain).
+    #[serde(default = "default_civ_seed")]
+    pub civ_seed: u32,
     /// Map width in pixels (MacroMap).
     pub width: usize,
     /// Map height in pixels (MacroMap).
@@ -55,6 +58,7 @@ impl Default for WorldDefinition {
         Self {
             name: "New World".to_string(),
             seed: 42,
+            civ_seed: default_civ_seed(),
             width: 1024,
             height: 512,
             sea_level: -0.025,
@@ -76,6 +80,10 @@ impl Default for WorldDefinition {
 
 fn default_sub_stellar() -> (f64, f64) {
     (0.5, 1.0)
+}
+
+fn default_civ_seed() -> u32 {
+    137
 }
 
 /// Noise generation parameters.

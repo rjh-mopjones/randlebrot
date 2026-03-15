@@ -4,6 +4,8 @@ pub mod civilization;
 pub mod culture;
 pub mod definition;
 pub mod faction;
+pub mod lifegen;
+pub mod lifegen_data;
 pub mod roads;
 pub mod settlement_placement;
 pub mod territory;
@@ -15,6 +17,10 @@ pub use definition::{
     WorldDefinition, WorldIdGenerator,
 };
 pub use faction::{Faction, FactionDisposition};
+pub use lifegen_data::{
+    FactionData, LifeGenData, PoliticalState, Province, RoadSegment, SettlementSeed,
+    SettlementTier, SizeClass,
+};
 pub use roads::{Road, RoadType, TradeGood, TradeRoute};
 pub use territory::TerritoryMap;
 

@@ -4,12 +4,12 @@ use bevy_egui::{egui, EguiContexts};
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use rb_core::{AppMode, ModeTransitionEvent, PlayableLevel, SelectedChunk, SelectedMesoTile, SelectedMicroTile, WorldPos, handle_mode_shortcuts};
-use rb_editor::{CurrentLayer, GenerateMesoRequest, GeneratorUiState, LaunchLevelRequest, LauncherPhase, RegenerationRequest, StartPlayRequest};
-use rb_noise::{BiomeMap, NoiseBackend, NormalizationHints};
+use rb_core::{AppMode, ModeTransitionEvent, PlayableLevel, SelectedChunk, SelectedMesoTile, SelectedMicroTile, TerrainQuery, WorldPos, handle_mode_shortcuts};
+use rb_editor::{CurrentLayer, CurrentLifeGenLayer, GenerateMesoRequest, GeneratorUiState, LaunchLevelRequest, LauncherPhase, LifeGenLayer, RegenerateLifeGenRequest, RegenerationRequest, StartPlayRequest};
+use rb_noise::{BiomeMap, MesoTerrainView, NoiseBackend, NormalizationHints};
 use rb_player::Player;
 use rb_tilemap::{LevelChunk, LoadedChunks};
-use rb_world::WorldDefinition;
+use rb_world::{LifeGenData, WorldDefinition};
 use bevy::window::PrimaryWindow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -37,6 +37,7 @@ fn main() {
         .init_resource::<CursorWorldPos>()
         .init_resource::<VisibleChunkRange>()
         .init_resource::<HighlightInfo>()
+        .init_resource::<LifeGenOverlayState>()
         // Plugins
         .add_plugins((
             rb_core::RbCorePlugin,
@@ -70,16 +71,17 @@ fn main() {
             handle_mode_shortcuts,
             handle_layer_change.run_if(in_state(AppMode::WorldGenerator)),
             regenerate_world.run_if(in_state(AppMode::WorldGenerator)),
+            regenerate_lifegen,
             log_mode_transition,
         ).run_if(in_state(AppPhase::Ready)))
         // Click on world map to select a chunk (no mode switch)
         .add_systems(Update,
             click_to_select_chunk
                 .run_if(in_state(AppPhase::Ready)
-                    .and(in_state(AppMode::WorldGenerator))
+                    .and(in_state(AppMode::WorldGenerator).or(in_state(AppMode::CivGenerator)))
                     .and(not(resource_exists::<PlayableLevel>))),
         )
-        // World map systems (only in WorldGenerator, not during play)
+        // World map systems (WorldGenerator and CivGenerator, not during play)
         .add_systems(Update, (
             camera_zoom,
             camera_pan,
@@ -91,7 +93,15 @@ fn main() {
             update_chunk_highlight,
             update_chunk_selection_highlight,
             highlight_info_ui,
-        ).run_if(in_state(AppPhase::Ready).and(in_state(AppMode::WorldGenerator))))
+        ).run_if(in_state(AppPhase::Ready).and(
+            in_state(AppMode::WorldGenerator).or(in_state(AppMode::CivGenerator))
+        )))
+        // Lifegen overlay: render civilization data on world map
+        .add_systems(Update, manage_lifegen_overlay
+            .run_if(in_state(AppPhase::Ready).and(in_state(AppMode::CivGenerator))))
+        .add_systems(Update, hide_lifegen_overlay
+            .run_if(in_state(AppPhase::Ready).and(not(in_state(AppMode::CivGenerator)))))
+        .add_systems(OnEnter(AppMode::CivGenerator), show_lifegen_overlay)
         // Launcher: enter/exit
         .add_systems(OnEnter(AppMode::LevelLauncher), enter_launcher_macro_view)
         .add_systems(OnExit(AppMode::LevelLauncher), cleanup_launcher_entities)
@@ -271,6 +281,31 @@ struct ChunkHighlight;
 #[derive(Component)]
 struct ChunkSelectionHighlight;
 
+/// Marker for the lifegen overlay sprite.
+#[derive(Component)]
+struct LifeGenOverlay;
+
+/// Stored MesoTerrainView for LifeGen regeneration.
+/// Holds Arc clones of the 128 macro BiomeMap tiles at full resolution.
+#[derive(Resource)]
+struct StoredTerrainView(MesoTerrainView);
+
+/// Tracks which layer was last rendered to detect changes.
+#[derive(Resource)]
+struct LifeGenOverlayState {
+    current_layer: String,
+    data_generation: u64,
+}
+
+impl Default for LifeGenOverlayState {
+    fn default() -> Self {
+        Self {
+            current_layer: String::new(),
+            data_generation: 0,
+        }
+    }
+}
+
 /// Info about the currently highlighted tile, displayed in the UI.
 #[derive(Resource, Default)]
 struct HighlightInfo {
@@ -282,6 +317,8 @@ struct HighlightInfo {
     world_pos: (f32, f32),
     /// Current detail tier name.
     tier: &'static str,
+    /// Which domain is active ("Terrain" / "Civilization" / "Scene").
+    domain: &'static str,
 }
 
 /// Resource tracking cursor position in world space.
@@ -648,6 +685,7 @@ fn poll_macro_pregen(
     mut next_phase: ResMut<NextState<AppPhase>>,
     mut commands: Commands,
     global_rivers: Option<Res<GlobalRiverNetwork>>,
+    world_def: Res<WorldDefinition>,
 ) {
     let frame = tile_cache.frame;
 
@@ -740,15 +778,30 @@ fn poll_macro_pregen(
         // Save debug layers by stitching all macro tiles — same data the app displays
         save_stitched_debug_layers(&tile_cache);
 
-        // Shrink BiomeMaps to free memory (~38MB each → ~1MB each)
-        let mut shrunk = 0;
-        for (_, cached) in tile_cache.macro_tiles.iter_mut() {
-            if let Some(bm) = Arc::get_mut(&mut cached.biome_map) {
-                bm.shrink();
-                shrunk += 1;
-            }
-        }
-        println!("Shrunk {shrunk} macro BiomeMaps to save memory.");
+        // Build MesoTerrainView, run LifeGen, and store terrain view for civ_seed regeneration
+        let tile_biome_maps: HashMap<(i32, i32), Arc<BiomeMap>> = tile_cache.macro_tiles.iter()
+            .map(|(&coord, cached)| (coord, cached.biome_map.clone()))
+            .collect();
+        let chunks_x = (MAP_WIDTH as f32 / CHUNK_SIZE).ceil() as usize;
+        let chunks_y = (MAP_HEIGHT as f32 / CHUNK_SIZE).ceil() as usize;
+        let terrain_view = MesoTerrainView::from_tile_map(
+            &tile_biome_maps, chunks_x, chunks_y, TILE_MAP_SIZE,
+        );
+        println!("  MesoTerrainView constructed: {}x{}", terrain_view.width(), terrain_view.height());
+
+        // Run full LifeGen pipeline
+        let civ_seed = world_def.civ_seed;
+        let lifegen = rb_world::lifegen::generate(&terrain_view, civ_seed);
+
+        lifegen.save_debug_layers(std::path::Path::new("debug_layers"));
+        commands.insert_resource(lifegen);
+
+        // Store terrain view for civ_seed regeneration (holds Arc clones, ~4.9GB)
+        commands.insert_resource(StoredTerrainView(terrain_view));
+
+        // Note: tile shrink is skipped because StoredTerrainView holds Arc clones,
+        // preventing Arc::get_mut from succeeding. The full terrain data is kept
+        // in memory to support civ_seed regeneration without re-generating terrain.
 
         commands.remove_resource::<MacroPregenState>();
         next_phase.set(AppPhase::Ready);
@@ -1177,6 +1230,7 @@ fn highlight_info_ui(
                 ui.label("(no tile)");
                 return;
             }
+            ui.label(format!("Domain: {}", info.domain));
             ui.label(format!("Tier: {}", info.tier));
             ui.label(format!("Tile: ({}, {})", info.tile_coord.0, info.tile_coord.1));
             ui.label(format!("World: ({:.1}, {:.1})", info.world_pos.0, info.world_pos.1));
@@ -1244,6 +1298,114 @@ fn regenerate_world(
 
     next_phase.set(AppPhase::GeneratingMacro);
     println!("World regenerated. Pre-generating {} macro tiles...", total);
+}
+
+/// Regenerate lifegen: run the full LifeGen pipeline using stored MesoTerrainView.
+fn regenerate_lifegen(
+    mut commands: Commands,
+    mut regen_request: ResMut<RegenerateLifeGenRequest>,
+    world_def: Res<WorldDefinition>,
+    stored_terrain: Option<Res<StoredTerrainView>>,
+    mut overlay_state: ResMut<LifeGenOverlayState>,
+) {
+    if !regen_request.pending {
+        return;
+    }
+    regen_request.pending = false;
+
+    let Some(terrain) = stored_terrain else {
+        eprintln!("Cannot regenerate lifegen: no stored MesoTerrainView available");
+        return;
+    };
+
+    let civ_seed = world_def.civ_seed;
+    println!("Regenerating lifegen with civ_seed {}...", civ_seed);
+
+    let lifegen = rb_world::lifegen::generate(&terrain.0, civ_seed);
+    println!(
+        "  LifeGenData populated: {} provinces, {} factions, {} settlements, {} road segments",
+        lifegen.provinces.len(),
+        lifegen.factions.len(),
+        lifegen.settlement_seeds.len(),
+        lifegen.road_segments.len(),
+    );
+    lifegen.save_debug_layers(std::path::Path::new("debug_layers"));
+    commands.insert_resource(lifegen);
+
+    overlay_state.data_generation += 1;
+    overlay_state.current_layer.clear(); // Force re-render
+}
+
+// ─── Lifegen Overlay ─────────────────────────────────────────────────────────
+
+fn manage_lifegen_overlay(
+    mut commands: Commands,
+    lifegen: Option<Res<LifeGenData>>,
+    current_layer: Res<CurrentLifeGenLayer>,
+    mut overlay_state: ResMut<LifeGenOverlayState>,
+    mut images: ResMut<Assets<Image>>,
+    mut overlay_query: Query<(Entity, &mut Sprite), With<LifeGenOverlay>>,
+    world_def: Res<WorldDefinition>,
+) {
+    let Some(lifegen) = lifegen else {
+        return;
+    };
+
+    let layer_name = match current_layer.0 {
+        LifeGenLayer::Habitability => "habitability",
+        LifeGenLayer::NavigationCost => "navigation_cost",
+        LifeGenLayer::ResourceDesirability => "resource_desirability",
+        LifeGenLayer::Factions | LifeGenLayer::PoliticalState => "factions",
+        LifeGenLayer::Prosperity => "habitability",
+        LifeGenLayer::Settlements => "settlements",
+        _ => "composite",
+    };
+
+    let overlay_exists = !overlay_query.is_empty();
+    if layer_name == overlay_state.current_layer && overlay_exists {
+        return;
+    }
+
+    let rgba_data = lifegen.to_layer_image(layer_name);
+    let image = create_image(lifegen.width, lifegen.height, rgba_data);
+    let image_handle = images.add(image);
+
+    if let Ok((_entity, mut sprite)) = overlay_query.get_single_mut() {
+        sprite.image = image_handle;
+    } else {
+        commands.spawn((
+            Sprite {
+                image: image_handle,
+                custom_size: Some(Vec2::new(
+                    world_def.width as f32,
+                    world_def.height as f32,
+                )),
+                ..default()
+            },
+            Transform::from_xyz(0.0, 0.0, 0.5),
+            LifeGenOverlay,
+        ));
+    }
+
+    overlay_state.current_layer = layer_name.to_string();
+}
+
+fn hide_lifegen_overlay(
+    mut overlay_query: Query<&mut Visibility, With<LifeGenOverlay>>,
+) {
+    for mut vis in &mut overlay_query {
+        *vis = Visibility::Hidden;
+    }
+}
+
+fn show_lifegen_overlay(
+    mut overlay_query: Query<&mut Visibility, With<LifeGenOverlay>>,
+    mut overlay_state: ResMut<LifeGenOverlayState>,
+) {
+    for mut vis in &mut overlay_query {
+        *vis = Visibility::Inherited;
+    }
+    overlay_state.current_layer.clear(); // Force re-render
 }
 
 // ─── Camera & Input ──────────────────────────────────────────────────────────
@@ -1376,6 +1538,7 @@ fn update_chunk_highlight(
     highlight_info.tile_coord = (tile_ix, tile_iy);
     highlight_info.world_pos = (chunk_x, chunk_y);
     highlight_info.tier = tier_name;
+    highlight_info.domain = "Terrain";
 }
 
 /// Calculate which chunks are visible in the camera viewport.

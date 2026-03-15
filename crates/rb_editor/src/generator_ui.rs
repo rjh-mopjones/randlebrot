@@ -68,22 +68,12 @@ pub struct RegenerationRequest {
     pub pending: bool,
 }
 
-/// System to render the World Generator UI panel.
-pub fn generator_ui_system(
+/// System to render the top mode bar (runs in all modes).
+pub fn mode_bar_system(
     mut contexts: EguiContexts,
-    mut world_def: ResMut<WorldDefinition>,
-    mut ui_state: ResMut<GeneratorUiState>,
-    mut regen_request: ResMut<RegenerationRequest>,
     current_mode: Res<State<AppMode>>,
     mut next_mode: ResMut<NextState<AppMode>>,
 ) {
-    // Initialize seed text from world definition
-    if !ui_state.initialized {
-        ui_state.seed_text = world_def.seed.to_string();
-        ui_state.initialized = true;
-    }
-
-    // Top menu bar (visible in all modes)
     egui::TopBottomPanel::top("mode_bar").show(contexts.ctx_mut(), |ui| {
         ui.horizontal(|ui| {
             for mode in AppMode::all() {
@@ -96,10 +86,19 @@ pub fn generator_ui_system(
             }
         });
     });
+}
 
-    // Left panel only in WorldGenerator mode
-    if *current_mode.get() != AppMode::WorldGenerator {
-        return;
+/// System to render the World Generator terrain panel and load dialog.
+pub fn terrain_panel_system(
+    mut contexts: EguiContexts,
+    mut world_def: ResMut<WorldDefinition>,
+    mut ui_state: ResMut<GeneratorUiState>,
+    mut regen_request: ResMut<RegenerationRequest>,
+) {
+    // Initialize seed text from world definition
+    if !ui_state.initialized {
+        ui_state.seed_text = world_def.seed.to_string();
+        ui_state.initialized = true;
     }
 
     egui::SidePanel::left("generator_panel")
@@ -321,7 +320,7 @@ pub fn generator_ui_system(
 }
 
 /// Format a KeyCode for display.
-fn format_keycode(key: KeyCode) -> String {
+pub(crate) fn format_keycode(key: KeyCode) -> String {
     match key {
         KeyCode::F1 => "F1".to_string(),
         KeyCode::F2 => "F2".to_string(),
@@ -332,7 +331,7 @@ fn format_keycode(key: KeyCode) -> String {
 }
 
 /// Generate a random seed.
-fn rand_seed() -> u32 {
+pub(crate) fn rand_seed() -> u32 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)

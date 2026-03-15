@@ -13,6 +13,7 @@ pub mod resource_map;
 pub mod rivers;
 pub mod strategy;
 pub mod terrain_render;
+pub mod terrain_view;
 pub mod tidally_locked;
 pub mod visualization;
 pub mod wrap;
@@ -37,6 +38,7 @@ pub use strategy::{
 };
 pub use tidally_locked::{LatitudeTemperatureStrategy, TidallyLockedTemperatureStrategy};
 pub use terrain_render::NormalizationHints;
+pub use terrain_view::MesoTerrainView;
 pub use visualization::NoiseLayer;
 pub use derived::{
     derive_aridity, derive_erosion, derive_heightmap, derive_peaks_valleys,
