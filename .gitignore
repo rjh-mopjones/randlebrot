@@ -2,3 +2,5 @@
 target
 CLAUDE.md
 .DS_Store
+debug_layers/
+docs/debug_layers/
