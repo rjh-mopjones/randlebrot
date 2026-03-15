@@ -90,7 +90,7 @@ pub fn generate_with_progress(
     // Phase 2: Provinces
     update_progress(&progress, 2, "Seeding provinces...", "", 0.15);
     let seed_phase2 = civ_seed.wrapping_add(2);
-    let province_seeds = provinces::seed_provinces(&habitability, w, h, seed_phase2);
+    let province_seeds = provinces::seed_provinces(&habitability, terrain, w, h, seed_phase2);
 
     update_progress(
         &progress, 2, "Tessellating provinces...",

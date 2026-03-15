@@ -12,20 +12,22 @@ use std::collections::{BinaryHeap, HashMap};
 
 /// Seed province sites using variable-radius Poisson disc sampling.
 ///
+/// Provinces are seeded on ALL land (not ocean), regardless of habitability.
 /// High-habitability regions produce dense, small provinces while
-/// low-habitability regions produce sparse, large provinces.
+/// low-habitability / extreme-climate regions produce sparse, large provinces.
 ///
 /// Returns pixel coordinates `(x, y)` for each province seed.
 pub fn seed_provinces(
     habitability: &[f32],
+    terrain: &dyn TerrainQuery,
     width: usize,
     height: usize,
     seed: u32,
 ) -> Vec<(usize, usize)> {
     const MIN_RADIUS: f64 = 4.0;
-    const MAX_RADIUS: f64 = 48.0;
-    const MAX_ATTEMPTS: usize = 200_000;
-    const TARGET_PROVINCES: usize = 970;
+    const MAX_RADIUS: f64 = 80.0; // larger max for barren land (was 48)
+    const MAX_ATTEMPTS: usize = 400_000; // more attempts since we cover more land now
+    const TARGET_PROVINCES: usize = 1200; // more provinces to fill marginal territory
 
     let cell_size = MIN_RADIUS;
     let grid_w = (width as f64 / cell_size).ceil() as usize;
@@ -46,13 +48,16 @@ pub fn seed_provinces(
         let y = rng.gen_range(0..height);
         let idx = y * width + x;
 
-        let hab = habitability[idx];
-        if hab < 0.01 {
+        // Must be on land
+        if terrain.is_ocean(x, y) {
             continue;
         }
 
-        // Variable radius: high hab -> small radius (dense), low hab -> large radius (sparse)
-        let radius = MAX_RADIUS + (MIN_RADIUS - MAX_RADIUS) * (hab as f64).powf(0.7);
+        let hab = habitability[idx].max(0.0);
+        // Variable radius: high hab -> small radius (dense), low/zero hab -> large radius (sparse)
+        // Even completely uninhabitable land gets provinces (just very large ones)
+        let hab_factor = (hab as f64).max(0.02); // floor at 0.02 so barren land still gets provinces
+        let radius = MAX_RADIUS + (MIN_RADIUS - MAX_RADIUS) * hab_factor.powf(0.7);
 
         // Check against existing seeds within radius using the spatial grid
         let gx = (x as f64 / cell_size) as usize;
@@ -146,13 +151,13 @@ pub fn tessellate_provinces(
             continue;
         }
 
-        // Skip ocean
+        // Skip ocean only — all land is province-able
         let px = pi % width;
         let py = pi / width;
-        let nav = navigation_cost[pi];
-        if nav <= 0.0 || terrain.is_ocean(px, py) {
+        if terrain.is_ocean(px, py) {
             continue;
         }
+        let nav = navigation_cost[pi].max(0.05); // floor: land is always traversable
 
         province_ids[pi] = pid;
 
@@ -172,13 +177,13 @@ pub fn tessellate_provinces(
                 continue;
             }
 
-            let n_nav = navigation_cost[ni];
-            if n_nav <= 0.0 || terrain.is_ocean(nux, nuy) {
+            if terrain.is_ocean(nux, nuy) {
                 continue;
             }
+            let n_nav = navigation_cost[ni].max(0.05); // land always traversable
 
             // Cost to cross into neighbor: inverse of navigation cost
-            let step_cost = 1.0 / n_nav.max(0.01);
+            let step_cost = 1.0 / n_nav;
             let new_cost = cost + (step_cost * 1000.0) as u32;
 
             heap.push((Reverse(new_cost), ni as u32, pid));
