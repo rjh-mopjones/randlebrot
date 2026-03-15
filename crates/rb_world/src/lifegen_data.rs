@@ -31,6 +31,9 @@ pub struct LifeGenData {
 
     // Road network
     pub road_segments: Vec<RoadSegment>,
+
+    // Trade network: (from_settlement_id, to_settlement_id, trade_value)
+    pub trade_edges: Vec<(u32, u32, f32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +192,7 @@ impl LifeGenData {
             factions: Vec::new(),
             settlement_seeds: Vec::new(),
             road_segments: Vec::new(),
+            trade_edges: Vec::new(),
         }
     }
 
@@ -314,6 +318,7 @@ impl LifeGenData {
             factions,
             settlement_seeds,
             road_segments,
+            trade_edges: Vec::new(),
         }
     }
 
@@ -392,13 +397,24 @@ impl LifeGenData {
             self.height,
         );
 
-        // Composite: factions at 40% alpha + roads + settlements
+        // Trade routes: directed edges between settlements
+        save_trade_layer(
+            &lifegen_dir,
+            "trade.png",
+            &self.trade_edges,
+            &self.settlement_seeds,
+            self.width,
+            self.height,
+        );
+
+        // Composite: factions at 40% alpha + roads + settlements + trade
         save_composite_layer(
             &lifegen_dir,
             "composite.png",
             &self.faction_ids,
             &self.road_segments,
             &self.settlement_seeds,
+            &self.trade_edges,
             self.width,
             self.height,
         );
@@ -501,6 +517,32 @@ impl LifeGenData {
                 }
                 pixels
             }
+            "trade" => {
+                // Trade edges: cyan lines between settlements
+                let mut pixels = vec![0u8; total];
+                let settlement_map: std::collections::HashMap<u32, &SettlementSeed> =
+                    self.settlement_seeds.iter().map(|s| (s.id, s)).collect();
+                for &(from_id, to_id, _value) in &self.trade_edges {
+                    if let (Some(from_s), Some(to_s)) =
+                        (settlement_map.get(&from_id), settlement_map.get(&to_id))
+                    {
+                        let colour = [60, 220, 220, 200]; // Cyan
+                        let x0 = from_s.position.0 as i32;
+                        let y0 = from_s.position.1 as i32;
+                        let x1 = to_s.position.0 as i32;
+                        let y1 = to_s.position.1 as i32;
+                        draw_line(&mut pixels, w, h, x0, y0, x1, y1, colour, 1);
+                    }
+                }
+                // Draw settlement dots on top for context
+                for s in &self.settlement_seeds {
+                    let (colour, radius) = settlement_dot_params(s);
+                    let cx = s.position.0 as i32;
+                    let cy = s.position.1 as i32;
+                    draw_circle(&mut pixels, w, h, cx, cy, radius, colour);
+                }
+                pixels
+            }
             "composite" => {
                 // Factions at alpha 120 + roads + settlements, all on transparent background
                 let mut pixels = vec![0u8; total];
@@ -549,7 +591,7 @@ impl LifeGenData {
         faction_borders: bool,
         settlement_icons: bool,
         road_network: bool,
-        _trade_routes: bool,
+        trade_routes: bool,
     ) -> Vec<u8> {
         let mut pixels = self.to_layer_image(base_layer);
         let w = self.width;
@@ -613,6 +655,24 @@ impl LifeGenData {
                 let x1 = seg.to.0 as i32;
                 let y1 = seg.to.1 as i32;
                 draw_line(&mut pixels, w, h, x0, y0, x1, y1, colour, thickness);
+            }
+        }
+
+        // Trade routes overlay
+        if trade_routes {
+            let settlement_map: std::collections::HashMap<u32, &SettlementSeed> =
+                self.settlement_seeds.iter().map(|s| (s.id, s)).collect();
+            for &(from_id, to_id, _value) in &self.trade_edges {
+                if let (Some(from_s), Some(to_s)) =
+                    (settlement_map.get(&from_id), settlement_map.get(&to_id))
+                {
+                    let colour = [60, 220, 220, 200]; // Cyan
+                    let x0 = from_s.position.0 as i32;
+                    let y0 = from_s.position.1 as i32;
+                    let x1 = to_s.position.0 as i32;
+                    let y1 = to_s.position.1 as i32;
+                    draw_line(&mut pixels, w, h, x0, y0, x1, y1, colour, 1);
+                }
             }
         }
 
@@ -819,13 +879,74 @@ fn save_road_layer(
     img.save(dir.join(filename)).ok();
 }
 
-/// Save composite layer: dark background + factions at 40% alpha + roads + settlements. Downscaled 2x.
+/// Save trade edges as directed lines between settlements. Downscaled 2x.
+fn save_trade_layer(
+    dir: &std::path::Path,
+    filename: &str,
+    trade_edges: &[(u32, u32, f32)],
+    settlements: &[SettlementSeed],
+    width: usize,
+    height: usize,
+) {
+    use image::{ImageBuffer, Rgba, RgbaImage};
+
+    let half_w = width / 2;
+    let half_h = height / 2;
+    let mut img: RgbaImage = ImageBuffer::new(half_w as u32, half_h as u32);
+
+    // Fill dark background
+    for pixel in img.pixels_mut() {
+        *pixel = Rgba([20, 20, 20, 255]);
+    }
+
+    // Build settlement lookup
+    let settlement_map: std::collections::HashMap<u32, &SettlementSeed> =
+        settlements.iter().map(|s| (s.id, s)).collect();
+
+    // Draw trade edges as cyan lines
+    let trade_colour = Rgba([60, 220, 220, 255]);
+    for &(from_id, to_id, _value) in trade_edges {
+        if let (Some(from_s), Some(to_s)) =
+            (settlement_map.get(&from_id), settlement_map.get(&to_id))
+        {
+            let x0 = (from_s.position.0 / 2.0) as i32;
+            let y0 = (from_s.position.1 / 2.0) as i32;
+            let x1 = (to_s.position.0 / 2.0) as i32;
+            let y1 = (to_s.position.1 / 2.0) as i32;
+            bresenham_thick(&mut img, half_w as i32, half_h as i32, x0, y0, x1, y1, trade_colour, 1);
+        }
+    }
+
+    // Settlement dots on top
+    for s in settlements {
+        let (colour, radius) = settlement_dot_params(s);
+        let cx = (s.position.0 / 2.0) as i32;
+        let cy = (s.position.1 / 2.0) as i32;
+        let rgba = Rgba(colour);
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx * dx + dy * dy <= radius * radius {
+                    let px = cx + dx;
+                    let py = cy + dy;
+                    if px >= 0 && px < half_w as i32 && py >= 0 && py < half_h as i32 {
+                        img.put_pixel(px as u32, py as u32, rgba);
+                    }
+                }
+            }
+        }
+    }
+
+    img.save(dir.join(filename)).ok();
+}
+
+/// Save composite layer: dark background + factions at 40% alpha + roads + settlements + trade. Downscaled 2x.
 fn save_composite_layer(
     dir: &std::path::Path,
     filename: &str,
     faction_ids: &[u32],
     road_segments: &[RoadSegment],
     settlements: &[SettlementSeed],
+    trade_edges: &[(u32, u32, f32)],
     width: usize,
     height: usize,
 ) {
@@ -867,6 +988,24 @@ fn save_composite_layer(
         let y1 = (seg.to.1 / 2.0) as i32;
         let rgba = Rgba(colour);
         bresenham_thick(&mut img, half_w as i32, half_h as i32, x0, y0, x1, y1, rgba, thickness);
+    }
+
+    // Trade routes overlay
+    {
+        let settlement_map: std::collections::HashMap<u32, &SettlementSeed> =
+            settlements.iter().map(|s| (s.id, s)).collect();
+        let trade_colour = Rgba([60, 220, 220, 255]);
+        for &(from_id, to_id, _value) in trade_edges {
+            if let (Some(from_s), Some(to_s)) =
+                (settlement_map.get(&from_id), settlement_map.get(&to_id))
+            {
+                let x0 = (from_s.position.0 / 2.0) as i32;
+                let y0 = (from_s.position.1 / 2.0) as i32;
+                let x1 = (to_s.position.0 / 2.0) as i32;
+                let y1 = (to_s.position.1 / 2.0) as i32;
+                bresenham_thick(&mut img, half_w as i32, half_h as i32, x0, y0, x1, y1, trade_colour, 1);
+            }
+        }
     }
 
     // Settlements overlay

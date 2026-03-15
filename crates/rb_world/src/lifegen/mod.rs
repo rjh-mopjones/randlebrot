@@ -6,6 +6,7 @@ pub mod settlements;
 pub mod trade;
 
 use crate::lifegen_data::{LifeGenData, PoliticalState};
+use rayon::prelude::*;
 use rb_core::TerrainQuery;
 use std::sync::{Arc, Mutex};
 
@@ -76,7 +77,8 @@ pub fn generate_with_progress(
     update_progress(&progress, 1, "Computing analysis grids...", "", 0.0);
 
     // Phase 1: Analysis grids (all independent)
-    let habitability = analysis::compute_habitability(terrain);
+    let river_dist = analysis::compute_river_distance_field(terrain);
+    let habitability = analysis::compute_habitability(terrain, &river_dist);
     let navigation_cost = analysis::compute_navigation_cost(terrain);
     let resource_desirability = analysis::compute_resource_desirability(terrain);
 
@@ -97,11 +99,14 @@ pub fn generate_with_progress(
         &format!("{} seeds", province_seeds.len()),
         0.20,
     );
-    let mut province_ids =
+    let (mut province_ids, adjacency) =
         provinces::tessellate_provinces(&province_seeds, &navigation_cost, terrain, w, h);
 
     update_progress(&progress, 2, "Snapping borders to rivers...", "", 0.30);
-    provinces::snap_borders_to_rivers(&mut province_ids, terrain, w, h);
+    provinces::snap_borders_to_rivers(&mut province_ids, terrain, w, h, &river_dist);
+
+    update_progress(&progress, 2, "Aligning borders to micro-tile grid...", "", 0.32);
+    provinces::snap_to_microtile_grid(&mut province_ids, w, h);
 
     update_progress(&progress, 2, "Baking province attributes...", "", 0.33);
     let mut province_list = provinces::bake_province_attributes(
@@ -131,11 +136,8 @@ pub fn generate_with_progress(
     );
     factions::grow_factions(
         &mut province_list,
-        &province_ids,
-        &navigation_cost,
+        &adjacency,
         &capitals,
-        w,
-        h,
         seed_phase3,
     );
     let faction_list = factions::build_faction_data(&province_list, &capitals, seed_phase3);
@@ -145,19 +147,26 @@ pub fn generate_with_progress(
         0.55,
     );
 
-    // Build per-pixel faction_ids grid from province assignments
+    // Build per-pixel faction_ids grid from province assignments (parallel)
     let mut faction_ids_grid = vec![0u32; w * h];
-    for (idx, &pid) in province_ids.iter().enumerate() {
-        if pid == 0 {
-            continue;
-        }
-        let pi = (pid - 1) as usize;
-        if pi < province_list.len() {
-            if let PoliticalState::Claimed { faction_id } = province_list[pi].political_state {
-                faction_ids_grid[idx] = faction_id;
+    faction_ids_grid
+        .par_chunks_mut(w)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for x in 0..w {
+                let idx = y * w + x;
+                let pid = province_ids[idx];
+                if pid == 0 {
+                    continue;
+                }
+                let pi = (pid - 1) as usize;
+                if pi < province_list.len() {
+                    if let PoliticalState::Claimed { faction_id } = province_list[pi].political_state {
+                        row[x] = faction_id;
+                    }
+                }
             }
-        }
-    }
+        });
 
     // Phase 4: Settlements
     update_progress(&progress, 4, "Placing settlements...", "", 0.55);
@@ -208,6 +217,7 @@ pub fn generate_with_progress(
     data.factions = faction_list;
     data.settlement_seeds = settlement_seeds;
     data.road_segments = road_segments;
+    data.trade_edges = trade_edges;
 
     data
 }

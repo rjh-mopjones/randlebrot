@@ -1,4 +1,5 @@
 use crate::lifegen_data::{RoadSegment, SettlementSeed, SettlementTier, SizeClass};
+use rayon::prelude::*;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
@@ -82,68 +83,72 @@ pub fn build_roads(
         }
     }
 
-    // --- Step 3 & 4 & 5: A* each edge, simplify, convert to RoadSegments ---
-    let mut road_segments = Vec::new();
+    // --- Step 3 & 4 & 5: A* each edge (parallel), simplify, convert to RoadSegments ---
+    let road_segments: Vec<RoadSegment> = edges
+        .par_iter()
+        .flat_map_iter(|(idx_a, idx_b)| {
+            let sa = &settlements[*idx_a];
+            let sb = &settlements[*idx_b];
 
-    for (idx_a, idx_b) in &edges {
-        let sa = &settlements[*idx_a];
-        let sb = &settlements[*idx_b];
+            let from = (
+                (sa.position.0.round() as usize).min(width.saturating_sub(1)),
+                (sa.position.1.round() as usize).min(height.saturating_sub(1)),
+            );
+            let to = (
+                (sb.position.0.round() as usize).min(width.saturating_sub(1)),
+                (sb.position.1.round() as usize).min(height.saturating_sub(1)),
+            );
 
-        let from = (
-            (sa.position.0.round() as usize).min(width.saturating_sub(1)),
-            (sa.position.1.round() as usize).min(height.saturating_sub(1)),
-        );
-        let to = (
-            (sb.position.0.round() as usize).min(width.saturating_sub(1)),
-            (sb.position.1.round() as usize).min(height.saturating_sub(1)),
-        );
-
-        // Skip very long edges
-        let pixel_dist = euclidean_dist(sa.position, sb.position);
-        if pixel_dist > 2000.0 {
-            continue;
-        }
-
-        let path = match astar_path(from, to, navigation_cost, width, height) {
-            Some(p) => p,
-            None => {
-                // No viable terrain path — skip this road instead of drawing a straight line
-                continue;
+            // Skip very long edges
+            let pixel_dist = euclidean_dist(sa.position, sb.position);
+            if pixel_dist > 2000.0 {
+                return Vec::new();
             }
-        };
 
-        let simplified = simplify_path(&path, 3.0);
+            // Corridor bounding box with 200px padding
+            let min_x = from.0.min(to.0).saturating_sub(200);
+            let min_y = from.1.min(to.1).saturating_sub(200);
+            let max_x = (from.0.max(to.0) + 200).min(width.saturating_sub(1));
+            let max_y = (from.1.max(to.1) + 200).min(height.saturating_sub(1));
+            let corridor = Some((min_x, min_y, max_x, max_y));
 
-        // Determine road type
-        let road_type_id = classify_road(sa, sb);
+            let path = match astar_path(from, to, navigation_cost, width, height, corridor) {
+                Some(p) => p,
+                None => {
+                    return Vec::new();
+                }
+            };
 
-        // Convert consecutive waypoints to segments
-        for pair in simplified.windows(2) {
-            let seg_from = pair[0];
-            let seg_to = pair[1];
+            let simplified = simplify_path(&path, 3.0);
+            let road_type_id = classify_road(sa, sb);
 
-            // Compute cost along this sub-segment (approximate: Euclidean * avg nav cost)
-            let dx = seg_to.0 as f64 - seg_from.0 as f64;
-            let dy = seg_to.1 as f64 - seg_from.1 as f64;
-            let seg_dist = (dx * dx + dy * dy).sqrt();
-            let mid_x = (seg_from.0 + seg_to.0) / 2;
-            let mid_y = (seg_from.1 + seg_to.1) / 2;
-            let mid_idx = mid_y * width + mid_x;
-            let nav = navigation_cost
-                .get(mid_idx)
-                .copied()
-                .unwrap_or(0.01)
-                .max(0.01);
-            let cost = (seg_dist as f32) / nav;
-
-            road_segments.push(RoadSegment {
-                from: (seg_from.0 as f64, seg_from.1 as f64),
-                to: (seg_to.0 as f64, seg_to.1 as f64),
-                cost,
-                road_type_id,
-            });
-        }
-    }
+            simplified
+                .windows(2)
+                .map(|pair| {
+                    let seg_from = pair[0];
+                    let seg_to = pair[1];
+                    let dx = seg_to.0 as f64 - seg_from.0 as f64;
+                    let dy = seg_to.1 as f64 - seg_from.1 as f64;
+                    let seg_dist = (dx * dx + dy * dy).sqrt();
+                    let mid_x = (seg_from.0 + seg_to.0) / 2;
+                    let mid_y = (seg_from.1 + seg_to.1) / 2;
+                    let mid_idx = mid_y * width + mid_x;
+                    let nav = navigation_cost
+                        .get(mid_idx)
+                        .copied()
+                        .unwrap_or(0.01)
+                        .max(0.01);
+                    let cost = (seg_dist as f32) / nav;
+                    RoadSegment {
+                        from: (seg_from.0 as f64, seg_from.1 as f64),
+                        to: (seg_to.0 as f64, seg_to.1 as f64),
+                        cost,
+                        road_type_id,
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
 
     road_segments
 }
@@ -158,6 +163,7 @@ fn astar_path(
     nav_cost: &[f32],
     w: usize,
     h: usize,
+    corridor: Option<(usize, usize, usize, usize)>,
 ) -> Option<Vec<(usize, usize)>> {
     const MAX_EXPANSIONS: u32 = 2_000_000;
 
@@ -237,6 +243,13 @@ fn astar_path(
 
             let nx = nx_i as usize;
             let ny = ny_i as usize;
+
+            if let Some((min_x, min_y, max_x, max_y)) = corridor {
+                if nx < min_x || ny < min_y || nx > max_x || ny > max_y {
+                    continue;
+                }
+            }
+
             let n_idx = ny * w + nx;
 
             let nc = nav_cost[n_idx];

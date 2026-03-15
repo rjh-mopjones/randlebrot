@@ -2,7 +2,7 @@ use crate::lifegen_data::{FactionData, PoliticalState, Province};
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::BinaryHeap;
 
 /// Select capital provinces for factions.
 ///
@@ -21,15 +21,17 @@ pub fn place_capitals(
         .count();
 
     let target = if num_factions == 0 {
-        5 + (habitable_count / 150).min(10)
+        let base = 50;
+        let bonus = (habitable_count / 80).min(30);
+        base + bonus
     } else {
-        num_factions
+        num_factions.max(50)
     };
 
-    // Score candidates: must have habitability > 0.5
+    // Score candidates: must have habitability > 0.35
     let mut candidates: Vec<(u16, f32)> = provinces
         .iter()
-        .filter(|p| p.habitability > 0.5)
+        .filter(|p| p.habitability > 0.35)
         .map(|p| {
             let river_bonus = if p.is_river_junction { 0.2 } else { 0.0 };
             let coastal_bonus = if p.is_coastal { 0.1 } else { 0.0 };
@@ -45,7 +47,7 @@ pub fn place_capitals(
             .then_with(|| a.0.cmp(&b.0))
     });
 
-    let min_distance_sq: f64 = 300.0 * 300.0;
+    let min_distance_sq: f64 = 150.0 * 150.0;
     let mut selected: Vec<(u32, u16)> = Vec::new();
     let mut selected_sites: Vec<(f64, f64)> = Vec::new();
     let mut faction_id: u32 = 1;
@@ -77,6 +79,35 @@ pub fn place_capitals(
         faction_id += 1;
     }
 
+    // Fallback: if we haven't reached 50 factions, do a second pass with halved spacing
+    if selected.len() < 50 {
+        let relaxed_distance_sq = min_distance_sq / 4.0;
+        for (pid, _score) in &candidates {
+            if selected.len() >= target {
+                break;
+            }
+            // Skip already selected
+            if selected.iter().any(|&(_, sp)| sp == *pid) {
+                continue;
+            }
+            let province = match provinces.iter().find(|p| p.id == *pid) {
+                Some(p) => p,
+                None => continue,
+            };
+            let too_close = selected_sites.iter().any(|site| {
+                let dx = province.site.0 - site.0;
+                let dy = province.site.1 - site.1;
+                dx * dx + dy * dy < relaxed_distance_sq
+            });
+            if too_close {
+                continue;
+            }
+            selected.push((faction_id, *pid));
+            selected_sites.push(province.site);
+            faction_id += 1;
+        }
+    }
+
     selected
 }
 
@@ -87,19 +118,14 @@ pub fn place_capitals(
 /// After all factions expand, remaining provinces with habitability >= 0.1 become Unclaimed.
 pub fn grow_factions(
     provinces: &mut [Province],
-    province_ids: &[u16],
-    _navigation_cost: &[f32],
+    adjacency: &[Vec<u16>],
     capitals: &[(u32, u16)],
-    width: usize,
-    height: usize,
     seed: u32,
 ) {
     let num_provinces = provinces.len();
     if num_provinces == 0 || capitals.is_empty() {
         return;
     }
-
-    let adjacency = build_adjacency(province_ids, width, height, num_provinces);
 
     let mut rng = ChaCha8Rng::seed_from_u64(seed as u64 ^ 0xFACE);
 
@@ -265,53 +291,6 @@ pub fn build_faction_data(
         .collect()
 }
 
-/// Build adjacency list indexed by province id.
-///
-/// Iterates pixels and checks right and down neighbors to find province borders.
-fn build_adjacency(
-    province_ids: &[u16],
-    width: usize,
-    height: usize,
-    num_provinces: usize,
-) -> Vec<Vec<u16>> {
-    let mut adjacency: Vec<HashSet<u16>> = vec![HashSet::new(); num_provinces + 1];
-
-    for y in 0..height {
-        for x in 0..width {
-            let idx = y * width + x;
-            let pid = province_ids[idx];
-            if pid == 0 {
-                continue;
-            }
-
-            // Check right neighbor
-            if x + 1 < width {
-                let right = province_ids[idx + 1];
-                if right != 0 && right != pid {
-                    if (pid as usize) < adjacency.len() && (right as usize) < adjacency.len() {
-                        adjacency[pid as usize].insert(right);
-                        adjacency[right as usize].insert(pid);
-                    }
-                }
-            }
-
-            // Check down neighbor
-            if y + 1 < height {
-                let down = province_ids[idx + width];
-                if down != 0 && down != pid {
-                    if (pid as usize) < adjacency.len() && (down as usize) < adjacency.len() {
-                        adjacency[pid as usize].insert(down);
-                        adjacency[down as usize].insert(pid);
-                    }
-                }
-            }
-        }
-    }
-
-    // Convert HashSets to Vecs
-    adjacency.into_iter().map(|s| s.into_iter().collect()).collect()
-}
-
 /// Generate a random faction name from prefix + suffix parts.
 fn generate_faction_name(rng: &mut ChaCha8Rng) -> String {
     const PREFIXES: &[&str] = &[
@@ -401,20 +380,18 @@ mod tests {
         // Two provinces that are close together: only one should be selected
         let provinces = vec![
             make_province(1, 0.9, (100.0, 100.0)),
-            make_province(2, 0.85, (110.0, 110.0)), // ~14 pixels apart, well under 300
+            make_province(2, 0.85, (110.0, 110.0)), // ~14 pixels apart, well under 150
             make_province(3, 0.8, (500.0, 500.0)),
         ];
-        let caps = place_capitals(&provinces, 3, 42);
-        // Should get at most 2 (provinces 1 and 3, skipping 2 because too close to 1)
-        assert!(caps.len() <= 2);
-        // Both selected should be at least 300 apart
+        let caps = place_capitals(&provinces, 50, 42);
+        // Both selected should be at least 150 apart
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {
                 let a = provinces.iter().find(|p| p.id == caps[i].1).unwrap();
                 let b = provinces.iter().find(|p| p.id == caps[j].1).unwrap();
                 let dx = a.site.0 - b.site.0;
                 let dy = a.site.1 - b.site.1;
-                assert!(dx * dx + dy * dy >= 300.0 * 300.0);
+                assert!(dx * dx + dy * dy >= 150.0 * 150.0);
             }
         }
     }
@@ -422,16 +399,16 @@ mod tests {
     #[test]
     fn capitals_require_minimum_habitability() {
         let provinces = vec![
-            make_province(1, 0.3, (100.0, 100.0)), // Below 0.5 threshold
-            make_province(2, 0.4, (500.0, 500.0)), // Below 0.5 threshold
+            make_province(1, 0.2, (100.0, 100.0)), // Below 0.35 threshold
+            make_province(2, 0.3, (500.0, 500.0)), // Below 0.35 threshold
         ];
-        let caps = place_capitals(&provinces, 2, 42);
+        let caps = place_capitals(&provinces, 50, 42);
         assert!(caps.is_empty());
     }
 
     #[test]
     fn auto_faction_count() {
-        // 300 habitable provinces -> 5 + 2 = 7
+        // 300 habitable provinces -> target = 50 + (300/80).min(30) = 53
         let mut provinces = Vec::new();
         for i in 1..=300u16 {
             let x = (i as f64) * 20.0;
@@ -439,10 +416,21 @@ mod tests {
             provinces.push(make_province(i, 0.6, (x, y)));
         }
         let caps = place_capitals(&provinces, 0, 42);
-        // Expected target: 5 + (300/150).min(10) = 7
-        // Actual may be fewer due to distance constraint
-        assert!(caps.len() <= 7);
+        // Actual may be fewer due to distance constraint, but should have some
         assert!(!caps.is_empty());
+    }
+
+    #[test]
+    fn many_habitable_produces_at_least_50_factions() {
+        let mut provinces = Vec::new();
+        for i in 1..=600u16 {
+            // Spread provinces far apart to avoid spacing constraint
+            let x = ((i - 1) % 30) as f64 * 200.0;
+            let y = ((i - 1) / 30) as f64 * 200.0;
+            provinces.push(make_province(i, 0.6, (x, y)));
+        }
+        let caps = place_capitals(&provinces, 0, 42);
+        assert!(caps.len() >= 50, "expected >= 50 factions, got {}", caps.len());
     }
 
     #[test]
@@ -455,20 +443,20 @@ mod tests {
             make_province(4, 0.5, (40.0, 10.0)),
         ];
 
-        // Simple 1D grid: [1, 1, 2, 2, 3, 3, 4, 4]
-        let width = 8;
-        let height = 1;
-        let province_ids: Vec<u16> = vec![1, 1, 2, 2, 3, 3, 4, 4];
-        let nav_cost = vec![1.0f32; width * height];
+        // Pre-computed adjacency: 1-2, 2-3, 3-4
+        let adjacency: Vec<Vec<u16>> = vec![
+            vec![],           // 0 (unused)
+            vec![2],          // province 1 neighbors
+            vec![1, 3],       // province 2 neighbors
+            vec![2, 4],       // province 3 neighbors
+            vec![3],          // province 4 neighbors
+        ];
         let capitals = vec![(1u32, 1u16)];
 
         grow_factions(
             &mut provinces,
-            &province_ids,
-            &nav_cost,
+            &adjacency,
             &capitals,
-            width,
-            height,
             42,
         );
 

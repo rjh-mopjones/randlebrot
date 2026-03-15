@@ -4,7 +4,7 @@ use crate::lifegen_data::{PoliticalState, Province};
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
 // 1. Seed provinces via variable-radius Poisson disc sampling
@@ -122,9 +122,10 @@ pub fn tessellate_provinces(
     terrain: &dyn TerrainQuery,
     width: usize,
     height: usize,
-) -> Vec<u16> {
+) -> (Vec<u16>, Vec<Vec<u16>>) {
     let total = width * height;
     let mut province_ids = vec![0u16; total];
+    let mut adjacency: Vec<HashSet<u16>> = vec![HashSet::new(); seeds.len() + 1];
 
     // Priority queue: (quantized_cost, pixel_index, province_id)
     // Using Reverse so BinaryHeap (max-heap) acts as a min-heap.
@@ -172,8 +173,16 @@ pub fn tessellate_provinces(
             let nuy = ny as usize;
             let ni = nuy * width + nux;
 
-            // Skip already assigned
+            // Skip already assigned — record adjacency if different province
             if province_ids[ni] != 0 {
+                if province_ids[ni] != pid {
+                    if (pid as usize) < adjacency.len()
+                        && (province_ids[ni] as usize) < adjacency.len()
+                    {
+                        adjacency[pid as usize].insert(province_ids[ni]);
+                        adjacency[province_ids[ni] as usize].insert(pid);
+                    }
+                }
                 continue;
             }
 
@@ -190,7 +199,8 @@ pub fn tessellate_provinces(
         }
     }
 
-    province_ids
+    let adjacency_vecs: Vec<Vec<u16>> = adjacency.into_iter().map(|s| s.into_iter().collect()).collect();
+    (province_ids, adjacency_vecs)
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +218,7 @@ pub fn snap_borders_to_rivers(
     terrain: &dyn TerrainQuery,
     width: usize,
     height: usize,
+    river_dist: &[f32],
 ) {
     let offsets_4: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
     let search_radius: i32 = 3;
@@ -220,6 +231,11 @@ pub fn snap_borders_to_rivers(
             let idx = y * width + x;
             let my_pid = province_ids[idx];
             if my_pid == 0 {
+                continue;
+            }
+
+            // Early-out: skip pixels far from any river
+            if river_dist[idx] > (search_radius as f32) + 2.0 {
                 continue;
             }
 
@@ -316,6 +332,63 @@ pub fn snap_borders_to_rivers(
     // Apply reassignments
     for (idx, new_pid) in reassignments {
         province_ids[idx] = new_pid;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 3b. Snap province borders to micro-tile grid
+// ---------------------------------------------------------------------------
+
+/// Quantize province borders to 16×16 meso-pixel blocks (one micro tile).
+///
+/// Each 16×16 block is assigned to the province that owns the majority of its
+/// land pixels. Ocean pixels (id 0) don't vote. If a block is entirely ocean
+/// it stays 0.
+pub fn snap_to_microtile_grid(province_ids: &mut [u16], width: usize, height: usize) {
+    const TILE: usize = 16;
+
+    let blocks_x = (width + TILE - 1) / TILE;
+    let blocks_y = (height + TILE - 1) / TILE;
+
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let x0 = bx * TILE;
+            let y0 = by * TILE;
+            let x1 = (x0 + TILE).min(width);
+            let y1 = (y0 + TILE).min(height);
+
+            // Count votes per province ID (skip 0 = ocean)
+            let mut counts: HashMap<u16, u32> = HashMap::new();
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let pid = province_ids[y * width + x];
+                    if pid != 0 {
+                        *counts.entry(pid).or_insert(0) += 1;
+                    }
+                }
+            }
+
+            // Winner takes the block
+            let winner = counts
+                .into_iter()
+                .max_by_key(|&(_, count)| count)
+                .map(|(pid, _)| pid)
+                .unwrap_or(0);
+
+            // Paint the block
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let idx = y * width + x;
+                    // Preserve ocean pixels
+                    if province_ids[idx] == 0 && winner != 0 {
+                        continue;
+                    }
+                    if province_ids[idx] != 0 {
+                        province_ids[idx] = winner;
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -1,5 +1,78 @@
 use rb_core::{TerrainQuery, TileType};
 use rayon::prelude::*;
+use std::collections::VecDeque;
+
+/// Precompute river distance field via BFS.
+///
+/// Returns a `Vec<f32>` of length `w * h` where each value is the
+/// approximate Euclidean distance to the nearest river pixel.
+/// River pixels have distance 0.0.
+pub fn compute_river_distance_field(terrain: &dyn TerrainQuery) -> Vec<f32> {
+    let w = terrain.width();
+    let h = terrain.height();
+    let mut dist = vec![f32::MAX; w * h];
+    let mut queue = VecDeque::new();
+
+    // Seed BFS with river pixels
+    for y in 0..h {
+        for x in 0..w {
+            if terrain.is_river(x, y) {
+                let idx = y * w + x;
+                dist[idx] = 0.0;
+                queue.push_back((x, y));
+            }
+        }
+    }
+
+    // BFS (4-connected)
+    while let Some((x, y)) = queue.pop_front() {
+        let current_dist = dist[y * w + x];
+        let offsets: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+        for &(dx, dy) in &offsets {
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+            if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                continue;
+            }
+            let nux = nx as usize;
+            let nuy = ny as usize;
+            let ni = nuy * w + nux;
+            let new_dist = current_dist + 1.0;
+            if new_dist < dist[ni] {
+                dist[ni] = new_dist;
+                queue.push_back((nux, nuy));
+            }
+        }
+    }
+
+    // Parallel refinement pass: tighten with diagonal cost
+    let snapshot = dist.clone();
+    dist.par_chunks_mut(w)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for x in 0..w {
+                let diag_offsets: [(i32, i32, f32); 8] = [
+                    (-1, -1, 1.414), (0, -1, 1.0), (1, -1, 1.414),
+                    (-1,  0, 1.0),                  (1,  0, 1.0),
+                    (-1,  1, 1.414), (0,  1, 1.0),  (1,  1, 1.414),
+                ];
+                for &(dx, dy, cost) in &diag_offsets {
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                        continue;
+                    }
+                    let ni = ny as usize * w + nx as usize;
+                    let candidate = snapshot[ni] + cost;
+                    if candidate < row[x] {
+                        row[x] = candidate;
+                    }
+                }
+            }
+        });
+
+    dist
+}
 
 /// Compute habitability score [0.0, 1.0] for every meso pixel.
 ///
@@ -10,7 +83,7 @@ use rayon::prelude::*;
 /// - Terrain stability (15%): low slope, low tectonic stress
 ///
 /// Ocean pixels are always 0.0.
-pub fn compute_habitability(terrain: &dyn TerrainQuery) -> Vec<f32> {
+pub fn compute_habitability(terrain: &dyn TerrainQuery, river_dist: &[f32]) -> Vec<f32> {
     let w = terrain.width();
     let h = terrain.height();
     let mut grid = vec![0.0f32; w * h];
@@ -32,36 +105,14 @@ pub fn compute_habitability(terrain: &dyn TerrainQuery) -> Vec<f32> {
                 let humidity = terrain.humidity_at(x, y);
                 let drainage = terrain.drainage_at(x, y);
 
-                let river_bonus = if terrain.is_river(x, y) {
+                let idx = y * w + x;
+                let rd = river_dist[idx];
+                let river_bonus = if rd < 1.0 {
                     0.4
+                } else if rd < 12.0 {
+                    0.3 * (1.0 - rd as f64 / 12.0)
                 } else {
-                    // Scan 8-pixel radius for nearby river
-                    let mut best_dist = f64::MAX;
-                    let r: i64 = 8;
-                    'scan: for dy in -r..=r {
-                        for dx in -r..=r {
-                            let nx = x as i64 + dx;
-                            let ny = y as i64 + dy;
-                            if nx < 0 || ny < 0 || nx >= w as i64 || ny >= h as i64 {
-                                continue;
-                            }
-                            if terrain.is_river(nx as usize, ny as usize) {
-                                let dist = ((dx * dx + dy * dy) as f64).sqrt();
-                                if dist < best_dist {
-                                    best_dist = dist;
-                                }
-                                // Early exit: found adjacent river, can't do better than ~1
-                                if dist <= 1.0 {
-                                    break 'scan;
-                                }
-                            }
-                        }
-                    }
-                    if best_dist < 12.0 {
-                        0.3 * (1.0 - best_dist / 12.0)
-                    } else {
-                        0.0
-                    }
+                    0.0
                 };
 
                 let drainage_score = (drainage / 1000.0).min(1.0) * 0.1;
@@ -249,6 +300,70 @@ fn biome_traversability(biome: TileType) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MockTerrain {
+        width: usize,
+        height: usize,
+        rivers: Vec<bool>,
+    }
+
+    impl TerrainQuery for MockTerrain {
+        fn width(&self) -> usize { self.width }
+        fn height(&self) -> usize { self.height }
+        fn heightmap_at(&self, _x: usize, _y: usize) -> f64 { 0.1 }
+        fn biome_at(&self, _x: usize, _y: usize) -> TileType { TileType::Plains }
+        fn temperature_at(&self, _x: usize, _y: usize) -> f64 { 15.0 }
+        fn humidity_at(&self, _x: usize, _y: usize) -> f64 { 0.5 }
+        fn continentalness_at(&self, _x: usize, _y: usize) -> f64 { 0.5 }
+        fn erosion_at(&self, _x: usize, _y: usize) -> f64 { 0.1 }
+        fn light_level_at(&self, _x: usize, _y: usize) -> f64 { 0.5 }
+        fn rock_hardness_at(&self, _x: usize, _y: usize) -> f64 { 0.5 }
+        fn river_at(&self, x: usize, y: usize) -> f64 {
+            if y < self.height && x < self.width && self.rivers[y * self.width + x] { 1.0 } else { 0.0 }
+        }
+        fn drainage_at(&self, _x: usize, _y: usize) -> f64 { 0.0 }
+        fn tectonic_at(&self, _x: usize, _y: usize) -> f64 { 0.0 }
+        fn peaks_valleys_at(&self, _x: usize, _y: usize) -> f64 { 0.0 }
+        fn aridity_at(&self, _x: usize, _y: usize) -> f64 { 0.0 }
+        fn slope_at(&self, _x: usize, _y: usize) -> f64 { 0.0 }
+        fn is_ocean(&self, _x: usize, _y: usize) -> bool { false }
+        fn is_river(&self, x: usize, y: usize) -> bool {
+            y < self.height && x < self.width && self.rivers[y * self.width + x]
+        }
+    }
+
+    #[test]
+    fn river_distance_field_correctness() {
+        let w = 100;
+        let h = 100;
+        let mut rivers = vec![false; w * h];
+        // Place river along row 50
+        for x in 0..w {
+            rivers[50 * w + x] = true;
+        }
+        let terrain = MockTerrain { width: w, height: h, rivers };
+        let dist = compute_river_distance_field(&terrain);
+
+        // River pixels should have dist 0
+        for x in 0..w {
+            assert_eq!(dist[50 * w + x], 0.0, "river pixel at ({}, 50) should be 0", x);
+        }
+        // Adjacent row should be ~1
+        for x in 0..w {
+            let d = dist[49 * w + x];
+            assert!(d <= 1.01, "pixel at ({}, 49) dist={} should be ~1", x, d);
+        }
+        // Distance should increase monotonically away from river
+        for x in [10, 50, 90] {
+            for y in 0..49 {
+                assert!(
+                    dist[y * w + x] >= dist[(y + 1) * w + x],
+                    "dist should decrease toward river at ({}, {}): {} vs {}",
+                    x, y, dist[y * w + x], dist[(y + 1) * w + x]
+                );
+            }
+        }
+    }
 
     /// Verify every TileType variant is handled and returns a valid score.
     #[test]

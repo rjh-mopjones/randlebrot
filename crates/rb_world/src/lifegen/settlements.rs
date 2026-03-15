@@ -2,7 +2,7 @@ use crate::lifegen_data::{PoliticalState, Province, SettlementSeed, SettlementTi
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use rb_core::TerrainQuery;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Place settlement seeds within provinces based on habitability, area, and terrain.
 ///
@@ -25,6 +25,29 @@ pub fn place_settlements(
     // Build a set of capital province IDs for fast lookup
     let capital_set: HashSet<u16> = capital_provinces.iter().map(|&(_, pid)| pid).collect();
 
+    // Pre-group pixels by province: single pass over the grid
+    let mut province_candidates: HashMap<u16, Vec<(f32, usize, usize)>> = HashMap::new();
+    for y in 0..height {
+        for x in 0..width {
+            let idx = y * width + x;
+            let pid = province_ids[idx];
+            if pid == 0 {
+                continue;
+            }
+            let hab = habitability[idx];
+            if hab > 0.01 {
+                province_candidates
+                    .entry(pid)
+                    .or_default()
+                    .push((hab, x, y));
+            }
+        }
+    }
+    // Sort each province's candidates by habitability descending
+    for candidates in province_candidates.values_mut() {
+        candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
     for province in provinces {
         // Determine how many settlements this province gets
         let max_settlements = settlement_count_for_province(province);
@@ -33,8 +56,9 @@ pub fn place_settlements(
         }
 
         // Find the best pixels within this province by habitability
-        let best_positions =
-            find_best_positions(province, province_ids, habitability, width, height, max_settlements);
+        let empty_vec = Vec::new();
+        let candidates = province_candidates.get(&province.id).unwrap_or(&empty_vec);
+        let best_positions = find_best_positions(candidates, max_settlements);
 
         let is_capital = capital_set.contains(&province.id);
 
@@ -94,54 +118,32 @@ fn settlement_count_for_province(province: &Province) -> usize {
     }
 }
 
-/// Find the N highest-habitability pixels within a province, each at least 60px apart.
+/// Find the N highest-habitability pixels from a pre-sorted candidate list,
+/// each at least 60px apart.
 ///
+/// `candidates` must be sorted by habitability descending.
 /// Returns pixel coordinates `(x, y)` in meso pixel space.
 fn find_best_positions(
-    province: &Province,
-    province_ids: &[u16],
-    habitability: &[f32],
-    width: usize,
-    height: usize,
+    candidates: &[(f32, usize, usize)],
     count: usize,
 ) -> Vec<(usize, usize)> {
-    let pid = province.id;
-
-    // Collect all pixels belonging to this province with their habitability
-    // For performance, we don't need to store all - just find top candidates.
-    // We'll do a single pass collecting the top-scoring pixels.
-    let mut best: Vec<(f32, usize, usize)> = Vec::new();
-
-    for y in 0..height {
-        for x in 0..width {
-            let idx = y * width + x;
-            if province_ids[idx] == pid {
-                let hab = habitability[idx];
-                best.push((hab, x, y));
-            }
-        }
-    }
-
-    // Sort by habitability descending
-    best.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
     let min_spacing_sq: f64 = 60.0 * 60.0;
     let mut selected: Vec<(usize, usize)> = Vec::new();
 
-    for (_, x, y) in &best {
+    for &(_, x, y) in candidates {
         if selected.len() >= count {
             break;
         }
 
         // Check spacing from already-selected positions
         let too_close = selected.iter().any(|&(sx, sy)| {
-            let dx = *x as f64 - sx as f64;
-            let dy = *y as f64 - sy as f64;
+            let dx = x as f64 - sx as f64;
+            let dy = y as f64 - sy as f64;
             dx * dx + dy * dy < min_spacing_sq
         });
 
         if !too_close {
-            selected.push((*x, *y));
+            selected.push((x, y));
         }
     }
 
@@ -267,30 +269,21 @@ mod tests {
 
     #[test]
     fn find_positions_respects_spacing() {
-        let width = 200;
-        let height = 1;
-        let pid = 1u16;
-        let province_ids: Vec<u16> = vec![pid; width * height];
-        // Create a habitability gradient: highest at x=0, then x=10, then x=100
-        let mut habitability = vec![0.1f32; width * height];
-        habitability[0] = 0.9;
-        habitability[10] = 0.85; // Only 10 pixels from first, should be skipped
-        habitability[100] = 0.8; // 100 pixels from first, OK
+        // Build a pre-sorted candidate list (descending by habitability)
+        let mut candidates: Vec<(f32, usize, usize)> = vec![
+            (0.9, 0, 0),
+            (0.85, 10, 0),  // Only 10 pixels from first, should be skipped
+            (0.8, 100, 0),  // 100 pixels from first, OK
+        ];
+        // Add filler at low hab
+        for x in 0..200 {
+            if x != 0 && x != 10 && x != 100 {
+                candidates.push((0.1, x, 0));
+            }
+        }
+        candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        let province = Province {
-            id: pid,
-            site: (100.0, 0.0),
-            biome: TileType::Plains,
-            habitability: 0.8,
-            area_px: 200,
-            is_coastal: false,
-            is_river_junction: false,
-            elevation_mean: 0.1,
-            terrain_cost: 1.0,
-            political_state: PoliticalState::Claimed { faction_id: 1 },
-        };
-
-        let positions = find_best_positions(&province, &province_ids, &habitability, width, height, 3);
+        let positions = find_best_positions(&candidates, 3);
         // First two must be x=0 and x=100 (x=10 skipped due to 60px spacing)
         assert!(positions.len() >= 2);
         assert_eq!(positions[0], (0, 0));
