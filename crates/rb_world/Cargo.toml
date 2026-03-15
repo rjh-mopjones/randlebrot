@@ -14,3 +14,7 @@ rand = "0.8"
 rand_chacha = "0.3"
 image.workspace = true
 rayon = "1.10"
+
+[[example]]
+name = "save_lifegen_layers"
+path = "examples/save_lifegen_layers.rs"

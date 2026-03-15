@@ -111,20 +111,19 @@ pub fn grow_factions(
         }
     }
 
-    // Track which provinces have been claimed by any faction
+    // Multi-source Dijkstra: all factions expand simultaneously from one queue.
+    // Whichever faction reaches a province first (cheapest cumulative path) claims it.
     let mut claimed: Vec<bool> = vec![false; num_provinces + 1];
+    let mut best_cost: Vec<f32> = vec![f32::MAX; num_provinces + 1];
 
-    // Process each faction: flood fill from capital
+    // Priority queue: (Reverse(cost), province_id, faction_id)
+    let mut pq: BinaryHeap<(Reverse<OrderedFloat>, u16, u32)> = BinaryHeap::new();
+
+    // Seed all capitals into the queue at cost 0
     for &(faction_id, capital_pid) in capitals {
-        let jitter: f32 = rng.gen::<f32>(); // [0, 1)
-        let cost_limit = 80.0 + jitter * 20.0;
-
-        // Priority queue: (Reverse(cost), province_id)
-        let mut pq: BinaryHeap<(Reverse<OrderedFloat>, u16)> = BinaryHeap::new();
-
-        // Mark capital
         if (capital_pid as usize) < claimed.len() {
             claimed[capital_pid as usize] = true;
+            best_cost[capital_pid as usize] = 0.0;
         }
         if let Some(idx) = id_to_idx.get(capital_pid as usize).copied() {
             if let Some(p) = provinces.get_mut(idx) {
@@ -132,79 +131,92 @@ pub fn grow_factions(
             }
         }
 
-        // Get capital site for distance calculation
-        let capital_site = provinces
-            .iter()
-            .find(|p| p.id == capital_pid)
+        // Push capital's neighbors into the shared queue
+        if (capital_pid as usize) < adjacency.len() {
+            let capital_site = provinces
+                .iter()
+                .find(|p| p.id == capital_pid)
+                .map(|p| p.site)
+                .unwrap_or((0.0, 0.0));
+
+            for &neighbor_id in &adjacency[capital_pid as usize] {
+                if let Some(idx) = id_to_idx.get(neighbor_id as usize).copied() {
+                    let neighbor = &provinces[idx];
+                    if neighbor.habitability < 0.1 {
+                        continue;
+                    }
+                    let dx = neighbor.site.0 - capital_site.0;
+                    let dy = neighbor.site.1 - capital_site.1;
+                    let hop_dist = (dx * dx + dy * dy).sqrt() as f32;
+                    let cost = neighbor.terrain_cost * 5.0 + hop_dist * 0.01;
+                    pq.push((Reverse(OrderedFloat(cost)), neighbor_id, faction_id));
+                }
+            }
+        }
+    }
+
+    // Expand all factions simultaneously
+    while let Some((Reverse(OrderedFloat(cost)), pid, faction_id)) = pq.pop() {
+        if (pid as usize) >= claimed.len() {
+            continue;
+        }
+
+        // Already claimed by any faction — skip
+        if claimed[pid as usize] {
+            continue;
+        }
+
+        // Skip if a cheaper path was already found
+        if cost >= best_cost[pid as usize] {
+            continue;
+        }
+        best_cost[pid as usize] = cost;
+
+        // Check habitability
+        let hab = id_to_idx
+            .get(pid as usize)
+            .and_then(|&idx| provinces.get(idx))
+            .map(|p| p.habitability)
+            .unwrap_or(0.0);
+
+        if hab < 0.1 {
+            continue;
+        }
+
+        // Claim this province
+        claimed[pid as usize] = true;
+        if let Some(idx) = id_to_idx.get(pid as usize).copied() {
+            if let Some(p) = provinces.get_mut(idx) {
+                p.political_state = PoliticalState::Claimed { faction_id };
+            }
+        }
+
+        // Get current province site for hop distance calculation
+        let current_site = id_to_idx
+            .get(pid as usize)
+            .and_then(|&idx| provinces.get(idx))
             .map(|p| p.site)
             .unwrap_or((0.0, 0.0));
 
-        // Seed neighbors of capital into priority queue
-        if (capital_pid as usize) < adjacency.len() {
-            for &neighbor_id in &adjacency[capital_pid as usize] {
+        // Push unclaimed neighbors
+        if (pid as usize) < adjacency.len() {
+            for &neighbor_id in &adjacency[pid as usize] {
                 if (neighbor_id as usize) < claimed.len() && !claimed[neighbor_id as usize] {
                     if let Some(idx) = id_to_idx.get(neighbor_id as usize).copied() {
                         let neighbor = &provinces[idx];
                         if neighbor.habitability < 0.1 {
                             continue;
                         }
-                        let dx = neighbor.site.0 - capital_site.0;
-                        let dy = neighbor.site.1 - capital_site.1;
-                        let dist = (dx * dx + dy * dy).sqrt();
-                        let cost =
-                            neighbor.terrain_cost * 10.0 + dist as f32 * 0.1;
-                        pq.push((Reverse(OrderedFloat(cost)), neighbor_id));
-                    }
-                }
-            }
-        }
-
-        // Flood fill
-        while let Some((Reverse(OrderedFloat(cost)), pid)) = pq.pop() {
-            if cost > cost_limit {
-                break;
-            }
-
-            if (pid as usize) < claimed.len() && claimed[pid as usize] {
-                continue;
-            }
-
-            // Check habitability
-            let hab = id_to_idx
-                .get(pid as usize)
-                .and_then(|&idx| provinces.get(idx))
-                .map(|p| p.habitability)
-                .unwrap_or(0.0);
-
-            if hab < 0.1 {
-                continue;
-            }
-
-            // Claim this province
-            claimed[pid as usize] = true;
-            if let Some(idx) = id_to_idx.get(pid as usize).copied() {
-                if let Some(p) = provinces.get_mut(idx) {
-                    p.political_state = PoliticalState::Claimed { faction_id };
-                }
-            }
-
-            // Add unclaimed neighbors to queue
-            if (pid as usize) < adjacency.len() {
-                for &neighbor_id in &adjacency[pid as usize] {
-                    if (neighbor_id as usize) < claimed.len() && !claimed[neighbor_id as usize] {
-                        if let Some(idx) = id_to_idx.get(neighbor_id as usize).copied() {
-                            let neighbor = &provinces[idx];
-                            if neighbor.habitability < 0.1 {
-                                continue;
-                            }
-                            let dx = neighbor.site.0 - capital_site.0;
-                            let dy = neighbor.site.1 - capital_site.1;
-                            let dist = (dx * dx + dy * dy).sqrt();
-                            let neighbor_cost =
-                                neighbor.terrain_cost * 10.0 + dist as f32 * 0.1;
+                        let dx = neighbor.site.0 - current_site.0;
+                        let dy = neighbor.site.1 - current_site.1;
+                        let hop_dist = (dx * dx + dy * dy).sqrt() as f32;
+                        let hop_cost = neighbor.terrain_cost * 5.0 + hop_dist * 0.01;
+                        let total = cost + hop_cost;
+                        if total < best_cost.get(neighbor_id as usize).copied().unwrap_or(f32::MAX) {
                             pq.push((
-                                Reverse(OrderedFloat(neighbor_cost)),
+                                Reverse(OrderedFloat(total)),
                                 neighbor_id,
+                                faction_id,
                             ));
                         }
                     }

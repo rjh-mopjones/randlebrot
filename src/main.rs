@@ -65,6 +65,11 @@ fn main() {
             poll_macro_pregen,
             macro_pregen_progress_ui,
         ).run_if(in_state(AppPhase::GeneratingMacro)))
+        // GeneratingLifeGen phase - async civilisation generation
+        .add_systems(Update, (
+            poll_lifegen_task,
+            lifegen_progress_ui,
+        ).run_if(in_state(AppPhase::GeneratingLifeGen)))
         .init_resource::<LevelChunkQueue>()
         // Ready phase - main game systems
         .add_systems(Update, (
@@ -290,6 +295,13 @@ struct LifeGenOverlay;
 #[derive(Resource)]
 struct StoredTerrainView(MesoTerrainView);
 
+/// Tracks async LifeGen generation task and progress.
+#[derive(Resource)]
+struct LifeGenTask {
+    task: Task<LifeGenData>,
+    progress: rb_world::lifegen::ProgressHandle,
+}
+
 /// Tracks which layer was last rendered to detect changes.
 #[derive(Resource)]
 struct LifeGenOverlayState {
@@ -476,9 +488,20 @@ struct MicroInFlightTile {
 enum AppPhase {
     #[default]
     Config,
-    Generating,        // Generate macro biome data
-    GeneratingMacro,   // Pre-generate all 128 macro tiles
+    Generating,          // Generate macro biome data
+    GeneratingMacro,     // Pre-generate all 128 macro tiles
+    GeneratingLifeGen,   // Run civilisation generation pipeline
     Ready,
+}
+
+/// Post-generation processing phase (one step per frame for UI updates).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MacroPostPhase {
+    Generating,
+    RefreshingRivers,
+    Normalizing,
+    SavingDebugLayers,
+    BuildingTerrain,
 }
 
 /// Tracks progress of macro tile pre-generation.
@@ -488,6 +511,7 @@ struct MacroPregenState {
     completed: usize,
     remaining: Vec<(i32, i32)>,
     in_flight: Vec<InFlightTile>,
+    post_phase: MacroPostPhase,
 }
 
 // ─── Systems ─────────────────────────────────────────────────────────────────
@@ -625,6 +649,7 @@ fn start_generation(
         completed: 0,
         remaining,
         in_flight: Vec::new(),
+        post_phase: MacroPostPhase::Generating,
     });
 
     next_phase.set(AppPhase::GeneratingMacro);
@@ -711,100 +736,107 @@ fn poll_macro_pregen(
         }
     }
 
-    if pregen.completed >= pregen.total {
+    if pregen.completed >= pregen.total && pregen.post_phase == MacroPostPhase::Generating {
         println!("All {} macro tiles pre-generated.", pregen.total);
+        pregen.post_phase = MacroPostPhase::RefreshingRivers;
+        return; // yield frame for UI update
+    }
 
-        // Refresh macro tile rivers from global network for consistency
-        if let Some(ref global_rivers) = global_rivers {
-            use rb_noise::{rasterize_from_network, LOD_THRESHOLD_MACRO, derived, SEA_LEVEL};
-            use rb_core::TileType;
+    // Post-generation phases: one step per frame so the progress UI updates
+    match pregen.post_phase {
+        MacroPostPhase::Generating => {} // still generating tiles
+        MacroPostPhase::RefreshingRivers => {
+            if let Some(ref global_rivers) = global_rivers {
+                use rb_noise::{rasterize_from_network, LOD_THRESHOLD_MACRO, derived, SEA_LEVEL};
+                use rb_core::TileType;
 
-            println!("Refreshing macro tile rivers from global network...");
-            for cy in 0..8i32 {
-                for cx in 0..16i32 {
-                    let coord = (cx, cy);
-                    let Some(cached) = tile_cache.macro_tiles.get_mut(&coord) else { continue };
-                    let Some(biome_map) = Arc::get_mut(&mut cached.biome_map) else { continue };
-                    let world_x = cx as f64 * CHUNK_SIZE as f64;
-                    let world_y = cy as f64 * CHUNK_SIZE as f64;
-                    let new_rivers = rasterize_from_network(
-                        &global_rivers.network, world_x, world_y,
-                        CHUNK_SIZE as f64, TILE_MAP_SIZE, LOD_THRESHOLD_MACRO,
-                    );
-                    for idx in 0..biome_map.rivers.len() {
-                        biome_map.rivers[idx] = new_rivers[idx];
-                        biome_map.water_table[idx] = derived::derive_water_table(
-                            new_rivers[idx], biome_map.humidity[idx], biome_map.heightmap[idx],
-                            biome_map.precipitation_type[idx], biome_map.continentalness[idx],
+                for cy in 0..8i32 {
+                    for cx in 0..16i32 {
+                        let coord = (cx, cy);
+                        let Some(cached) = tile_cache.macro_tiles.get_mut(&coord) else { continue };
+                        let Some(biome_map) = Arc::get_mut(&mut cached.biome_map) else { continue };
+                        let world_x = cx as f64 * CHUNK_SIZE as f64;
+                        let world_y = cy as f64 * CHUNK_SIZE as f64;
+                        let new_rivers = rasterize_from_network(
+                            &global_rivers.network, world_x, world_y,
+                            CHUNK_SIZE as f64, TILE_MAP_SIZE, LOD_THRESHOLD_MACRO,
                         );
-                        if new_rivers[idx] > 0.0
-                            && biome_map.continentalness[idx] >= SEA_LEVEL
-                            && biome_map.temperature[idx] > -10.0
-                            && biome_map.temperature[idx] < 70.0
-                        {
-                            biome_map.biomes[idx] = TileType::River;
+                        for idx in 0..biome_map.rivers.len() {
+                            biome_map.rivers[idx] = new_rivers[idx];
+                            biome_map.water_table[idx] = derived::derive_water_table(
+                                new_rivers[idx], biome_map.humidity[idx], biome_map.heightmap[idx],
+                                biome_map.precipitation_type[idx], biome_map.continentalness[idx],
+                            );
+                            if new_rivers[idx] > 0.0
+                                && biome_map.continentalness[idx] >= SEA_LEVEL
+                                && biome_map.temperature[idx] > -10.0
+                                && biome_map.temperature[idx] < 70.0
+                            {
+                                biome_map.biomes[idx] = TileType::River;
+                            }
                         }
+                        let image_data = biome_map.to_layer_image(current_layer.0);
+                        cached.texture = images.add(create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, image_data));
                     }
-                    // Regenerate texture
-                    let image_data = biome_map.to_layer_image(current_layer.0);
-                    cached.texture = images.add(create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, image_data));
                 }
             }
-            println!("  Macro tile rivers refreshed.");
+            pregen.post_phase = MacroPostPhase::Normalizing;
         }
-
-        // Compute global heightmap range across all macro tiles for consistent normalization
-        let mut hmin = f64::MAX;
-        let mut hmax = f64::MIN;
-        for cached in tile_cache.macro_tiles.values() {
-            for &v in &cached.biome_map.heightmap {
-                if v < hmin { hmin = v; }
-                if v > hmax { hmax = v; }
+        MacroPostPhase::Normalizing => {
+            let mut hmin = f64::MAX;
+            let mut hmax = f64::MIN;
+            for cached in tile_cache.macro_tiles.values() {
+                for &v in &cached.biome_map.heightmap {
+                    if v < hmin { hmin = v; }
+                    if v > hmax { hmax = v; }
+                }
             }
+            let norm_hints = NormalizationHints {
+                heightmap_min: if hmin < hmax { hmin } else { 0.0 },
+                heightmap_max: if hmin < hmax { hmax } else { 1.0 },
+            };
+            commands.insert_resource(GlobalNormHints(norm_hints.clone()));
+
+            for cached in tile_cache.macro_tiles.values_mut() {
+                let image_data = cached.biome_map.to_layer_image_with_hints(current_layer.0, Some(&norm_hints));
+                cached.texture = images.add(create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, image_data));
+            }
+            pregen.post_phase = MacroPostPhase::SavingDebugLayers;
         }
-        let norm_hints = NormalizationHints {
-            heightmap_min: if hmin < hmax { hmin } else { 0.0 },
-            heightmap_max: if hmin < hmax { hmax } else { 1.0 },
-        };
-        println!("  Global heightmap range: [{:.4}, {:.4}]", norm_hints.heightmap_min, norm_hints.heightmap_max);
-        commands.insert_resource(GlobalNormHints(norm_hints.clone()));
-
-        // Re-render all macro tiles with global normalization hints
-        for cached in tile_cache.macro_tiles.values_mut() {
-            let image_data = cached.biome_map.to_layer_image_with_hints(current_layer.0, Some(&norm_hints));
-            cached.texture = images.add(create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, image_data));
+        MacroPostPhase::SavingDebugLayers => {
+            save_stitched_debug_layers(&tile_cache);
+            pregen.post_phase = MacroPostPhase::BuildingTerrain;
         }
+        MacroPostPhase::BuildingTerrain => {
+            let tile_biome_maps: HashMap<(i32, i32), Arc<BiomeMap>> = tile_cache.macro_tiles.iter()
+                .map(|(&coord, cached)| (coord, cached.biome_map.clone()))
+                .collect();
+            let chunks_x = (MAP_WIDTH as f32 / CHUNK_SIZE).ceil() as usize;
+            let chunks_y = (MAP_HEIGHT as f32 / CHUNK_SIZE).ceil() as usize;
 
-        // Save debug layers by stitching all macro tiles — same data the app displays
-        save_stitched_debug_layers(&tile_cache);
+            commands.insert_resource(StoredTerrainView(
+                MesoTerrainView::from_tile_map(&tile_biome_maps, chunks_x, chunks_y, TILE_MAP_SIZE),
+            ));
 
-        // Build MesoTerrainView, run LifeGen, and store terrain view for civ_seed regeneration
-        let tile_biome_maps: HashMap<(i32, i32), Arc<BiomeMap>> = tile_cache.macro_tiles.iter()
-            .map(|(&coord, cached)| (coord, cached.biome_map.clone()))
-            .collect();
-        let chunks_x = (MAP_WIDTH as f32 / CHUNK_SIZE).ceil() as usize;
-        let chunks_y = (MAP_HEIGHT as f32 / CHUNK_SIZE).ceil() as usize;
-        let terrain_view = MesoTerrainView::from_tile_map(
-            &tile_biome_maps, chunks_x, chunks_y, TILE_MAP_SIZE,
-        );
-        println!("  MesoTerrainView constructed: {}x{}", terrain_view.width(), terrain_view.height());
+            // Spawn async LifeGen task
+            let terrain_view = Arc::new(MesoTerrainView::from_tile_map(
+                &tile_biome_maps, chunks_x, chunks_y, TILE_MAP_SIZE,
+            ));
+            let civ_seed = world_def.civ_seed;
+            let progress = rb_world::lifegen::new_progress();
+            let progress_clone = progress.clone();
+            let task = AsyncComputeTaskPool::get().spawn(async move {
+                let data = rb_world::lifegen::generate_with_progress(
+                    terrain_view.as_ref(), civ_seed, Some(progress_clone),
+                );
+                data.save_debug_layers(std::path::Path::new("debug_layers"));
+                data
+            });
+            commands.insert_resource(LifeGenTask { task, progress });
 
-        // Run full LifeGen pipeline
-        let civ_seed = world_def.civ_seed;
-        let lifegen = rb_world::lifegen::generate(&terrain_view, civ_seed);
-
-        lifegen.save_debug_layers(std::path::Path::new("debug_layers"));
-        commands.insert_resource(lifegen);
-
-        // Store terrain view for civ_seed regeneration (holds Arc clones, ~4.9GB)
-        commands.insert_resource(StoredTerrainView(terrain_view));
-
-        // Note: tile shrink is skipped because StoredTerrainView holds Arc clones,
-        // preventing Arc::get_mut from succeeding. The full terrain data is kept
-        // in memory to support civ_seed regeneration without re-generating terrain.
-
-        commands.remove_resource::<MacroPregenState>();
-        next_phase.set(AppPhase::Ready);
+            commands.remove_resource::<MacroPregenState>();
+            next_phase.set(AppPhase::GeneratingLifeGen);
+        }
     }
 }
 
@@ -890,7 +922,7 @@ fn save_stitched_debug_layers(tile_cache: &TileCache) {
     }
 }
 
-/// Show progress bar during macro tile pre-generation.
+/// Show progress during macro tile pre-generation with phase list.
 fn macro_pregen_progress_ui(
     mut contexts: EguiContexts,
     pregen: Res<MacroPregenState>,
@@ -901,17 +933,173 @@ fn macro_pregen_progress_ui(
         .frame(egui::Frame::default().fill(egui::Color32::from_rgb(30, 30, 30)))
         .show(ctx, |_| {});
 
-    egui::Window::new("Pre-generating Macro Maps")
+    // Overall progress: tiles are 0-80%, post-processing phases are 80-100%
+    let tile_progress = pregen.completed as f32 / pregen.total.max(1) as f32;
+    let post_bonus = match pregen.post_phase {
+        MacroPostPhase::Generating => 0.0,
+        MacroPostPhase::RefreshingRivers => 0.05,
+        MacroPostPhase::Normalizing => 0.10,
+        MacroPostPhase::SavingDebugLayers => 0.15,
+        MacroPostPhase::BuildingTerrain => 0.19,
+    };
+    let overall = (tile_progress * 0.80 + post_bonus).min(1.0);
+
+    // Current post-phase index (0 = generating, 1-4 = post phases)
+    let post_idx: usize = match pregen.post_phase {
+        MacroPostPhase::Generating => 0,
+        MacroPostPhase::RefreshingRivers => 1,
+        MacroPostPhase::Normalizing => 2,
+        MacroPostPhase::SavingDebugLayers => 3,
+        MacroPostPhase::BuildingTerrain => 4,
+    };
+
+    egui::Window::new("Generating World")
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .fixed_size([350.0, 100.0])
+        .fixed_size([420.0, 200.0])
         .show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                let progress = pregen.completed as f32 / pregen.total as f32;
-                ui.label(format!("Generating macro maps: {}/{}", pregen.completed, pregen.total));
+            ui.vertical(|ui| {
+                ui.add_space(5.0);
+                ui.add(egui::ProgressBar::new(overall).show_percentage());
                 ui.add_space(10.0);
+
+                let phases: &[(usize, &str, &str)] = &[
+                    (0, "Macro Tiles", "128 terrain tiles at 512x512"),
+                    (1, "River Refresh", "Syncing rivers from global network"),
+                    (2, "Normalizing", "Global heightmap range + re-render"),
+                    (3, "Saving Debug Layers", "Stitching terrain PNGs"),
+                    (4, "Building Terrain View", "8192x4096 meso query surface"),
+                ];
+
+                for &(idx, name, desc) in phases {
+                    let (icon, color) = if idx < post_idx {
+                        ("\u{2714}", egui::Color32::from_rgb(100, 200, 100))
+                    } else if idx == post_idx {
+                        ("\u{25B6}", egui::Color32::from_rgb(255, 220, 80))
+                    } else {
+                        ("\u{25CB}", egui::Color32::from_rgb(120, 120, 120))
+                    };
+
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(icon).color(color).size(13.0));
+                        ui.label(egui::RichText::new(name).color(color).strong().size(13.0));
+                        if idx == 0 && post_idx == 0 {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "— {}/{}",
+                                    pregen.completed, pregen.total
+                                ))
+                                .color(egui::Color32::from_rgb(180, 180, 180))
+                                .size(12.0),
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new(desc)
+                                    .color(egui::Color32::from_rgb(90, 90, 90))
+                                    .size(11.0),
+                            );
+                        }
+                    });
+                }
+            });
+        });
+}
+
+/// Poll async LifeGen task. When complete, insert LifeGenData and transition to Ready.
+fn poll_lifegen_task(
+    mut commands: Commands,
+    mut task_res: ResMut<LifeGenTask>,
+    mut next_phase: ResMut<NextState<AppPhase>>,
+) {
+    if let Some(lifegen) = block_on(poll_once(&mut task_res.task)) {
+        println!(
+            "LifeGen complete: {} provinces, {} factions, {} settlements, {} roads",
+            lifegen.provinces.len(),
+            lifegen.factions.len(),
+            lifegen.settlement_seeds.len(),
+            lifegen.road_segments.len(),
+        );
+        commands.insert_resource(lifegen);
+        commands.remove_resource::<LifeGenTask>();
+        next_phase.set(AppPhase::Ready);
+    }
+}
+
+/// Show progress during LifeGen generation.
+fn lifegen_progress_ui(
+    mut contexts: EguiContexts,
+    task: Res<LifeGenTask>,
+) {
+    let ctx = contexts.ctx_mut();
+
+    egui::CentralPanel::default()
+        .frame(egui::Frame::default().fill(egui::Color32::from_rgb(30, 30, 30)))
+        .show(ctx, |_| {});
+
+    let (phase, label, detail, progress) = {
+        let p = task.progress.lock().unwrap();
+        (p.phase, p.phase_label.clone(), p.detail.clone(), p.progress)
+    };
+
+    egui::Window::new("Generating Civilisation")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .fixed_size([420.0, 180.0])
+        .show(ctx, |ui| {
+            ui.vertical(|ui| {
+                ui.add_space(5.0);
                 ui.add(egui::ProgressBar::new(progress).show_percentage());
+                ui.add_space(10.0);
+
+                let phase_names = [
+                    (1, "Analysis Grids", "Habitability, navigation cost, resources"),
+                    (2, "Provinces", "Poisson seeding, Voronoi tessellation, river borders"),
+                    (3, "Factions", "Capital placement, territory expansion"),
+                    (4, "Settlements", "Site selection within provinces"),
+                    (5, "Roads", "MST + A* pathfinding"),
+                    (6, "Trade", "Directed trade flow network"),
+                ];
+
+                for &(num, name, desc) in &phase_names {
+                    let (icon, text_color) = if num < phase {
+                        ("\u{2714}", egui::Color32::from_rgb(100, 200, 100)) // checkmark, green
+                    } else if num == phase {
+                        ("\u{25B6}", egui::Color32::from_rgb(255, 220, 80)) // play arrow, yellow
+                    } else {
+                        ("\u{25CB}", egui::Color32::from_rgb(120, 120, 120)) // circle, grey
+                    };
+
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(icon).color(text_color).size(13.0));
+                        ui.label(
+                            egui::RichText::new(format!("{name}"))
+                                .color(text_color)
+                                .strong()
+                                .size(13.0),
+                        );
+                        if num == phase && !detail.is_empty() {
+                            ui.label(
+                                egui::RichText::new(format!("— {detail}"))
+                                    .color(egui::Color32::from_rgb(180, 180, 180))
+                                    .size(12.0),
+                            );
+                        } else if num < phase {
+                            ui.label(
+                                egui::RichText::new(desc)
+                                    .color(egui::Color32::from_rgb(90, 90, 90))
+                                    .size(11.0),
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new(desc)
+                                    .color(egui::Color32::from_rgb(90, 90, 90))
+                                    .size(11.0),
+                            );
+                        }
+                    });
+                }
             });
         });
 }
@@ -1294,6 +1482,7 @@ fn regenerate_world(
         completed: 0,
         remaining,
         in_flight: Vec::new(),
+        post_phase: MacroPostPhase::Generating,
     });
 
     next_phase.set(AppPhase::GeneratingMacro);
