@@ -9,7 +9,7 @@ use rb_editor::{CurrentLayer, CurrentLifeGenLayer, GenerateMesoRequest, Generato
 use rb_noise::{BiomeMap, MesoTerrainView, NoiseBackend, NormalizationHints};
 use rb_player::Player;
 use rb_tilemap::{LevelChunk, LoadedChunks};
-use rb_world::{LifeGenData, WorldDefinition};
+use rb_world::{LifeGenData, PoliticalState, WorldDefinition};
 use bevy::window::PrimaryWindow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -38,6 +38,8 @@ fn main() {
         .init_resource::<VisibleChunkRange>()
         .init_resource::<HighlightInfo>()
         .init_resource::<LifeGenOverlayState>()
+        .init_resource::<HoveredProvince>()
+        .init_resource::<HoveredSettlement>()
         // Plugins
         .add_plugins((
             rb_core::RbCorePlugin,
@@ -86,7 +88,7 @@ fn main() {
                     .and(in_state(AppMode::WorldGenerator).or(in_state(AppMode::CivGenerator)))
                     .and(not(resource_exists::<PlayableLevel>))),
         )
-        // World map systems (WorldGenerator and CivGenerator, not during play)
+        // World map systems shared by WorldGenerator and CivGenerator
         .add_systems(Update, (
             camera_zoom,
             camera_pan,
@@ -95,18 +97,24 @@ fn main() {
             poll_tile_results,
             manage_tile_sprites,
             update_cursor_world_pos,
-            update_chunk_highlight,
             update_chunk_selection_highlight,
             highlight_info_ui,
         ).run_if(in_state(AppPhase::Ready).and(
             in_state(AppMode::WorldGenerator).or(in_state(AppMode::CivGenerator))
         )))
+        // WorldGenerator-only: macro chunk highlight
+        .add_systems(Update, update_chunk_highlight
+            .run_if(in_state(AppPhase::Ready).and(in_state(AppMode::WorldGenerator))))
+        // CivGenerator-only: province + settlement highlight
+        .add_systems(Update, update_civ_highlight
+            .run_if(in_state(AppPhase::Ready).and(in_state(AppMode::CivGenerator))))
         // Lifegen overlay: render civilization data on world map
         .add_systems(Update, manage_lifegen_overlay
             .run_if(in_state(AppPhase::Ready).and(in_state(AppMode::CivGenerator))))
         .add_systems(Update, hide_lifegen_overlay
             .run_if(in_state(AppPhase::Ready).and(not(in_state(AppMode::CivGenerator)))))
         .add_systems(OnEnter(AppMode::CivGenerator), show_lifegen_overlay)
+        .add_systems(OnExit(AppMode::CivGenerator), hide_civ_highlights)
         // Launcher: enter/exit
         .add_systems(OnEnter(AppMode::LevelLauncher), enter_launcher_macro_view)
         .add_systems(OnExit(AppMode::LevelLauncher), cleanup_launcher_entities)
@@ -300,6 +308,26 @@ struct ChunkHighlight;
 /// Marker component for the persistent selection overlay (shows selected chunk).
 #[derive(Component)]
 struct ChunkSelectionHighlight;
+
+/// Tracks which province the cursor is over in CivGenerator mode.
+#[derive(Resource, Default)]
+struct HoveredProvince {
+    province_id: Option<u16>,
+}
+
+/// Tracks which settlement is near the cursor in CivGenerator mode.
+#[derive(Resource, Default)]
+struct HoveredSettlement {
+    settlement_id: Option<u32>,
+}
+
+/// Marker for the province highlight overlay sprite.
+#[derive(Component)]
+struct ProvinceHighlightSprite;
+
+/// Marker for the settlement proximity marker sprite.
+#[derive(Component)]
+struct SettlementHighlightSprite;
 
 /// Marker for the lifegen overlay sprite.
 #[derive(Component)]
@@ -628,6 +656,30 @@ fn start_generation(
         Transform::from_xyz(-10000.0, -10000.0, 0.4),
         Visibility::Hidden,
         ChunkSelectionHighlight,
+    ));
+
+    // Province highlight overlay (CivGenerator mode) — full-world-sized, hidden until hovered
+    commands.spawn((
+        Sprite {
+            color: Color::WHITE,
+            custom_size: Some(Vec2::new(MAP_WIDTH as f32, MAP_HEIGHT as f32)),
+            ..default()
+        },
+        Transform::from_xyz(0.0, 0.0, 0.6),
+        Visibility::Hidden,
+        ProvinceHighlightSprite,
+    ));
+
+    // Settlement proximity marker (CivGenerator mode) — small yellow marker
+    commands.spawn((
+        Sprite {
+            color: Color::srgba(1.0, 1.0, 0.3, 0.8),
+            custom_size: Some(Vec2::splat(4.0)),
+            ..default()
+        },
+        Transform::from_xyz(-10000.0, -10000.0, 0.7),
+        Visibility::Hidden,
+        SettlementHighlightSprite,
     ));
 
     // Spawn sprite pool (macro + meso)
@@ -1419,6 +1471,10 @@ fn highlight_info_ui(
     info: Res<HighlightInfo>,
     cursor_pos: Res<CursorWorldPos>,
     selected_chunk: Option<Res<SelectedChunk>>,
+    hovered_province: Res<HoveredProvince>,
+    hovered_settlement: Res<HoveredSettlement>,
+    lifegen: Option<Res<LifeGenData>>,
+    app_mode: Res<State<AppMode>>,
 ) {
     egui::Window::new("Tile Info")
         .anchor(egui::Align2::RIGHT_TOP, [-8.0, 8.0])
@@ -1431,6 +1487,53 @@ fn highlight_info_ui(
                 ui.label("Press F4 to launch");
                 ui.separator();
             }
+
+            if *app_mode.get() == AppMode::CivGenerator {
+                // CivGenerator: show province/settlement info
+                if let (Some(lifegen), Some(pid)) = (lifegen.as_ref(), hovered_province.province_id) {
+                    if let Some(prov) = lifegen.province_by_id(pid) {
+                        ui.label(format!("Province #{}", prov.id));
+                        ui.label(format!("  Biome: {:?}", prov.biome));
+                        ui.label(format!("  Habitability: {:.0}%", prov.habitability * 100.0));
+                        ui.label(format!("  Area: {} px", prov.area_px));
+                        let mut tags = Vec::new();
+                        if prov.is_coastal { tags.push("Coastal"); }
+                        if prov.is_river_junction { tags.push("River Junction"); }
+                        if !tags.is_empty() {
+                            ui.label(format!("  {}", tags.join(" | ")));
+                        }
+                        ui.label(format!("  Elevation: {:.2}", prov.elevation_mean));
+                        // Faction info
+                        if let PoliticalState::Claimed { faction_id } = prov.political_state {
+                            if let Some(faction) = lifegen.faction_by_id(faction_id) {
+                                ui.label(format!("  Faction: {}", faction.name));
+                            }
+                        }
+                        ui.label(format!("  State: {}", prov.political_state.name()));
+
+                        // Settlement info
+                        if let Some(sid) = hovered_settlement.settlement_id {
+                            if let Some(settlement) = lifegen.settlement_seeds.iter().find(|s| s.id == sid) {
+                                ui.separator();
+                                ui.label("Settlement (nearby)");
+                                ui.label(format!("  Tier: {} ({})", settlement.tier.name(), settlement.size_class.name()));
+                                ui.label(format!("  Province: #{}", settlement.province_id));
+                            }
+                        }
+                    } else {
+                        ui.label(format!("Province #{} (no data)", pid));
+                    }
+                } else if !info.active {
+                    ui.label("(ocean)");
+                } else {
+                    ui.label("(no province)");
+                }
+                ui.separator();
+                ui.label(format!("Cursor: ({:.1}, {:.1})", cursor_pos.0.x, cursor_pos.0.y));
+                return;
+            }
+
+            // WorldGenerator: existing behavior
             if !info.active {
                 ui.label("(no tile)");
                 return;
@@ -1774,6 +1877,150 @@ fn update_chunk_highlight(
     highlight_info.domain = "Terrain";
 }
 
+/// Province + settlement highlight for CivGenerator mode.
+/// Replaces chunk highlighting: shows hovered province tinted and nearest settlement marker.
+fn update_civ_highlight(
+    cursor_pos: Res<CursorWorldPos>,
+    world_def: Res<WorldDefinition>,
+    lifegen: Option<Res<LifeGenData>>,
+    mut hovered_province: ResMut<HoveredProvince>,
+    mut hovered_settlement: ResMut<HoveredSettlement>,
+    mut highlight_info: ResMut<HighlightInfo>,
+    mut contexts: EguiContexts,
+    mut chunk_highlight: Query<&mut Transform, With<ChunkHighlight>>,
+    mut province_query: Query<(&mut Sprite, &mut Visibility), (With<ProvinceHighlightSprite>, Without<SettlementHighlightSprite>)>,
+    mut settlement_query: Query<(&mut Transform, &mut Visibility), (With<SettlementHighlightSprite>, Without<ProvinceHighlightSprite>, Without<ChunkHighlight>)>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    // Hide the macro chunk highlight — not used in CivGenerator
+    if let Ok(mut cht) = chunk_highlight.single_mut() {
+        cht.translation.x = -10000.0;
+    }
+
+    let Some(lifegen) = lifegen else {
+        highlight_info.active = false;
+        return;
+    };
+
+    // If egui has pointer, clear hover state
+    if contexts.ctx_mut().unwrap().is_pointer_over_area() {
+        hovered_province.province_id = None;
+        hovered_settlement.settlement_id = None;
+        highlight_info.active = false;
+        if let Ok((_, mut vis)) = province_query.single_mut() {
+            *vis = Visibility::Hidden;
+        }
+        if let Ok((_, mut vis)) = settlement_query.single_mut() {
+            *vis = Visibility::Hidden;
+        }
+        return;
+    }
+
+    let half_width = world_def.width as f32 / 2.0;
+    let half_height = world_def.height as f32 / 2.0;
+
+    // Convert cursor world pos → map coords → lifegen pixel coords
+    let map_x = cursor_pos.0.x + half_width;
+    let map_y = half_height - cursor_pos.0.y;
+
+    if map_x < 0.0 || map_x >= world_def.width as f32 || map_y < 0.0 || map_y >= world_def.height as f32 {
+        hovered_province.province_id = None;
+        hovered_settlement.settlement_id = None;
+        highlight_info.active = false;
+        if let Ok((_, mut vis)) = province_query.single_mut() {
+            *vis = Visibility::Hidden;
+        }
+        if let Ok((_, mut vis)) = settlement_query.single_mut() {
+            *vis = Visibility::Hidden;
+        }
+        return;
+    }
+
+    let px = (map_x as f64 * (lifegen.width as f64 / world_def.width as f64)) as usize;
+    let py = (map_y as f64 * (lifegen.height as f64 / world_def.height as f64)) as usize;
+
+    let province_id = lifegen.province_at_pixel(px, py);
+
+    // Only regenerate the province highlight texture when province changes
+    if province_id != hovered_province.province_id {
+        hovered_province.province_id = province_id;
+
+        if let (Ok((mut sprite, mut vis)), Some(pid)) = (province_query.single_mut(), province_id) {
+            // Generate downscaled highlight texture (world dimensions: 1024x512)
+            let out_w = world_def.width;
+            let out_h = world_def.height;
+            let lg_w = lifegen.width;
+            let lg_h = lifegen.height;
+            let mut rgba = vec![0u8; out_w * out_h * 4];
+
+            for oy in 0..out_h {
+                let sy = oy * lg_h / out_h;
+                for ox in 0..out_w {
+                    let sx = ox * lg_w / out_w;
+                    let idx = sy * lg_w + sx;
+                    if idx < lifegen.province_ids.len() && lifegen.province_ids[idx] == pid {
+                        let off = (oy * out_w + ox) * 4;
+                        rgba[off] = 255;
+                        rgba[off + 1] = 255;
+                        rgba[off + 2] = 100;
+                        rgba[off + 3] = 80;
+                    }
+                }
+            }
+
+            let image = create_image(out_w, out_h, rgba);
+            let handle = images.add(image);
+            sprite.image = handle;
+            *vis = Visibility::Inherited;
+        } else if let Ok((_, mut vis)) = province_query.single_mut() {
+            *vis = Visibility::Hidden;
+        }
+    }
+
+    // Find nearest settlement (80 lifegen px ~ 10 world units)
+    let px_f = map_x as f64 * (lifegen.width as f64 / world_def.width as f64);
+    let py_f = map_y as f64 * (lifegen.height as f64 / world_def.height as f64);
+    let nearest = lifegen.nearest_settlement(px_f, py_f, 80.0);
+
+    if let Some(settlement) = nearest {
+        hovered_settlement.settlement_id = Some(settlement.id);
+        if let Ok((mut transform, mut vis)) = settlement_query.single_mut() {
+            // Convert settlement position (lifegen pixels) to world coords
+            let s_world_x = (settlement.position.0 / lifegen.width as f64) * world_def.width as f64;
+            let s_world_y = (settlement.position.1 / lifegen.height as f64) * world_def.height as f64;
+            transform.translation.x = s_world_x as f32 - half_width;
+            transform.translation.y = half_height - s_world_y as f32;
+            *vis = Visibility::Inherited;
+        }
+    } else {
+        hovered_settlement.settlement_id = None;
+        if let Ok((_, mut vis)) = settlement_query.single_mut() {
+            *vis = Visibility::Hidden;
+        }
+    }
+
+    highlight_info.active = province_id.is_some();
+    highlight_info.domain = "Civilization";
+    highlight_info.tier = "Province";
+}
+
+/// Hide province/settlement highlights when leaving CivGenerator mode.
+fn hide_civ_highlights(
+    mut province_query: Query<&mut Visibility, (With<ProvinceHighlightSprite>, Without<SettlementHighlightSprite>)>,
+    mut settlement_query: Query<&mut Visibility, (With<SettlementHighlightSprite>, Without<ProvinceHighlightSprite>)>,
+    mut hovered_province: ResMut<HoveredProvince>,
+    mut hovered_settlement: ResMut<HoveredSettlement>,
+) {
+    if let Ok(mut vis) = province_query.single_mut() {
+        *vis = Visibility::Hidden;
+    }
+    if let Ok(mut vis) = settlement_query.single_mut() {
+        *vis = Visibility::Hidden;
+    }
+    hovered_province.province_id = None;
+    hovered_settlement.settlement_id = None;
+}
+
 /// Calculate which chunks are visible in the camera viewport.
 fn calculate_visible_chunks(
     camera_query: Query<(&Transform, &Projection), With<Camera2d>>,
@@ -2055,8 +2302,16 @@ fn update_chunk_selection_highlight(
     selected: Option<Res<SelectedChunk>>,
     world_def: Res<WorldDefinition>,
     mut query: Query<(&mut Transform, &mut Visibility), With<ChunkSelectionHighlight>>,
+    app_mode: Res<State<AppMode>>,
 ) {
     let Ok((mut transform, mut vis)) = query.single_mut() else { return };
+
+    // Hide selection highlight in CivGenerator — province highlight replaces it
+    if *app_mode.get() == AppMode::CivGenerator {
+        *vis = Visibility::Hidden;
+        transform.translation.x = -10000.0;
+        return;
+    }
 
     let Some(selected) = selected else {
         *vis = Visibility::Hidden;

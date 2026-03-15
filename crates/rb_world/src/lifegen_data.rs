@@ -100,7 +100,80 @@ pub struct RoadSegment {
     pub road_type_id: u8,
 }
 
+impl SizeClass {
+    pub fn name(&self) -> &'static str {
+        match self {
+            SizeClass::Metropolis => "Metropolis",
+            SizeClass::City => "City",
+            SizeClass::Town => "Town",
+            SizeClass::Village => "Village",
+            SizeClass::Outpost => "Outpost",
+            SizeClass::Ruins => "Ruins",
+        }
+    }
+}
+
+impl SettlementTier {
+    pub fn name(&self) -> &'static str {
+        match self {
+            SettlementTier::Capital => "Capital",
+            SettlementTier::Major => "Major",
+            SettlementTier::Minor => "Minor",
+            SettlementTier::Outpost => "Outpost",
+            SettlementTier::Camp => "Camp",
+            SettlementTier::Ruins => "Ruins",
+        }
+    }
+}
+
+impl PoliticalState {
+    pub fn name(&self) -> &'static str {
+        match self {
+            PoliticalState::Claimed { .. } => "Claimed",
+            PoliticalState::Unclaimed => "Unclaimed",
+            PoliticalState::Uninhabited => "Uninhabited",
+        }
+    }
+}
+
 impl LifeGenData {
+    /// Look up province ID at a lifegen pixel coordinate. Returns None for out-of-bounds or ID 0.
+    pub fn province_at_pixel(&self, px: usize, py: usize) -> Option<u16> {
+        if px >= self.width || py >= self.height {
+            return None;
+        }
+        let idx = py * self.width + px;
+        let id = *self.province_ids.get(idx)?;
+        if id == 0 { None } else { Some(id) }
+    }
+
+    /// Get a province by its 1-based ID.
+    pub fn province_by_id(&self, id: u16) -> Option<&Province> {
+        self.provinces.iter().find(|p| p.id == id)
+    }
+
+    /// Find the nearest settlement within `max_radius` lifegen pixels of (px, py).
+    pub fn nearest_settlement(&self, px: f64, py: f64, max_radius: f64) -> Option<&SettlementSeed> {
+        let max_r2 = max_radius * max_radius;
+        let mut best: Option<(&SettlementSeed, f64)> = None;
+        for s in &self.settlement_seeds {
+            let dx = s.position.0 - px;
+            let dy = s.position.1 - py;
+            let d2 = dx * dx + dy * dy;
+            if d2 <= max_r2 {
+                if best.map_or(true, |(_, bd)| d2 < bd) {
+                    best = Some((s, d2));
+                }
+            }
+        }
+        best.map(|(s, _)| s)
+    }
+
+    /// Find a faction by its ID.
+    pub fn faction_by_id(&self, id: u32) -> Option<&FactionData> {
+        self.factions.iter().find(|f| f.id == id)
+    }
+
     /// Create an empty LifeGenData at the given resolution.
     pub fn empty(width: usize, height: usize) -> Self {
         let total = width * height;
