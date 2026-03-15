@@ -465,6 +465,94 @@ impl LifeGenData {
             }
         }
     }
+
+    /// Build a composited overlay image from the base layer + enabled overlay flags.
+    pub fn to_composited_image(
+        &self,
+        base_layer: &str,
+        province_borders: bool,
+        faction_borders: bool,
+        settlement_icons: bool,
+        road_network: bool,
+        _trade_routes: bool,
+    ) -> Vec<u8> {
+        let mut pixels = self.to_layer_image(base_layer);
+        let w = self.width;
+        let h = self.height;
+
+        // Province borders: draw where neighboring province IDs differ
+        if province_borders && !self.province_ids.is_empty() {
+            let border_colour = [255u8, 255, 255, 160];
+            for y in 0..h {
+                for x in 0..w {
+                    let idx = y * w + x;
+                    let pid = self.province_ids[idx];
+                    if pid == 0 { continue; }
+                    let is_border = (x + 1 < w && self.province_ids[idx + 1] != pid)
+                        || (y + 1 < h && self.province_ids[idx + w] != pid)
+                        || (x > 0 && self.province_ids[idx - 1] != pid)
+                        || (y > 0 && self.province_ids[idx - w] != pid);
+                    if is_border {
+                        let off = idx * 4;
+                        alpha_blend(&mut pixels, off, border_colour);
+                    }
+                }
+            }
+        }
+
+        // Faction borders: draw where neighboring faction IDs differ (thicker)
+        if faction_borders && !self.faction_ids.is_empty() {
+            let border_colour = [255u8, 200, 0, 200];
+            for y in 0..h {
+                for x in 0..w {
+                    let idx = y * w + x;
+                    let fid = self.faction_ids[idx];
+                    if fid == 0 { continue; }
+                    let is_border = (x + 1 < w && self.faction_ids[idx + 1] != fid && self.faction_ids[idx + 1] != 0)
+                        || (y + 1 < h && self.faction_ids[idx + w] != fid && self.faction_ids[idx + w] != 0)
+                        || (x > 0 && self.faction_ids[idx - 1] != fid && self.faction_ids[idx - 1] != 0)
+                        || (y > 0 && self.faction_ids[idx - w] != fid && self.faction_ids[idx - w] != 0);
+                    if is_border {
+                        // Draw 2px thick border
+                        for dy in 0..2i32 {
+                            for dx in 0..2i32 {
+                                let bx = x as i32 + dx;
+                                let by = y as i32 + dy;
+                                if bx >= 0 && bx < w as i32 && by >= 0 && by < h as i32 {
+                                    let off = (by as usize * w + bx as usize) * 4;
+                                    alpha_blend(&mut pixels, off, border_colour);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Road network overlay
+        if road_network {
+            for seg in &self.road_segments {
+                let (colour, thickness) = road_line_params(seg.road_type_id);
+                let x0 = seg.from.0 as i32;
+                let y0 = seg.from.1 as i32;
+                let x1 = seg.to.0 as i32;
+                let y1 = seg.to.1 as i32;
+                draw_line(&mut pixels, w, h, x0, y0, x1, y1, colour, thickness);
+            }
+        }
+
+        // Settlement icons overlay
+        if settlement_icons {
+            for s in &self.settlement_seeds {
+                let (colour, radius) = settlement_dot_params(s);
+                let cx = s.position.0 as i32;
+                let cy = s.position.1 as i32;
+                draw_circle(&mut pixels, w, h, cx, cy, radius, colour);
+            }
+        }
+
+        pixels
+    }
 }
 
 /// Save a continuous f32 layer as a gradient PNG, downscaled 2x.
@@ -744,6 +832,21 @@ fn road_line_params(road_type_id: u8) -> ([u8; 4], i32) {
         0 => ([220, 180, 80, 255], 3),  // Imperial: gold
         1 => ([180, 180, 180, 255], 2), // Provincial: silver
         _ => ([140, 110, 80, 255], 1),  // Trail: brown
+    }
+}
+
+/// Alpha-blend a colour onto an existing pixel in RGBA buffer.
+fn alpha_blend(pixels: &mut [u8], off: usize, src: [u8; 4]) {
+    let sa = src[3] as f32 / 255.0;
+    let da = pixels[off + 3] as f32 / 255.0;
+    let out_a = sa + da * (1.0 - sa);
+    if out_a > 0.0 {
+        for c in 0..3 {
+            let sc = src[c] as f32 / 255.0;
+            let dc = pixels[off + c] as f32 / 255.0;
+            pixels[off + c] = ((sc * sa + dc * da * (1.0 - sa)) / out_a * 255.0) as u8;
+        }
+        pixels[off + 3] = (out_a * 255.0) as u8;
     }
 }
 

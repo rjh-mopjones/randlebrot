@@ -27,7 +27,7 @@ pub fn build_roads(
         .flat_map(|&(a, b)| [(a.min(b), a.max(b))])
         .collect();
 
-    // Capital-to-capital highways
+    // Capital-to-capital highways (distance-capped to avoid impossibly long A* searches)
     let capital_indices: Vec<usize> = settlements
         .iter()
         .enumerate()
@@ -43,31 +43,40 @@ pub fn build_roads(
             let b = capital_indices[j];
             let key = (a.min(b), a.max(b));
             if !existing.contains(&key) {
-                edges.push((a, b));
+                let dist = euclidean_dist(settlements[a].position, settlements[b].position);
+                if dist <= 1500.0 {
+                    edges.push((a, b));
+                }
             }
         }
     }
 
-    // Nearby town+ pairs within 200px Euclidean
+    // Each town+ settlement gets up to 2 nearest non-MST town+ neighbors (within 300px)
     let existing: HashSet<(usize, usize)> = edges
         .iter()
         .flat_map(|&(a, b)| [(a.min(b), a.max(b))])
         .collect();
 
+    let max_bonus_per_settlement = 2;
     for i in 0..settlements.len() {
         if !is_town_or_larger(settlements[i].size_class) {
             continue;
         }
-        for j in (i + 1)..settlements.len() {
-            if !is_town_or_larger(settlements[j].size_class) {
-                continue;
-            }
-            let key = (i, j);
-            if existing.contains(&key) {
-                continue;
-            }
-            let dist = euclidean_dist(settlements[i].position, settlements[j].position);
-            if dist <= 200.0 {
+        // Gather candidate neighbors sorted by distance
+        let mut candidates: Vec<(usize, f64)> = (0..settlements.len())
+            .filter(|&j| {
+                j != i
+                    && is_town_or_larger(settlements[j].size_class)
+                    && !existing.contains(&(i.min(j), i.max(j)))
+            })
+            .map(|j| (j, euclidean_dist(settlements[i].position, settlements[j].position)))
+            .filter(|&(_, d)| d <= 300.0)
+            .collect();
+        candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+        for &(j, _) in candidates.iter().take(max_bonus_per_settlement) {
+            let key = (i.min(j), i.max(j));
+            if !existing.contains(&key) {
                 edges.push((i, j));
             }
         }
@@ -98,8 +107,8 @@ pub fn build_roads(
         let path = match astar_path(from, to, navigation_cost, width, height) {
             Some(p) => p,
             None => {
-                // Fallback: direct line
-                direct_line(from, to)
+                // No viable terrain path — skip this road instead of drawing a straight line
+                continue;
             }
         };
 
@@ -150,7 +159,7 @@ fn astar_path(
     w: usize,
     h: usize,
 ) -> Option<Vec<(usize, usize)>> {
-    const MAX_EXPANSIONS: u32 = 500_000;
+    const MAX_EXPANSIONS: u32 = 2_000_000;
 
     let pack = |x: usize, y: usize| -> u32 { (y * w + x) as u32 };
     let unpack = |idx: u32| -> (usize, usize) { ((idx as usize) % w, (idx as usize) / w) };

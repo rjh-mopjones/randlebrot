@@ -52,3 +52,7 @@ rb_entity_spawn.workspace = true
 rb_editor.workspace = true
 rb_player.workspace = true
 rb_persistence.workspace = true
+
+[[example]]
+name = "save_all_debug_layers"
+path = "examples/save_all_debug_layers.rs"

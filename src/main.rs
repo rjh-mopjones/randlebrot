@@ -322,6 +322,7 @@ struct LifeGenTask {
 struct LifeGenOverlayState {
     current_layer: String,
     data_generation: u64,
+    overlay_hash: u64,
 }
 
 impl Default for LifeGenOverlayState {
@@ -329,6 +330,7 @@ impl Default for LifeGenOverlayState {
         Self {
             current_layer: String::new(),
             data_generation: 0,
+            overlay_hash: 0,
         }
     }
 }
@@ -1546,6 +1548,7 @@ fn manage_lifegen_overlay(
     mut commands: Commands,
     lifegen: Option<Res<LifeGenData>>,
     current_layer: Res<CurrentLifeGenLayer>,
+    overlay_flags: Res<rb_editor::OverlayState>,
     mut overlay_state: ResMut<LifeGenOverlayState>,
     mut images: ResMut<Assets<Image>>,
     mut overlay_query: Query<(Entity, &mut Sprite), With<LifeGenOverlay>>,
@@ -1565,12 +1568,29 @@ fn manage_lifegen_overlay(
         _ => "composite",
     };
 
+    // Hash overlay flags to detect changes
+    let overlay_hash = (overlay_flags.province_borders as u64)
+        | ((overlay_flags.faction_borders as u64) << 1)
+        | ((overlay_flags.settlement_icons as u64) << 2)
+        | ((overlay_flags.road_network as u64) << 3)
+        | ((overlay_flags.trade_routes as u64) << 4);
+
     let overlay_exists = !overlay_query.is_empty();
-    if layer_name == overlay_state.current_layer && overlay_exists {
+    if layer_name == overlay_state.current_layer
+        && overlay_hash == overlay_state.overlay_hash
+        && overlay_exists
+    {
         return;
     }
 
-    let rgba_data = lifegen.to_layer_image(layer_name);
+    let rgba_data = lifegen.to_composited_image(
+        layer_name,
+        overlay_flags.province_borders,
+        overlay_flags.faction_borders,
+        overlay_flags.settlement_icons,
+        overlay_flags.road_network,
+        overlay_flags.trade_routes,
+    );
     let image = create_image(lifegen.width, lifegen.height, rgba_data);
     let image_handle = images.add(image);
 
@@ -1592,6 +1612,7 @@ fn manage_lifegen_overlay(
     }
 
     overlay_state.current_layer = layer_name.to_string();
+    overlay_state.overlay_hash = overlay_hash;
 }
 
 fn hide_lifegen_overlay(
@@ -1617,7 +1638,13 @@ fn show_lifegen_overlay(
 fn camera_zoom(
     mut scroll_events: MessageReader<MouseWheel>,
     mut query: Query<&mut Projection, With<Camera2d>>,
+    mut contexts: EguiContexts,
 ) {
+    if contexts.ctx_mut().unwrap().is_pointer_over_area() {
+        scroll_events.clear();
+        return;
+    }
+
     let mut scroll_delta = 0.0;
 
     for event in scroll_events.read() {
@@ -2248,7 +2275,13 @@ fn poll_meso_pregen(
 fn launcher_camera_zoom(
     mut scroll_events: MessageReader<MouseWheel>,
     mut query: Query<&mut Projection, With<Camera2d>>,
+    mut contexts: EguiContexts,
 ) {
+    if contexts.ctx_mut().unwrap().is_pointer_over_area() {
+        scroll_events.clear();
+        return;
+    }
+
     let mut scroll_delta = 0.0;
     for event in scroll_events.read() {
         scroll_delta += match event.unit {
