@@ -78,6 +78,7 @@ pub enum SizeClass {
     Town,
     Village,
     Outpost,
+    Ruins,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +88,7 @@ pub enum SettlementTier {
     Minor,
     Outpost,
     Camp,
+    Ruins,
 }
 
 #[derive(Debug, Clone)]
@@ -823,6 +825,7 @@ fn settlement_dot_params(s: &SettlementSeed) -> ([u8; 4], i32) {
         SettlementTier::Major => ([255, 220, 60, 255], 3),
         SettlementTier::Minor => ([255, 255, 255, 255], 2),
         SettlementTier::Outpost | SettlementTier::Camp => ([160, 160, 160, 255], 1),
+        SettlementTier::Ruins => ([120, 120, 120, 255], 1),
     }
 }
 

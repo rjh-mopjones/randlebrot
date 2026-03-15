@@ -62,11 +62,12 @@ pub fn build_trade_dag(
 /// Numeric rank for settlement size. Higher = larger.
 fn size_rank(sc: SizeClass) -> u8 {
     match sc {
-        SizeClass::Outpost => 0,
-        SizeClass::Village => 1,
-        SizeClass::Town => 2,
-        SizeClass::City => 3,
-        SizeClass::Metropolis => 4,
+        SizeClass::Ruins => 0,
+        SizeClass::Outpost => 1,
+        SizeClass::Village => 2,
+        SizeClass::Town => 3,
+        SizeClass::City => 4,
+        SizeClass::Metropolis => 5,
     }
 }
 
@@ -167,6 +168,7 @@ mod tests {
                 SizeClass::Town => SettlementTier::Minor,
                 SizeClass::Village => SettlementTier::Minor,
                 SizeClass::Outpost => SettlementTier::Outpost,
+                SizeClass::Ruins => SettlementTier::Ruins,
             },
         }
     }

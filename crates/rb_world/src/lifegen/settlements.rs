@@ -49,17 +49,17 @@ pub fn place_settlements(
 
             let tier = tier_from_size_class(size_class);
 
-            // Settlements in unclaimed provinces are downgraded
-            let (size_class, tier) = if matches!(province.political_state, PoliticalState::Unclaimed)
-            {
+            // Settlements in unclaimed/uninhabited provinces are downgraded
+            let (size_class, tier) = if matches!(
+                province.political_state,
+                PoliticalState::Unclaimed | PoliticalState::Uninhabited
+            ) {
                 let capped_size = match size_class {
                     SizeClass::Metropolis | SizeClass::City | SizeClass::Town => SizeClass::Village,
+                    SizeClass::Village => SizeClass::Outpost,
                     other => other,
                 };
                 (capped_size, tier_from_size_class(capped_size))
-            } else if matches!(province.political_state, PoliticalState::Uninhabited) {
-                // Uninhabited provinces shouldn't have settlements, but guard anyway
-                continue;
             } else {
                 (size_class, tier)
             };
@@ -78,16 +78,19 @@ pub fn place_settlements(
     settlements
 }
 
-/// Determine how many settlements a province can support.
+/// Determine how many settlements a province gets.
+/// Every province gets a base of 3; high habitability grants bonus settlements.
+/// Tiny provinces (area_px < 200) are capped at 1 to avoid cramming.
 fn settlement_count_for_province(province: &Province) -> usize {
-    if province.habitability > 0.6 && province.area_px > 1000 {
-        3
-    } else if province.habitability > 0.3 && province.area_px > 500 {
-        2
-    } else if province.habitability > 0.15 {
-        1
+    if province.area_px < 200 {
+        return 1;
+    }
+    if province.habitability > 0.7 {
+        5
+    } else if province.habitability > 0.5 {
+        4
     } else {
-        0
+        3
     }
 }
 
@@ -145,7 +148,8 @@ fn find_best_positions(
     selected
 }
 
-/// Determine the size class for a settlement based on province properties.
+/// Determine the size class for a settlement based on province habitability.
+/// Habitability controls size, not existence — even desolate provinces get Ruins.
 fn determine_size_class(
     province: &Province,
     is_capital_settlement: bool,
@@ -155,14 +159,18 @@ fn determine_size_class(
         return SizeClass::Metropolis;
     }
 
-    if province.habitability > 0.7 && province.is_river_junction {
+    if province.habitability > 0.7 {
         SizeClass::City
-    } else if province.habitability > 0.5 {
-        SizeClass::Town
+    } else if province.habitability > 0.5 && province.is_river_junction {
+        SizeClass::City
     } else if province.habitability > 0.3 {
+        SizeClass::Town
+    } else if province.habitability > 0.15 {
         SizeClass::Village
-    } else {
+    } else if province.habitability > 0.05 {
         SizeClass::Outpost
+    } else {
+        SizeClass::Ruins
     }
 }
 
@@ -174,6 +182,7 @@ fn tier_from_size_class(size_class: SizeClass) -> SettlementTier {
         SizeClass::Town => SettlementTier::Minor,
         SizeClass::Village => SettlementTier::Outpost,
         SizeClass::Outpost => SettlementTier::Camp,
+        SizeClass::Ruins => SettlementTier::Ruins,
     }
 }
 
@@ -199,25 +208,30 @@ mod tests {
 
     #[test]
     fn settlement_count_tiers() {
-        // High hab + large area -> 3
+        // High hab -> 5
         assert_eq!(
             settlement_count_for_province(&make_province(1, 0.8, 2000)),
+            5
+        );
+        // Medium-high hab -> 4
+        assert_eq!(
+            settlement_count_for_province(&make_province(1, 0.6, 600)),
+            4
+        );
+        // Low hab -> 3 (base)
+        assert_eq!(
+            settlement_count_for_province(&make_province(1, 0.2, 500)),
             3
         );
-        // Medium hab + medium area -> 2
+        // Very low hab still gets 3
         assert_eq!(
-            settlement_count_for_province(&make_province(1, 0.4, 600)),
-            2
+            settlement_count_for_province(&make_province(1, 0.01, 500)),
+            3
         );
-        // Low hab -> 1
+        // Tiny province capped to 1
         assert_eq!(
-            settlement_count_for_province(&make_province(1, 0.2, 100)),
+            settlement_count_for_province(&make_province(1, 0.8, 100)),
             1
-        );
-        // Very low hab -> 0
-        assert_eq!(
-            settlement_count_for_province(&make_province(1, 0.1, 100)),
-            0
         );
     }
 
@@ -228,6 +242,7 @@ mod tests {
         assert_eq!(tier_from_size_class(SizeClass::Town), SettlementTier::Minor);
         assert_eq!(tier_from_size_class(SizeClass::Village), SettlementTier::Outpost);
         assert_eq!(tier_from_size_class(SizeClass::Outpost), SettlementTier::Camp);
+        assert_eq!(tier_from_size_class(SizeClass::Ruins), SettlementTier::Ruins);
     }
 
     #[test]
@@ -236,9 +251,18 @@ mod tests {
         // Simulating the cap logic from place_settlements
         let capped = match size {
             SizeClass::Metropolis | SizeClass::City | SizeClass::Town => SizeClass::Village,
+            SizeClass::Village => SizeClass::Outpost,
             other => other,
         };
         assert_eq!(capped, SizeClass::Village);
+    }
+
+    #[test]
+    fn very_low_hab_produces_ruins() {
+        let province = make_province(1, 0.02, 500);
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let size = determine_size_class(&province, false, &mut rng);
+        assert_eq!(size, SizeClass::Ruins);
     }
 
     #[test]
@@ -290,8 +314,16 @@ mod tests {
     }
 
     #[test]
-    fn non_capital_high_hab_river_is_city() {
-        let mut province = make_province(1, 0.8, 2000);
+    fn non_capital_high_hab_is_city() {
+        let province = make_province(1, 0.8, 2000);
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let size = determine_size_class(&province, false, &mut rng);
+        assert_eq!(size, SizeClass::City);
+    }
+
+    #[test]
+    fn mid_hab_river_junction_is_city() {
+        let mut province = make_province(1, 0.6, 2000);
         province.is_river_junction = true;
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let size = determine_size_class(&province, false, &mut rng);
