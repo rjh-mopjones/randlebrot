@@ -1,6 +1,6 @@
 # Randlebrot
 
-A Bevy 0.15 game engine for a tidally locked procedural world. Fractal noise serves as a compression algorithm for plausibility—not generating a random world, but filling in infinite detail for a handcrafted design.
+A Bevy 0.19 game engine for a tidally locked procedural world. Fractal noise serves as a compression algorithm for plausibility—not generating a random world, but filling in infinite detail for a handcrafted design.
 
 ## Build & Run
 
