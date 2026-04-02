@@ -8,3 +8,6 @@ rb_core.workspace = true
 rb_world.workspace = true
 bevy.workspace = true
 bitflags.workspace = true
+
+[lints]
+workspace = true

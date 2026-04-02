@@ -7,3 +7,6 @@ edition = "2021"
 rb_core.workspace = true
 rb_tilemap.workspace = true
 bevy.workspace = true
+
+[lints]
+workspace = true
