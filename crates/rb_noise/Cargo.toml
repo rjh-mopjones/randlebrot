@@ -32,3 +32,6 @@ path = "examples/noise_preview.rs"
 [[example]]
 name = "save_debug_layers"
 path = "examples/save_debug_layers.rs"
+
+[lints]
+workspace = true

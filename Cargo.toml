@@ -53,6 +53,41 @@ rb_editor.workspace = true
 rb_player.workspace = true
 rb_persistence.workspace = true
 
+[workspace.lints.clippy]
+# TODO: fix these and remove the allows
+too_many_arguments = "allow"
+type_complexity = "allow"
+manual_range_contains = "allow"
+manual_div_ceil = "allow"
+needless_range_loop = "allow"
+unnecessary_cast = "allow"
+unnecessary_min_or_max = "allow"
+collapsible_if = "allow"
+if_same_then_else = "allow"
+doc_lazy_continuation = "allow"
+empty_line_after_doc_comments = "allow"
+unwrap_or_default = "allow"
+map_or_inplace = "allow"
+identity_op = "allow"
+useless_format = "allow"
+derivable_impls = "allow"
+manual_flatten = "allow"
+manual_filter = "allow"
+unnecessary_map_or = "allow"
+manual_clamp = "allow"
+
+[workspace.lints.rust]
+# TODO: fix these and remove the allows
+unused_variables = "allow"
+unused_imports = "allow"
+unused_mut = "allow"
+dead_code = "allow"
+deprecated = "allow"
+unused_assignments = "allow"
+
 [[example]]
 name = "save_all_debug_layers"
 path = "examples/save_all_debug_layers.rs"
+
+[lints]
+workspace = true
