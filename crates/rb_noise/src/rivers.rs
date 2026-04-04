@@ -14,6 +14,7 @@
 //! Chunks call `RiverNetwork::query_chunk()` which returns segments filtered
 //! by a drainage threshold that varies with LOD level.
 
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, BinaryHeap, VecDeque};
 use std::cmp::Ordering;
 
@@ -50,7 +51,7 @@ pub(crate) const NO_FLOW: u8 = 255;
 // ─── River Character ─────────────────────────────────────────────────────────
 
 /// Climate-aware river classification sampled at each segment's midpoint.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RiverCharacter {
     /// Light > 0.7, low humidity — carved channel, no surface water.
     DryWadi,
@@ -96,7 +97,7 @@ impl RiverCharacter {
 
 /// A stretch of river between two confluences (or between a source and a
 /// confluence, or between a confluence and the ocean mouth).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RiverSegment {
     /// Unique segment ID.
     pub id: usize,
@@ -119,7 +120,7 @@ pub struct RiverSegment {
 // ─── Lake ────────────────────────────────────────────────────────────────────
 
 /// A natural lake (depression that wasn't fully filled).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Lake {
     /// Cells comprising the lake surface (world coordinates).
     pub cells: Vec<(f64, f64)>,
@@ -135,7 +136,7 @@ pub struct Lake {
 
 /// A river constraint returned by chunk queries.
 /// Contains everything a chunk needs to render/carve a river segment.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RiverConstraint {
     /// Path points within the queried bounds (world coords).
     pub path: Vec<(f64, f64)>,
@@ -159,7 +160,7 @@ pub struct RiverConstraint {
 
 /// Simple chunk coordinate for the spatial index.
 /// Uses the macro pixel grid (1 unit = 1 world unit for macro maps).
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 struct RiverChunkCoord {
     x: i32,
     y: i32,
@@ -168,10 +169,13 @@ struct RiverChunkCoord {
 // ─── River Network ───────────────────────────────────────────────────────────
 
 /// Top-level immutable river network. Computed once during world generation.
+#[derive(Serialize, Deserialize)]
 pub struct RiverNetwork {
     /// All segments in the network.
     pub segments: Vec<RiverSegment>,
     /// Spatial index: which segment IDs pass through each chunk cell.
+    /// Skipped during serialization — rebuilt from segments via `rebuild_spatial_index()`.
+    #[serde(skip)]
     spatial_index: HashMap<RiverChunkCoord, Vec<usize>>,
     /// Natural lakes (depressions that weren't filled).
     pub lakes: Vec<Lake>,
@@ -301,6 +305,12 @@ impl RiverNetwork {
             spatial_index,
             lakes,
         }
+    }
+
+    /// Rebuild the spatial index from segments.
+    /// Call this after deserialization to restore query capability.
+    pub fn rebuild_spatial_index(&mut self) {
+        self.spatial_index = build_spatial_index(&self.segments);
     }
 
     /// Query river segments intersecting a rectangular bounds,
@@ -1850,6 +1860,7 @@ pub fn carve_river_channels(
 
 /// Legacy river generator for backward compatibility.
 /// Wraps the new RiverNetwork system but provides the old Vec<f64> interface.
+#[derive(Serialize, Deserialize)]
 pub struct RiverGenerator {
     pub sea_level: f64,
     pub min_accumulation: u32,
@@ -2599,5 +2610,72 @@ mod tests {
         assert!(wet_count >= dry_count,
             "Wet climate should have >= river pixels ({}) than dry ({})",
             wet_count, dry_count);
+    }
+
+    #[test]
+    fn river_network_bincode_roundtrip() {
+        // Build a small river network manually for the test
+        let segments = vec![
+            RiverSegment {
+                id: 0,
+                path: vec![(10.0, 5.0), (11.0, 6.0), (12.0, 7.0)],
+                drainage_area: 500,
+                downstream: None,
+                upstream: vec![1],
+                character: RiverCharacter::Permanent,
+                meander_offsets: vec![0.0, 0.1, -0.1],
+                strahler_order: 2,
+            },
+            RiverSegment {
+                id: 1,
+                path: vec![(8.0, 3.0), (9.0, 4.0), (10.0, 5.0)],
+                drainage_area: 200,
+                downstream: Some(0),
+                upstream: vec![],
+                character: RiverCharacter::SeasonalFlow,
+                meander_offsets: vec![0.0, 0.0, 0.0],
+                strahler_order: 1,
+            },
+        ];
+        let lakes = vec![
+            Lake {
+                cells: vec![(15.0, 15.0), (15.0, 16.0)],
+                drainage_area: 300,
+                outlet: Some(0),
+                frozen: false,
+            },
+        ];
+        let spatial_index = build_spatial_index(&segments);
+        let network = RiverNetwork { segments, spatial_index, lakes };
+
+        let encoded = bincode::serialize(&network).expect("serialize RiverNetwork");
+        let mut decoded: RiverNetwork = bincode::deserialize(&encoded).expect("deserialize RiverNetwork");
+
+        // Verify segments round-trip
+        assert_eq!(network.segments.len(), decoded.segments.len());
+        for (orig, deser) in network.segments.iter().zip(decoded.segments.iter()) {
+            assert_eq!(orig.id, deser.id);
+            assert_eq!(orig.path, deser.path);
+            assert_eq!(orig.drainage_area, deser.drainage_area);
+            assert_eq!(orig.downstream, deser.downstream);
+            assert_eq!(orig.upstream, deser.upstream);
+            assert_eq!(orig.character, deser.character);
+            assert_eq!(orig.meander_offsets, deser.meander_offsets);
+            assert_eq!(orig.strahler_order, deser.strahler_order);
+        }
+
+        // Verify lakes round-trip
+        assert_eq!(network.lakes.len(), decoded.lakes.len());
+        assert_eq!(network.lakes[0].cells, decoded.lakes[0].cells);
+        assert_eq!(network.lakes[0].drainage_area, decoded.lakes[0].drainage_area);
+        assert_eq!(network.lakes[0].outlet, decoded.lakes[0].outlet);
+        assert_eq!(network.lakes[0].frozen, decoded.lakes[0].frozen);
+
+        // spatial_index is skipped, so it should be empty after deserialization
+        assert!(decoded.spatial_index.is_empty());
+
+        // Rebuild and verify it works
+        decoded.rebuild_spatial_index();
+        assert!(!decoded.spatial_index.is_empty());
     }
 }

@@ -17,6 +17,7 @@ bevy_egui = "0.39"
 image = { version = "0.25", default-features = false, features = ["png"] }
 noise = "0.9"
 serde = { version = "1", features = ["derive"] }
+bincode = "1"
 ron = "0.8"
 bitflags = "2"
 
