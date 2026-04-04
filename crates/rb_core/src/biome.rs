@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
+
 /// Biome/tile types for world map generation.
 /// Uses multi-axis climate classification for realistic biome placement.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum TileType {
     // Water types
     #[default]
