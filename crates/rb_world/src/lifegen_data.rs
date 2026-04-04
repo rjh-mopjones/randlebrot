@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use rb_core::TileType;
 use rb_noise::BiomeMap;
+use serde::{Deserialize, Serialize};
 
 use crate::definition::{CityTier, WorldDefinition};
 use crate::roads::{terrain_movement_cost, RoadType};
@@ -8,7 +9,7 @@ use crate::roads::{terrain_movement_cost, RoadType};
 /// Complete output of civilisation generation.
 /// All grid layers are at 8192x4096 meso pixel resolution.
 /// Immutable after world gen (will support mutation via political tick later).
-#[derive(Resource, Debug)]
+#[derive(Resource, Debug, Serialize, Deserialize)]
 pub struct LifeGenData {
     pub width: usize,
     pub height: usize,
@@ -36,7 +37,7 @@ pub struct LifeGenData {
     pub trade_edges: Vec<(u32, u32, f32)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Province {
     pub id: u16,
     pub site: (f64, f64),
@@ -50,14 +51,14 @@ pub struct Province {
     pub political_state: PoliticalState,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PoliticalState {
     Claimed { faction_id: u32 },
     Unclaimed,
     Uninhabited,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactionData {
     pub id: u32,
     pub name: String,
@@ -65,7 +66,7 @@ pub struct FactionData {
     pub capital_province: u16,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettlementSeed {
     pub id: u32,
     pub position: (f64, f64),
@@ -74,7 +75,7 @@ pub struct SettlementSeed {
     pub tier: SettlementTier,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SizeClass {
     Metropolis,
     City,
@@ -84,7 +85,7 @@ pub enum SizeClass {
     Ruins,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SettlementTier {
     Capital,
     Major,
@@ -94,7 +95,7 @@ pub enum SettlementTier {
     Ruins,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoadSegment {
     pub from: (f64, f64),
     pub to: (f64, f64),
@@ -1184,5 +1185,107 @@ fn bresenham_core(x0: i32, y0: i32, x1: i32, y1: i32, plot: &mut dyn FnMut(i32, 
             err += dx;
             cy += sy;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lifegen_data_bincode_roundtrip() {
+        let mut data = LifeGenData::empty(16, 8);
+
+        // Add some provinces
+        data.provinces.push(Province {
+            id: 1,
+            site: (100.0, 200.0),
+            biome: TileType::Plains,
+            habitability: 0.8,
+            area_px: 500,
+            is_coastal: true,
+            is_river_junction: false,
+            elevation_mean: 0.15,
+            terrain_cost: 1.2,
+            political_state: PoliticalState::Claimed { faction_id: 1 },
+        });
+        data.provinces.push(Province {
+            id: 2,
+            site: (300.0, 400.0),
+            biome: TileType::Mountain,
+            habitability: 0.3,
+            area_px: 800,
+            is_coastal: false,
+            is_river_junction: true,
+            elevation_mean: 0.6,
+            terrain_cost: 3.5,
+            political_state: PoliticalState::Unclaimed,
+        });
+
+        // Add a faction
+        data.factions.push(FactionData {
+            id: 1,
+            name: "Test Faction".to_string(),
+            colour: [255, 0, 0, 255],
+            capital_province: 1,
+        });
+        data.faction_ids = vec![0; 16 * 8];
+
+        // Add a settlement
+        data.settlement_seeds.push(SettlementSeed {
+            id: 1,
+            position: (100.0, 200.0),
+            province_id: 1,
+            size_class: SizeClass::City,
+            tier: SettlementTier::Capital,
+        });
+
+        // Add a road segment
+        data.road_segments.push(RoadSegment {
+            from: (100.0, 200.0),
+            to: (300.0, 400.0),
+            cost: 5.0,
+            road_type_id: 0,
+        });
+
+        // Add a trade edge
+        data.trade_edges.push((1, 2, 10.5));
+
+        // Set some habitability values
+        data.habitability[0] = 0.9;
+        data.habitability[5] = 0.4;
+
+        let encoded = bincode::serialize(&data).expect("serialize LifeGenData");
+        let decoded: LifeGenData = bincode::deserialize(&encoded).expect("deserialize LifeGenData");
+
+        assert_eq!(data.width, decoded.width);
+        assert_eq!(data.height, decoded.height);
+        assert_eq!(data.habitability, decoded.habitability);
+        assert_eq!(data.navigation_cost, decoded.navigation_cost);
+        assert_eq!(data.resource_desirability, decoded.resource_desirability);
+        assert_eq!(data.province_ids, decoded.province_ids);
+        assert_eq!(data.faction_ids, decoded.faction_ids);
+        assert_eq!(data.trade_edges, decoded.trade_edges);
+
+        // Check provinces
+        assert_eq!(data.provinces.len(), decoded.provinces.len());
+        assert_eq!(data.provinces[0].id, decoded.provinces[0].id);
+        assert_eq!(data.provinces[0].biome, decoded.provinces[0].biome);
+        assert_eq!(data.provinces[0].is_coastal, decoded.provinces[0].is_coastal);
+
+        // Check factions
+        assert_eq!(data.factions.len(), decoded.factions.len());
+        assert_eq!(data.factions[0].name, decoded.factions[0].name);
+        assert_eq!(data.factions[0].colour, decoded.factions[0].colour);
+
+        // Check settlements
+        assert_eq!(data.settlement_seeds.len(), decoded.settlement_seeds.len());
+        assert_eq!(data.settlement_seeds[0].size_class, decoded.settlement_seeds[0].size_class);
+        assert_eq!(data.settlement_seeds[0].tier, decoded.settlement_seeds[0].tier);
+
+        // Check road segments
+        assert_eq!(data.road_segments.len(), decoded.road_segments.len());
+        assert_eq!(data.road_segments[0].from, decoded.road_segments[0].from);
+        assert_eq!(data.road_segments[0].road_type_id, decoded.road_segments[0].road_type_id);
     }
 }

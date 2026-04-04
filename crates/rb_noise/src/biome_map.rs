@@ -1,5 +1,6 @@
 use rayon::prelude::*;
 use rb_core::{NoiseStrategy, TileType};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::biome_splines::BiomeSplines;
@@ -27,7 +28,7 @@ use crate::visualization::{
 pub const SEA_LEVEL: f64 = -0.01;
 
 /// Backend selection for noise generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum NoiseBackend {
     /// CPU-based parallel noise generation using Rayon.
     Cpu,
@@ -55,6 +56,7 @@ impl NoiseBackend {
 ///
 /// This struct holds all the data needed to render different visualization
 /// layers (biome colors, temperature heatmap, etc.).
+#[derive(Serialize, Deserialize)]
 pub struct BiomeMap {
     pub width: usize,
     pub height: usize,
@@ -86,6 +88,8 @@ pub struct BiomeMap {
     pub resource_map: Option<ResourceMap>,
 
     /// Global river network (only set on the macro-level 1024×512 map).
+    /// Skipped during serialization — rebuild from terrain data after deserialization.
+    #[serde(skip)]
     pub river_network: Option<Arc<RiverNetwork>>,
 
     /// Drainage area from erosion sim (macro-level, sampled at other levels).
@@ -1986,5 +1990,42 @@ mod tests {
         assert!(violations.is_empty(),
             "Found {} non-White biomes in polar cap (light < 0.05). First 5: {:?}",
             violations.len(), &violations[..violations.len().min(5)]);
+    }
+
+    #[test]
+    fn biome_map_bincode_roundtrip() {
+        let map = BiomeMap::generate(42, 64, 32);
+        let encoded = bincode::serialize(&map).expect("serialize BiomeMap");
+        let decoded: BiomeMap = bincode::deserialize(&encoded).expect("deserialize BiomeMap");
+
+        assert_eq!(map.width, decoded.width);
+        assert_eq!(map.height, decoded.height);
+        assert_eq!(map.continentalness, decoded.continentalness);
+        assert_eq!(map.tectonic, decoded.tectonic);
+        assert_eq!(map.tectonic_plate_ids, decoded.tectonic_plate_ids);
+        assert_eq!(map.humidity, decoded.humidity);
+        assert_eq!(map.rock_hardness, decoded.rock_hardness);
+        assert_eq!(map.light_level, decoded.light_level);
+        assert_eq!(map.peaks_valleys, decoded.peaks_valleys);
+        assert_eq!(map.volcanism, decoded.volcanism);
+        assert_eq!(map.heightmap, decoded.heightmap);
+        assert_eq!(map.temperature, decoded.temperature);
+        assert_eq!(map.erosion, decoded.erosion);
+        assert_eq!(map.rivers, decoded.rivers);
+        assert_eq!(map.aridity, decoded.aridity);
+        assert_eq!(map.precipitation_type, decoded.precipitation_type);
+        assert_eq!(map.water_table, decoded.water_table);
+        assert_eq!(map.wind_speed, decoded.wind_speed);
+        assert_eq!(map.resource_richness, decoded.resource_richness);
+        assert_eq!(map.snowpack, decoded.snowpack);
+        assert_eq!(map.biomes, decoded.biomes);
+        assert_eq!(map.vegetation_density, decoded.vegetation_density);
+        assert_eq!(map.soil_type, decoded.soil_type);
+        assert_eq!(map.drainage_area, decoded.drainage_area);
+        assert_eq!(map.sediment, decoded.sediment);
+        assert_eq!(map.world_width, decoded.world_width);
+        assert_eq!(map.world_height, decoded.world_height);
+        // river_network is skipped (Arc<RiverNetwork>), so it deserializes as None
+        assert!(decoded.river_network.is_none());
     }
 }

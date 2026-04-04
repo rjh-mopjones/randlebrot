@@ -311,6 +311,12 @@ DetailLevel   // Macro(0) / Meso(1) / Micro(2)
 AuthoredSite  // Capital { FullCityData } | Town { TownParams } | Village { seed } | Landmark { kind }
 ChunkParameters  // district_type, wealth, density, biome — derived from noise
 DistrictPalette  // noise ranges → TilesetId + SpawnTable mappings
+BiomeMap          // Serialize + Deserialize (skips: river_network — Arc<RiverNetwork>, rebuild from terrain)
+RiverNetwork      // Serialize + Deserialize (skips: spatial_index — rebuild via rebuild_spatial_index())
+ResourceMap       // Serialize + Deserialize
+TileType          // Serialize + Deserialize
+ResourceType      // Serialize + Deserialize
+LifeGenData       // Serialize + Deserialize (all nested types: Province, FactionData, SettlementSeed, RoadSegment)
 ```
 
 ### App Modes
