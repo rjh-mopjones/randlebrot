@@ -1,4 +1,5 @@
 ---
+name: explore-feature
 allowed-tools: Read, Grep, Glob, Bash(find:*), Bash(cargo:*), Bash(rg:*), Bash(wc:*), Bash(head:*), Bash(tail:*), Bash(cat:*), LSP, WebSearch, Agent
 argument-hint: <feature-idea-or-area>
 description: Explore and brainstorm a new Randlebrot/Margin's Grip feature — navigate the codebase, reference the game design docs, discuss design collaboratively, then break it down into parallelisable GitHub issues
