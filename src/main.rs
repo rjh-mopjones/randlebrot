@@ -11,14 +11,216 @@ use rb_player::Player;
 use rb_tilemap::{LevelChunk, LoadedChunks};
 use rb_world::{LifeGenData, PoliticalState, WorldDefinition};
 use bevy::window::PrimaryWindow;
+use clap::{Parser, Subcommand, ValueEnum, Args};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+// ─── CLI ────────────────────────────────────────────────────────────────────
+
+/// Randlebrot — procedural world engine for Margin's Grip
+#[derive(Parser, Debug)]
+#[command(name = "randlebrot", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Launch the full Bevy editor (default when no subcommand given)
+    Gui {
+        /// Open an existing layer artifact by tag
+        layers_tag: Option<String>,
+    },
+
+    /// Generate world data (layers or levels)
+    Generate {
+        #[command(subcommand)]
+        target: GenerateTarget,
+    },
+
+    /// View and inspect generated artifacts
+    View {
+        #[command(subcommand)]
+        target: ViewTarget,
+    },
+
+    /// Launch a playable level from a previously generated level artifact
+    Launch {
+        /// Tag of the level artifact to launch
+        level_tag: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum GenerateTarget {
+    /// Generate terrain + civilisation layers for a world seed
+    Layers {
+        /// Terrain seed
+        seed: u32,
+
+        /// Tag name for the generated artifact
+        tag: String,
+
+        /// Civilisation seed (defaults to terrain seed if omitted)
+        #[arg(long)]
+        civ_seed: Option<u32>,
+
+        /// Compute backend
+        #[arg(long, value_enum, default_value_t = Backend::Gpu)]
+        backend: Backend,
+
+        /// Overwrite existing artifact with the same tag
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Generate a playable micro-level from a layers artifact or raw seed
+    Level {
+        #[command(flatten)]
+        source: LevelSource,
+
+        /// Chunk coordinate as x,y (comma-separated)
+        #[arg(value_parser = parse_coordinate)]
+        coord: (i32, i32),
+
+        /// Tag name for the generated level artifact
+        tag: String,
+
+        /// Compute backend
+        #[arg(long, value_enum, default_value_t = Backend::Gpu)]
+        backend: Backend,
+
+        /// Overwrite existing artifact with the same tag
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+/// Source for level generation — either a layers tag or a raw seed.
+/// Exactly one of `layers_tag` or `--seed` must be provided.
+#[derive(Args, Debug)]
+#[group(required = true, multiple = false)]
+struct LevelSource {
+    /// Use a previously generated layers artifact
+    #[arg(group = "source")]
+    layers_tag: Option<String>,
+
+    /// Generate from a raw terrain seed instead
+    #[arg(long, group = "source")]
+    seed: Option<u32>,
+}
+
+#[derive(Subcommand, Debug)]
+enum ViewTarget {
+    /// View layer artifacts
+    Layers {
+        /// Tag of a specific layers artifact to inspect (lists all if omitted)
+        tag: Option<String>,
+    },
+
+    /// View level artifacts
+    Levels {
+        /// Tag of a specific level artifact to inspect (lists all if omitted)
+        tag: Option<String>,
+    },
+}
+
+#[derive(ValueEnum, Clone, Debug)]
+enum Backend {
+    Gpu,
+    Cpu,
+}
+
+/// Parse a "x,y" coordinate string into an (i32, i32) pair.
+fn parse_coordinate(s: &str) -> Result<(i32, i32), String> {
+    let parts: Vec<&str> = s.splitn(2, ',').collect();
+    if parts.len() != 2 {
+        return Err(format!("expected x,y format, got '{s}'"));
+    }
+    let x = parts[0]
+        .trim()
+        .parse::<i32>()
+        .map_err(|e| format!("invalid x coordinate '{}': {e}", parts[0].trim()))?;
+    let y = parts[1]
+        .trim()
+        .parse::<i32>()
+        .map_err(|e| format!("invalid y coordinate '{}': {e}", parts[1].trim()))?;
+    Ok((x, y))
+}
+
+fn main() {
+    let cli = Cli::parse();
+
+    match cli.command {
+        // No subcommand → default to GUI editor
+        None => launch_gui(None),
+
+        Some(Command::Gui { layers_tag }) => launch_gui(layers_tag),
+
+        Some(Command::Generate { target }) => match target {
+            GenerateTarget::Layers {
+                seed,
+                tag,
+                civ_seed,
+                backend,
+                force,
+            } => {
+                let civ = civ_seed.unwrap_or(seed);
+                println!(
+                    "generate layers: seed={seed}, tag={tag}, civ_seed={civ}, \
+                     backend={backend:?}, force={force} — not implemented yet"
+                );
+            }
+            GenerateTarget::Level {
+                source,
+                coord,
+                tag,
+                backend,
+                force,
+            } => {
+                let src = if let Some(ref t) = source.layers_tag {
+                    format!("layers_tag={t}")
+                } else {
+                    format!("seed={}", source.seed.unwrap())
+                };
+                println!(
+                    "generate level: {src}, coord=({},{}), tag={tag}, \
+                     backend={backend:?}, force={force} — not implemented yet",
+                    coord.0, coord.1,
+                );
+            }
+        },
+
+        Some(Command::View { target }) => match target {
+            ViewTarget::Layers { tag: None } => {
+                println!("view layers: listing all layer artifacts — not implemented yet");
+            }
+            ViewTarget::Layers { tag: Some(tag) } => {
+                println!("view layers: tag={tag} — not implemented yet");
+            }
+            ViewTarget::Levels { tag: None } => {
+                println!("view levels: listing all level artifacts — not implemented yet");
+            }
+            ViewTarget::Levels { tag: Some(tag) } => {
+                println!("view levels: tag={tag} — not implemented yet");
+            }
+        },
+
+        Some(Command::Launch { level_tag }) => {
+            println!("launch: level_tag={level_tag} — not implemented yet");
+        }
+    }
+}
+
+// ─── GUI Entrypoint ─────────────────────────────────────────────────────────
 
 const MAP_WIDTH: usize = 1024;
 const MAP_HEIGHT: usize = 512;
 const CHUNK_SIZE_I: usize = 64;
 
-fn main() {
+/// Launch the full Bevy editor GUI. This is the default entrypoint.
+fn launch_gui(_layers_tag: Option<String>) {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {

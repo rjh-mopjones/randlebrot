@@ -96,14 +96,48 @@ These rules derive from the game design and are non-negotiable constraints on th
 ## Build & Run
 
 ```bash
-cargo run                                        # editor mode (default)
-cargo run -- --play                              # play mode
+# ─── GUI (default) ───
+cargo run                                        # editor mode (default, same as `cargo run -- gui`)
+cargo run -- gui                                 # explicit editor launch
+cargo run -- gui my-layers-tag                   # editor, opening an existing layer artifact
+
+# ─── Headless generation ───
+cargo run -- generate layers 42 my-tag                        # generate layers for seed 42
+cargo run -- generate layers 42 my-tag --civ-seed 99          # separate civ seed
+cargo run -- generate layers 42 my-tag --backend cpu          # force CPU backend
+cargo run -- generate layers 42 my-tag --force                # overwrite existing tag
+cargo run -- generate level my-layers-tag 4,3 level-tag       # generate level from layers artifact
+cargo run -- generate level --seed 42 4,3 level-tag           # generate level from raw seed
+
+# ─── View artifacts ───
+cargo run -- view layers                         # list all layer artifacts
+cargo run -- view layers my-tag                  # inspect a specific layer artifact
+cargo run -- view levels                         # list all level artifacts
+cargo run -- view levels level-tag               # inspect a specific level artifact
+
+# ─── Launch playable level ───
+cargo run -- launch level-tag                    # play a previously generated level
+
+# ─── Tests & examples ───
 cargo test                                       # workspace tests
-cargo run -p rb_noise --example noise_preview    # noise debug visualization
-cargo run -p rb_tilemap --example tile_render    # tile rendering test
-cargo run -p rb_editor --example editor_shell    # editor UI test
 cargo run --release -p rb_noise --example save_debug_layers  # regenerate debug_layers/ PNGs
 ```
+
+## CLI Workflow
+
+The CLI follows a **generate → view → launch** pipeline:
+
+1. **Generate layers** — `randlebrot generate layers <seed> <tag>` runs the full TerrainGen + LifeGen pipeline headlessly (no window) and writes the result to a tagged artifact. Use `--civ-seed` to iterate on civilisation without regenerating terrain. Use `--backend cpu|gpu` to select the compute backend (default: gpu).
+
+2. **Generate level** — `randlebrot generate level <layers-tag|--seed N> <x,y> <tag>` generates a playable micro-level at the given chunk coordinate. The source is either a previously generated layers artifact (by tag) or a raw seed. Coordinate is a comma-separated `x,y` pair of i32 values.
+
+3. **View** — `randlebrot view layers` and `randlebrot view levels` list and inspect generated artifacts. Pass a tag to see detailed metadata for a specific artifact.
+
+4. **Launch** — `randlebrot launch <level-tag>` launches a playable level from a previously generated level artifact.
+
+5. **GUI** — `randlebrot gui [layers-tag]` (or just `randlebrot` with no args) launches the full Bevy editor. Optionally opens an existing layer artifact.
+
+Headless subcommands (`generate`, `view`) never initialize Bevy or create a window. Only `gui` and `launch` start the Bevy app.
 
 ### Debug Layer Workflow
 
