@@ -12,8 +12,9 @@ rb_core.workspace = true
 noise.workspace = true
 image.workspace = true
 bevy.workspace = true
+serde.workspace = true
 rayon = "1.10"
-smallvec = "1.13"
+smallvec = { version = "1.13", features = ["serde"] }
 
 # GPU compute (optional)
 wgpu = { version = "27", optional = true }
@@ -24,6 +25,7 @@ rand_xorshift = { version = "0.3", optional = true }
 
 [dev-dependencies]
 bevy.workspace = true
+bincode.workspace = true
 
 [[example]]
 name = "noise_preview"

@@ -15,6 +15,9 @@ rand_chacha = "0.3"
 image.workspace = true
 rayon = "1.10"
 
+[dev-dependencies]
+bincode.workspace = true
+
 [[example]]
 name = "save_lifegen_layers"
 path = "examples/save_lifegen_layers.rs"

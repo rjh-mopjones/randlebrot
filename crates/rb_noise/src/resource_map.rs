@@ -1,9 +1,11 @@
 use rb_core::ResourceType;
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 
 /// Sparse resource map - only stores cells with resources above threshold.
 /// This avoids storing 12 dense vectors for resource types (would be ~50MB at 1024x512).
+#[derive(Serialize, Deserialize)]
 pub struct ResourceMap {
     pub width: usize,
     pub height: usize,
