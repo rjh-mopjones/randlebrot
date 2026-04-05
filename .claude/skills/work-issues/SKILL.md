@@ -55,7 +55,11 @@ labels have been retired — never create them, never rely on them.
 ### 0a. Fetch all open issues (with sub-issue + dependency summaries)
 
 ```bash
+# --paginate concatenates all pages into a single JSON array, so we get
+# the full issue list regardless of repo size. Without it, the response
+# is capped at per_page (max 100) on page 1.
 gh api /repos/rjh-mopjones/randlebrot/issues \
+  --paginate \
   -X GET \
   -f state=open \
   -f per_page=100 \
@@ -178,12 +182,13 @@ import json, subprocess
 work_units = json.load(open('/tmp/rb_work_units.json'))
 
 enriched = []
+dep_api_failures = []
 for w in work_units:
     num = w['number']
 
     # Full body + labels
     result = subprocess.run(
-        ['gh', 'issue', 'view', str(num), '--json', 'number,title,body,labels,comments'],
+        ['gh', 'issue', 'view', str(num), '--json', 'number,title,body,labels'],
         capture_output=True, text=True
     )
     data = json.loads(result.stdout) if result.stdout.strip() else {}
@@ -193,11 +198,21 @@ for w in work_units:
         ['gh', 'api', f'/repos/rjh-mopjones/randlebrot/issues/{num}/dependencies/blocked_by'],
         capture_output=True, text=True
     )
-    blocked_by_raw = json.loads(result.stdout) if result.stdout.strip() else []
-    blocked_by = [
-        {'number': b['number'], 'state': b['state'], 'title': b['title']}
-        for b in blocked_by_raw
-    ]
+    if result.returncode != 0:
+        # Silent failure here would cause agents to run with unmet blockers.
+        # Record the failure and treat as "unknown blockers" (sentinel).
+        dep_api_failures.append((num, result.stderr.strip()))
+        blocked_by_raw = None
+    else:
+        blocked_by_raw = json.loads(result.stdout) if result.stdout.strip() else []
+
+    if blocked_by_raw is None:
+        blocked_by = None  # unknown — downstream will treat as NOT ready
+    else:
+        blocked_by = [
+            {'number': b['number'], 'state': b['state'], 'title': b['title']}
+            for b in blocked_by_raw
+        ]
 
     enriched.append({
         **w,
@@ -207,10 +222,18 @@ for w in work_units:
     })
 
     print(f"#{num}: {w['title']}")
-    if blocked_by:
+    if blocked_by is None:
+        print(f"    ! dependencies API failed — treating as blocked (unknown)")
+    elif blocked_by:
         for b in blocked_by:
             marker = '✓' if b['state'] == 'closed' else '⏳'
             print(f"    {marker} blocked by #{b['number']} ({b['state']}): {b['title']}")
+
+if dep_api_failures:
+    print(f"\nWARNING: {len(dep_api_failures)} dependency API call(s) failed:")
+    for num, err in dep_api_failures:
+        print(f"  #{num}: {err}")
+    print("  These issues will be treated as blocked (unknown state).")
 
 with open('/tmp/rb_issues_enriched.json', 'w') as f:
     json.dump(enriched, f, indent=2)
@@ -223,55 +246,69 @@ EOF
 
 ## Phase 2 — Build the dependency graph
 
-A work unit is **ready** if all its `blocked_by` dependencies are either:
-- Closed (merged) — the blocker is done
-- Not in the current work unit batch — presumably merged or outside scope
+A work unit is **ready** if ALL its `blocked_by` dependencies are closed.
+The native dependencies API returns each blocker's `state` field — that is
+the authoritative source, regardless of whether the blocker is in the current
+batch, in another feature's sub-issue tree, or claimed by an open PR.
 
 A work unit is **blocked** if any of its `blocked_by` dependencies is still
-open AND in the current batch.
+open, or if the Phase 1 API call to fetch its blockers failed (unknown state).
 
 ```bash
 python3 << 'EOF'
 import json
 
 enriched = json.load(open('/tmp/rb_issues_enriched.json'))
-batch_nums = {w['number'] for w in enriched}
 
 analysis = {}
 for w in enriched:
     num = w['number']
-    blockers_open_in_batch = [
-        b['number'] for b in w['blocked_by']
-        if b['state'] == 'open' and b['number'] in batch_nums
-    ]
+    blocked_by = w.get('blocked_by')
+
+    if blocked_by is None:
+        # Phase 1 failed to fetch — treat as blocked with unknown reason.
+        is_ready = False
+        blockers_still_open = []
+        unknown = True
+    else:
+        blockers_still_open = [
+            b for b in blocked_by if b['state'] == 'open'
+        ]
+        is_ready = len(blockers_still_open) == 0
+        unknown = False
+
     analysis[num] = {
         **w,
-        'blocked_by_in_batch': blockers_open_in_batch,
-        'ready': len(blockers_open_in_batch) == 0,
+        'blockers_still_open': blockers_still_open,
+        'ready': is_ready,
+        'blockers_unknown': unknown,
     }
 
-ready = [w for w in analysis.values() if w['ready']]
-blocked = [w for w in analysis.values() if not w['ready']]
+ready_list = [w for w in analysis.values() if w['ready']]
+blocked_list = [w for w in analysis.values() if not w['ready']]
 
 print("\n=== READY — CAN START NOW ===")
-for w in sorted(ready, key=lambda x: x['number']):
+for w in sorted(ready_list, key=lambda x: x['number']):
     parent = f' (sub-issue of #{w["parent_number"]})' if w['parent_number'] else ''
     print(f"  #{w['number']}: {w['title']}{parent}")
 
-print("\n=== BLOCKED — waiting on open blockers in this batch ===")
-for w in sorted(blocked, key=lambda x: x['number']):
-    deps = ', '.join(f"#{d}" for d in w['blocked_by_in_batch'])
+print("\n=== BLOCKED — waiting on open blockers ===")
+for w in sorted(blocked_list, key=lambda x: x['number']):
     parent = f' (sub-issue of #{w["parent_number"]})' if w['parent_number'] else ''
     print(f"  #{w['number']}: {w['title']}{parent}")
-    print(f"      blocked by: {deps}")
+    if w['blockers_unknown']:
+        print(f"      blocked by: (unknown — dependencies API call failed)")
+    else:
+        deps = ', '.join(f"#{b['number']}" for b in w['blockers_still_open'])
+        print(f"      blocked by: {deps}")
 
 with open('/tmp/rb_issues_ready.json', 'w') as f:
-    json.dump(ready, f, indent=2)
+    json.dump(ready_list, f, indent=2)
 
 with open('/tmp/rb_issues_all.json', 'w') as f:
     json.dump(list(analysis.values()), f, indent=2)
 
-print(f"\n{len(ready)} ready, {len(blocked)} blocked.")
+print(f"\n{len(ready_list)} ready, {len(blocked_list)} blocked.")
 EOF
 ```
 
@@ -385,9 +422,13 @@ in the PR body — the orchestrator will handle it separately. Do NOT fail the P
 
 ## Step 4 — Tests
 
+Always use `--workspace` to catch cross-crate breakage before raising the PR.
+An agent working in `rb_world` that only runs `cargo check` on the current
+package will miss failures in `rb_editor` or `src/main.rs` that CI will catch.
+
 ```bash
-cargo check 2>&1
-cargo clippy --bin randlebrot -- -D warnings 2>&1
+cargo check --workspace 2>&1
+cargo clippy --workspace --all-targets -- -D warnings 2>&1
 cargo test --workspace 2>&1
 ```
 
@@ -505,4 +546,6 @@ For failed agents, print the last few lines of their output for diagnosis.
 
 **Quirks**:
 - `sub_issue_id` and `issue_id` are the integer `id` field, NOT the issue number. Use `gh api -F` (typed) not `-f` (string).
-- DELETE on dependencies takes the integer id in the URL path.
+- DELETE on dependencies takes the integer id in the URL path: `DELETE /issues/N/dependencies/blocked_by/<id>`.
+- DELETE on sub-issues is **the opposite shape**: `DELETE /issues/N/sub_issue` (singular path segment!) takes `sub_issue_id` in the request body, not the URL. Watch out for the plural/singular mismatch with the POST endpoint.
+- The list endpoint (`GET /repos/{owner}/{repo}/issues`) returns `sub_issues_summary` and `parent_issue_url` fields inline, but `issue_dependencies_summary` may require the single-issue endpoint. Phase 1 always fetches blockers via the dedicated `/dependencies/blocked_by` endpoint, so this does not affect correctness.

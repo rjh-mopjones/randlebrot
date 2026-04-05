@@ -82,24 +82,30 @@ are expressed via GitHub's native issue dependencies API, NOT via wave labels
 
 ### Rules for Decomposition
 
-1. **One parent per feature**. The parent issue describes the feature at a high
-   level (goal, design, acceptance at the feature level). It is NOT a work unit
-   — no agent will implement it directly. Its job is to track progress across
-   its sub-issues (GitHub auto-updates `sub_issues_summary`).
-2. **Sub-issues are the work units**. Each sub-issue is small enough for one
+1. **Stand-alone issues for trivial features**. If the feature is genuinely a
+   single small change (one function, one test, one config tweak, one doc
+   update), skip the parent entirely and create a single stand-alone issue.
+   Parents are only worth their overhead when there are 2+ sub-issues.
+   `/work-issues` handles stand-alone issues as first-class work units.
+2. **Otherwise: one parent per feature**. The parent issue describes the
+   feature at a high level (goal, design, acceptance at the feature level).
+   It is NOT a work unit — no agent will implement it directly. Its job is
+   to track progress across its sub-issues (GitHub auto-updates
+   `sub_issues_summary`).
+3. **Sub-issues are the work units**. Each sub-issue is small enough for one
    agent to implement in a single PR. If a sub-issue is too big, split it.
-3. **Dependencies via the native API**. If sub-issue B needs sub-issue A's
+4. **Dependencies via the native API**. If sub-issue B needs sub-issue A's
    output, encode it as `B.blocked_by = [A]` via the dependencies API. No
    "Depends on: #X" text in issue bodies — the API is the source of truth.
-4. **One crate per sub-issue where possible**. Respect the workspace crate
+5. **One crate per sub-issue where possible**. Respect the workspace crate
    boundary to maximise parallelism.
-5. **rb_core types before implementations**. Core traits/types are always early
+6. **rb_core types before implementations**. Core traits/types are always early
    sub-issues that later ones depend on.
-6. **Test in the same sub-issue**. Each sub-issue includes its own tests — no
+7. **Test in the same sub-issue**. Each sub-issue includes its own tests — no
    separate "add tests" sub-issues.
-7. **Debug layer verification**. If the feature produces visible terrain output,
+8. **Debug layer verification**. If the feature produces visible terrain output,
    the relevant sub-issue must include `save_debug_layers` integration.
-8. **No `wave-N` labels**. Waves are derived from the dependency graph at
+9. **No `wave-N` labels**. Waves are derived from the dependency graph at
    `/work-issues` discovery time. Agents never see wave numbers.
 
 ### Parent issue template
@@ -196,8 +202,31 @@ Use labels `randlebrot` and `feature`. **Do not create or use `wave-N` labels.**
 set -euo pipefail
 
 # Create GitHub parent + sub-issues for: $ARGUMENTS
+#
+# NOTE TO THE AGENT GENERATING THIS SCRIPT: every literal below
+# ("Wind system", sub-issue titles, body contents) is an example — replace
+# them with the real feature data from Phase 2. REPO should stay as-is.
 
 REPO="rjh-mopjones/randlebrot"
+CREATED_ISSUES=()
+
+# If anything fails partway through, close any issues we already created
+# so the repo is not left with orphan parents or disconnected sub-issues.
+cleanup_on_failure() {
+  local rc=$?
+  if [ $rc -ne 0 ] && [ ${#CREATED_ISSUES[@]} -gt 0 ]; then
+    echo "" >&2
+    echo "ERROR: script failed with exit code $rc, closing partially-created issues:" >&2
+    for n in "${CREATED_ISSUES[@]}"; do
+      echo "  closing #$n" >&2
+      gh issue close "$n" --repo "$REPO" \
+        --comment "Automated cleanup: creation script failed partway through." \
+        2>/dev/null || true
+    done
+  fi
+  return $rc
+}
+trap cleanup_on_failure EXIT
 
 # ---- Parent ----
 PARENT_URL=$(gh issue create --repo "$REPO" \
@@ -225,6 +254,7 @@ pressure differential...
 EOF
 )")
 PARENT_NUM=$(basename "$PARENT_URL")
+CREATED_ISSUES+=("$PARENT_NUM")
 PARENT_ID=$(gh api "/repos/$REPO/issues/$PARENT_NUM" --jq '.id')
 echo "Created parent #$PARENT_NUM (id=$PARENT_ID)"
 
@@ -254,6 +284,7 @@ Add a WindStrategy to rb_noise following the ContinentalnessStrategy pattern.
 EOF
 )")
 A_NUM=$(basename "$A_URL")
+CREATED_ISSUES+=("$A_NUM")
 A_ID=$(gh api "/repos/$REPO/issues/$A_NUM" --jq '.id')
 
 # Link as sub-issue of parent
@@ -272,6 +303,7 @@ B_URL=$(gh issue create --repo "$REPO" \
 EOF
 )")
 B_NUM=$(basename "$B_URL")
+CREATED_ISSUES+=("$B_NUM")
 B_ID=$(gh api "/repos/$REPO/issues/$B_NUM" --jq '.id')
 
 gh api --method POST "/repos/$REPO/issues/$PARENT_NUM/sub_issues" \
@@ -284,6 +316,10 @@ gh api --method POST "/repos/$REPO/issues/$B_NUM/dependencies/blocked_by" \
 echo "  #$B_NUM linked as sub-issue of #$PARENT_NUM, blocked by #$A_NUM"
 
 # ... continue for each sub-issue ...
+
+# All issues created successfully — disarm the cleanup trap so we don't
+# close the freshly-created issues on normal exit.
+trap - EXIT
 
 echo ""
 echo "Done. Run '/work-issues' to implement the ready sub-issues, or"
