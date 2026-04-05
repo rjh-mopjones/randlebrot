@@ -472,8 +472,10 @@ fn main() {
                 }
             }
             ViewTarget::Layers { tag: Some(tag) } => {
-                // Interactive viewer for a specific layers artifact is #9's scope.
-                println!("view layers: tag={tag} — not implemented yet");
+                if let Err(e) = commands::view_layers::run(tag) {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
             }
             ViewTarget::Levels { tag: None } => {
                 if let Err(e) = view_levels_list() {

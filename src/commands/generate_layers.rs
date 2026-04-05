@@ -362,7 +362,7 @@ fn stitch_single_layer(
 }
 
 /// Stable filesystem-friendly filename for a noise layer.
-fn layer_file_name(layer: NoiseLayer) -> String {
+pub(crate) fn layer_file_name(layer: NoiseLayer) -> String {
     let base = match layer {
         NoiseLayer::Biome => "biome",
         NoiseLayer::Continentalness => "continentalness",
