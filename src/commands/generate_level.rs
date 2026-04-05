@@ -37,16 +37,9 @@ use rb_artifacts::{ArtifactKind, ArtifactStore, LevelManifest};
 use rb_noise::{BiomeMap, NoiseBackend, RiverNetwork};
 
 use crate::cli::coords::{
-    micro_coord_to_world_pos, validate_micro_coord, MICRO_GRID_HEIGHT, MICRO_GRID_WIDTH,
-    MICRO_OUTPUT_SIZE, MICRO_WORLD_SIZE,
+    micro_coord_to_world_pos, validate_micro_coord, MICRO_OUTPUT_SIZE, MICRO_WORLD_SIZE,
+    WORLD_HEIGHT, WORLD_WIDTH,
 };
-
-// ─── Constants (mirror src/main.rs / generate_layers.rs) ───────────────────
-
-/// World width in world units (full planet).
-const WORLD_WIDTH: usize = 1024;
-/// World height in world units.
-const WORLD_HEIGHT: usize = 512;
 
 // ─── Entry Points ───────────────────────────────────────────────────────────
 
@@ -73,8 +66,11 @@ pub fn run_from_layers(
     let store = ArtifactStore::new()
         .map_err(|e| format!("failed to initialise artifact store at ~/.randlebrot: {e}"))?;
 
-    check_level_tag_available(&store, &level_tag, force)?;
+    // Validate the coordinate *before* touching the filesystem. Otherwise a
+    // typo combined with `--force` would delete the existing level artifact
+    // inside `check_level_tag_available` before returning the coord error.
     validate_micro_coord(micro_coord).map_err(|e| e.to_string())?;
+    check_level_tag_available(&store, &level_tag, force)?;
 
     // ─── 1. Load the layers artifact ────────────────────────────────────────
     let stage = stage_spinner(&format!("[1/3] Loading layers artifact '{layers_tag}'"));
@@ -159,14 +155,17 @@ pub fn run_from_seed(
     let store = ArtifactStore::new()
         .map_err(|e| format!("failed to initialise artifact store at ~/.randlebrot: {e}"))?;
 
-    check_level_tag_available(&store, &level_tag, force)?;
+    // Validate the coordinate *before* touching the filesystem. Otherwise a
+    // typo combined with `--force` would delete the existing level artifact
+    // inside `check_level_tag_available` before returning the coord error.
     validate_micro_coord(micro_coord).map_err(|e| e.to_string())?;
+    check_level_tag_available(&store, &level_tag, force)?;
 
     // ─── 1. Generate macro BiomeMap in memory (erosion + rivers) ────────────
     let stage = stage_spinner(
         "[1/3] Generating macro BiomeMap in memory (1024x512, erosion + rivers)",
     );
-    let mut macro_biome =
+    let macro_biome =
         BiomeMap::generate_with_backend(seed, WORLD_WIDTH, WORLD_HEIGHT, backend);
     let river_network_arc: Option<Arc<RiverNetwork>> = macro_biome.river_network.clone();
     let river_msg = match river_network_arc.as_ref() {
@@ -202,13 +201,6 @@ pub fn run_from_seed(
         micro_biome.width, micro_biome.height
     ));
 
-    // Drop the second Arc we were holding (for the meso call) so we can
-    // unwrap the river network out of the macro BiomeMap without contention.
-    // The seed path doesn't persist the river network separately, so this is
-    // only here to keep the Arc strong-count explicit and the code symmetric
-    // with the layers path.
-    drop(river_network_arc);
-
     // ─── 3. Save the level artifact ─────────────────────────────────────────
     let stage = stage_spinner("[3/3] Saving level artifact");
     let level_manifest = LevelManifest {
@@ -224,9 +216,6 @@ pub fn run_from_seed(
         .save_level(&level_tag, &micro_biome, &level_manifest)
         .map_err(|e| format!("failed to save level artifact '{level_tag}': {e}"))?;
     stage.finish_with_message("[3/3] Level artifact saved");
-
-    // Prevent "unused" warning on macro_biome after persisting
-    drop(macro_biome);
 
     let level_dir = store.base_path().join("levels").join(&level_tag);
     println!("Done. Saved to {}", level_dir.display());
@@ -282,7 +271,9 @@ fn stage_spinner(msg: &str) -> ProgressBar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::coords::{micro_coord_to_world_pos, validate_micro_coord};
+    use crate::cli::coords::{
+        micro_coord_to_world_pos, validate_micro_coord, MICRO_GRID_HEIGHT, MICRO_GRID_WIDTH,
+    };
 
     #[test]
     fn micro_coord_maps_to_world_position() {
