@@ -1,8 +1,8 @@
 ---
 name: work-issues
 allowed-tools: Read, Grep, Glob, Bash(*), Agent, WebSearch
-argument-hint: [wave-N] (optional: only process issues from this wave)
-description: Triage open GitHub issues by wave, build dependency graph, and spawn parallel implementation agents — one per issue in isolated worktrees, each raising a PR
+argument-hint: [feature-parent-number] (optional: only process sub-issues under this parent)
+description: Discover leaf work items (sub-issues or stand-alone issues), build a dependency graph from GitHub's native sub-issue + dependencies APIs, and spawn parallel implementation agents — one per ready work item in isolated worktrees, each raising a PR
 model: claude-opus-4-6
 ---
 
@@ -10,12 +10,13 @@ model: claude-opus-4-6
 
 You are the Randlebrot issue orchestrator. You will read all open GitHub issues
 that have no associated PR, work out which can be implemented in parallel right
-now based on wave labels and the crate dependency graph, then spawn an agent
-swarm to implement them — one agent per issue, each raising a PR when done.
+now based on the **native sub-issue hierarchy** and **issue dependencies API**,
+then spawn an agent swarm to implement them — one agent per ready issue, each
+raising a PR when done.
 
 Read `CLAUDE.md` in full before doing anything else. The dependency graph,
 workspace crate map, and architecture sections are the source of truth for
-what blocks what:
+what blocks what at the code level:
 
 ```bash
 cat CLAUDE.md
@@ -23,16 +24,51 @@ cat CLAUDE.md
 
 ---
 
-## Phase 0 — Discover unimplemented issues
+## How Randlebrot tracks work (post-skills-refactor)
 
-### 0a. Fetch all open issues
+**Parent issues** are feature trackers. They describe a coherent feature or
+capability at a high level. They are NOT work units themselves — agents do
+not implement parent issues directly.
+
+**Sub-issues** are concrete work items. Each sub-issue is small enough for one
+agent to implement in a single PR. Sub-issues live under a parent via GitHub's
+native sub-issues API. A parent shows `sub_issues_summary: {total, completed,
+percent_completed}` automatically.
+
+**Stand-alone issues** (no parent, no children) are also work units — used for
+one-shot tasks that don't decompose.
+
+**Issue dependencies** replace the old "Depends on: #X" body text. Encoded via
+GitHub's native dependencies API: `blocked_by` / `blocking`. Queried via
+`/repos/{owner}/{repo}/issues/{N}/dependencies/blocked_by`. The agent is "ready"
+if all its blockers are closed.
+
+**Waves are derived, not labelled.** The wave number of an issue is its
+topological depth in the dependency graph. A leaf with no blockers is wave 0.
+A leaf whose blockers are all in wave 0 is wave 1. Etc. The old `wave-N`
+labels have been retired — never create them, never rely on them.
+
+---
+
+## Phase 0 — Discover work items
+
+### 0a. Fetch all open issues (with sub-issue + dependency summaries)
 
 ```bash
-gh issue list --state open --limit 100 \
-  --json number,title,body,labels,assignees \
+gh api /repos/rjh-mopjones/randlebrot/issues \
+  -X GET \
+  -f state=open \
+  -f per_page=100 \
   > /tmp/rb_all_issues.json
 
-cat /tmp/rb_all_issues.json
+python3 -c "
+import json
+d = json.load(open('/tmp/rb_all_issues.json'))
+# Filter out PRs (the issues endpoint returns both)
+d = [i for i in d if 'pull_request' not in i]
+print(f'{len(d)} open issues (non-PR)')
+json.dump(d, open('/tmp/rb_all_issues.json', 'w'), indent=2)
+"
 ```
 
 ### 0b. Fetch all open PRs to find which issues are already in progress
@@ -43,14 +79,23 @@ gh pr list --state open --limit 100 \
   > /tmp/rb_all_prs.json
 ```
 
-### 0c. Cross-reference to find unimplemented issues
+### 0c. Classify every issue (parent / work-unit / claimed)
+
+For each open issue, determine:
+1. **Is it a parent?** (has `sub_issues_summary.total > 0`)
+2. **Is it a sub-issue?** (has `parent_issue_url != null`)
+3. **Is it claimed?** (its number appears in an open PR's branch name or body)
+
+Parents are trackers (skip). Work units are:
+- Sub-issues whose parent is open (and not already implemented)
+- Stand-alone issues (no parent, no sub-issues)
 
 ```bash
 python3 << 'EOF'
-import json, re, sys
+import json, re
 
 issues = json.load(open('/tmp/rb_all_issues.json'))
-prs    = json.load(open('/tmp/rb_all_prs.json'))
+prs = json.load(open('/tmp/rb_all_prs.json'))
 
 # Extract issue numbers mentioned in open PR bodies/branches
 claimed = set()
@@ -61,67 +106,116 @@ for pr in prs:
         if num:
             claimed.add(int(num))
 
-# Filter: if user passed a wave argument, only include that wave
-wave_filter = None
+# Optional filter: if argument is "N", only include sub-issues of parent #N
+target_parent = None
 args = "$ARGUMENTS".strip()
-if args and args.startswith("wave-"):
-    wave_filter = args
+if args and args.isdigit():
+    target_parent = int(args)
 
-unimplemented = []
+parents = set()
+work_units = []
+
 for issue in issues:
-    if issue['number'] in claimed:
-        continue
-    labels = [l['name'] for l in issue.get('labels', [])]
-    if wave_filter and wave_filter not in labels:
-        continue
-    unimplemented.append(issue)
+    num = issue['number']
+    summary = issue.get('sub_issues_summary') or {}
+    has_children = (summary.get('total') or 0) > 0
+    parent_url = issue.get('parent_issue_url')
+    parent_num = None
+    if parent_url:
+        m = re.search(r'/issues/(\d+)$', parent_url)
+        if m:
+            parent_num = int(m.group(1))
 
-print(f"Open issues:       {len(issues)}")
-print(f"Already in PR:     {len(claimed)}")
-print(f"Unimplemented:     {len(unimplemented)}")
-if wave_filter:
-    print(f"Wave filter:       {wave_filter}")
+    if has_children:
+        parents.add(num)
+        continue
+
+    if num in claimed:
+        continue
+
+    if target_parent is not None and parent_num != target_parent:
+        continue
+
+    work_units.append({
+        'number': num,
+        'title': issue['title'],
+        'parent_number': parent_num,
+        'id': issue['id'],
+        'labels': [l['name'] for l in issue.get('labels', [])],
+        'blocked_by_count': (issue.get('issue_dependencies_summary') or {}).get('blocked_by', 0),
+    })
+
+print(f'Open issues (non-PR): {len(issues)}')
+print(f'Parents (trackers):   {len(parents)}  -> {sorted(parents)}')
+print(f'In open PR:           {len(claimed)}  -> {sorted(claimed)}')
+print(f'Work units to triage: {len(work_units)}')
+if target_parent is not None:
+    print(f'Filter: parent #{target_parent}')
 print()
-for i in unimplemented:
-    labels = [l['name'] for l in i.get('labels', [])]
-    print(f"  #{i['number']}: {i['title']}  [{', '.join(labels)}]")
+for w in work_units:
+    parent = f'  (sub-issue of #{w["parent_number"]})' if w['parent_number'] else '  (stand-alone)'
+    blocked = f' [blocked by {w["blocked_by_count"]}]' if w['blocked_by_count'] else ''
+    print(f'  #{w["number"]}: {w["title"]}{parent}{blocked}')
 
-with open('/tmp/rb_unimplemented_issues.json', 'w') as f:
-    json.dump(unimplemented, f, indent=2)
+with open('/tmp/rb_work_units.json', 'w') as f:
+    json.dump(work_units, f, indent=2)
 EOF
 ```
 
-If there are no unimplemented issues, print "All issues have open PRs." and exit.
+If `/tmp/rb_work_units.json` is empty, print "No open work units." and exit.
 
 ---
 
-## Phase 1 — Read and understand every unimplemented issue
+## Phase 1 — Fetch each work unit's full body + blockers
 
-For each issue in `/tmp/rb_unimplemented_issues.json`, fetch its full body:
+For each work unit, fetch its full body (for the agent prompt) AND its
+`blocked_by` list from the dependencies API:
 
 ```bash
 python3 << 'EOF'
 import json, subprocess
 
-issues = json.load(open('/tmp/rb_unimplemented_issues.json'))
+work_units = json.load(open('/tmp/rb_work_units.json'))
 
 enriched = []
-for issue in issues:
-    num = issue['number']
+for w in work_units:
+    num = w['number']
+
+    # Full body + labels
     result = subprocess.run(
-        ['gh', 'issue', 'view', str(num), '--json',
-         'number,title,body,labels,comments'],
+        ['gh', 'issue', 'view', str(num), '--json', 'number,title,body,labels,comments'],
         capture_output=True, text=True
     )
-    data = json.loads(result.stdout) if result.stdout.strip() else issue
-    enriched.append(data)
-    print(f"\n{'='*60}")
-    print(f"Issue #{num}: {issue['title']}")
-    print(f"{'='*60}")
-    print(data.get('body', '(no body)'))
+    data = json.loads(result.stdout) if result.stdout.strip() else {}
+
+    # Native dependencies: blocked_by
+    result = subprocess.run(
+        ['gh', 'api', f'/repos/rjh-mopjones/randlebrot/issues/{num}/dependencies/blocked_by'],
+        capture_output=True, text=True
+    )
+    blocked_by_raw = json.loads(result.stdout) if result.stdout.strip() else []
+    blocked_by = [
+        {'number': b['number'], 'state': b['state'], 'title': b['title']}
+        for b in blocked_by_raw
+    ]
+
+    enriched.append({
+        **w,
+        'body': data.get('body', ''),
+        'title': data.get('title', w['title']),
+        'blocked_by': blocked_by,
+    })
+
+    print(f"#{num}: {w['title']}")
+    if blocked_by:
+        for b in blocked_by:
+            marker = '✓' if b['state'] == 'closed' else '⏳'
+            print(f"    {marker} blocked by #{b['number']} ({b['state']}): {b['title']}")
 
 with open('/tmp/rb_issues_enriched.json', 'w') as f:
     json.dump(enriched, f, indent=2)
+
+print(f"\n{len(enriched)} work units enriched.")
 EOF
 ```
 
@@ -129,153 +223,55 @@ EOF
 
 ## Phase 2 — Build the dependency graph
 
-Read the enriched issues and the current codebase state, then determine what
-blocks what. Think through this carefully — getting the dependency graph wrong
-means agents will try to implement something whose dependencies don't exist yet.
+A work unit is **ready** if all its `blocked_by` dependencies are either:
+- Closed (merged) — the blocker is done
+- Not in the current work unit batch — presumably merged or outside scope
 
-**CRITICAL — inter-issue dependencies:** Two issues that are both individually
-unblocked by `main` may still depend on each other. For example, if issue #A
-adds serde derives and issue #B creates rb_artifacts (which needs those derives),
-then B depends on A — they cannot run in parallel even though neither is blocked
-by something already on `main`.
-
-### 2a. Inventory the current codebase state
-
-```bash
-# Check which crates exist and their implementation status
-python3 << 'EOF'
-import os, pathlib
-
-workspace_root = pathlib.Path('crates')
-
-status = {}
-for toml in sorted(workspace_root.glob('*/Cargo.toml')):
-    crate_dir = toml.parent
-    name = crate_dir.name
-    src = crate_dir / 'src'
-
-    impl_files = list(src.glob('**/*.rs')) if src.exists() else []
-    total_lines = sum(
-        len(open(f).readlines())
-        for f in impl_files
-    )
-
-    if total_lines == 0:
-        status[name] = 'EMPTY'
-    elif total_lines < 20:
-        status[name] = 'STUB'
-    else:
-        status[name] = f'IMPL ({total_lines} lines)'
-
-for name, state in sorted(status.items()):
-    print(f"  {name:<30} {state}")
-EOF
-```
-
-### 2b. Map each issue to its dependencies
-
-For each unimplemented issue, determine:
-
-1. **What wave label does it have?** (`wave-1` through `wave-5`)
-2. **What crate(s) does it touch?** (from issue body)
-3. **What does it depend on?** (from "Depends on" field in issue body, plus wave label)
-4. **Is everything it depends on already merged to `main`?**
-5. **Is any dependency provided by ANOTHER unimplemented issue in this batch?**
-
-```bash
-git fetch origin
-git log origin/main --oneline | head -20
-```
-
-### 2c. Build the full dependency graph (including inter-issue edges)
+A work unit is **blocked** if any of its `blocked_by` dependencies is still
+open AND in the current batch.
 
 ```bash
 python3 << 'EOF'
-import json, re
+import json
 
-issues = json.load(open('/tmp/rb_issues_enriched.json'))
+enriched = json.load(open('/tmp/rb_issues_enriched.json'))
+batch_nums = {w['number'] for w in enriched}
 
-# Parse wave labels and dependency info from each issue
 analysis = {}
-
-for issue in issues:
-    num = issue['number']
-    body = issue.get('body', '') or ''
-    labels = [l['name'] for l in issue.get('labels', [])]
-
-    # Extract wave from labels
-    wave = -1
-    for label in labels:
-        if label.startswith('wave-'):
-            try:
-                wave = int(label.split('-')[1])
-            except ValueError:
-                pass
-
-    # Extract "Depends on" from body
-    depends_on_issues = []
-    for m in re.findall(r'Depends on[:\s]*(.+?)(?:\n|$)', body):
-        for ref in re.findall(r'#(\d+)', m):
-            depends_on_issues.append(int(ref))
-
-    # Extract "Parallel with" from body
-    parallel_with = []
-    for m in re.findall(r'Parallel with[:\s]*(.+?)(?:\n|$)', body):
-        for ref in re.findall(r'#(\d+)', m):
-            parallel_with.append(int(ref))
-
-    # Extract crate(s) from body
-    crates = []
-    for m in re.findall(r"Crate\(s\)[:\s]*(.+?)(?:\n|$)", body):
-        crates.append(m.strip().strip('`'))
-
+for w in enriched:
+    num = w['number']
+    blockers_open_in_batch = [
+        b['number'] for b in w['blocked_by']
+        if b['state'] == 'open' and b['number'] in batch_nums
+    ]
     analysis[num] = {
-        "title": issue['title'],
-        "wave": wave,
-        "crates": crates,
-        "depends_on": depends_on_issues,
-        "parallel_with": parallel_with,
-        "labels": labels,
+        **w,
+        'blocked_by_in_batch': blockers_open_in_batch,
+        'ready': len(blockers_open_in_batch) == 0,
     }
 
-# Check which dependencies are satisfied (merged or not in our batch)
-unimplemented_nums = set(analysis.keys())
+ready = [w for w in analysis.values() if w['ready']]
+blocked = [w for w in analysis.values() if not w['ready']]
 
-for num, info in analysis.items():
-    blocked_by = []
-    for dep in info['depends_on']:
-        if dep in unimplemented_nums:
-            blocked_by.append(dep)
-        # If dep is not in our batch and not in open PRs, it's presumably merged
-    info['blocked_by_issues'] = blocked_by
-    info['ready'] = len(blocked_by) == 0
+print("\n=== READY — CAN START NOW ===")
+for w in sorted(ready, key=lambda x: x['number']):
+    parent = f' (sub-issue of #{w["parent_number"]})' if w['parent_number'] else ''
+    print(f"  #{w['number']}: {w['title']}{parent}")
 
-# Print the dependency graph
-print("\n=== WAVE 0 / READY — CAN START NOW (no blocking deps) ===")
-for num, info in sorted(analysis.items()):
-    if info['ready']:
-        print(f"  Issue #{num}: {info['title']}")
-        print(f"    Wave: {info['wave']}, Crates: {', '.join(info['crates'])}")
+print("\n=== BLOCKED — waiting on open blockers in this batch ===")
+for w in sorted(blocked, key=lambda x: x['number']):
+    deps = ', '.join(f"#{d}" for d in w['blocked_by_in_batch'])
+    parent = f' (sub-issue of #{w["parent_number"]})' if w['parent_number'] else ''
+    print(f"  #{w['number']}: {w['title']}{parent}")
+    print(f"      blocked by: {deps}")
 
-print("\n=== BLOCKED — WAITING FOR OTHER ISSUES IN THIS BATCH ===")
-for num, info in sorted(analysis.items()):
-    if not info['ready']:
-        deps = ', '.join(f"#{d}" for d in info['blocked_by_issues'])
-        print(f"  Issue #{num}: {info['title']}  [wave {info['wave']}]")
-        print(f"    Blocked by: {deps}")
-
-# Save analysis
-ready = [{'number': num, **info} for num, info in sorted(analysis.items()) if info['ready']]
 with open('/tmp/rb_issues_ready.json', 'w') as f:
-    json.dump(ready, f, indent=2, default=str)
+    json.dump(ready, f, indent=2)
 
-with open('/tmp/rb_issues_all_waves.json', 'w') as f:
-    json.dump(analysis, f, indent=2, default=str)
+with open('/tmp/rb_issues_all.json', 'w') as f:
+    json.dump(list(analysis.values()), f, indent=2)
 
-print(f"\n{len(ready)} issues ready to implement now.")
-blocked = len(analysis) - len(ready)
-if blocked:
-    print(f"{blocked} issues blocked (will become ready after dependencies merge).")
+print(f"\n{len(ready)} ready, {len(blocked)} blocked.")
 EOF
 ```
 
@@ -283,13 +279,10 @@ If `/tmp/rb_issues_ready.json` is empty, print which issues are blocking and exi
 
 ---
 
-## Confirmation gate — STOP HERE and ask the user before proceeding
+## Confirmation gate — STOP HERE and ask the user
 
-After Phase 2 completes, present a clear summary and ask for explicit confirmation
-before spawning any agents. Do not proceed to Phase 3 automatically under any
-circumstances.
-
-Present the summary in this exact format:
+Present a clear summary and ask for explicit confirmation before spawning any
+agents. Do not proceed to Phase 3 automatically.
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -298,53 +291,45 @@ Present the summary in this exact format:
 
   Launching now: N agents
 
-  Issue  Crate(s)                        Why ready
-  ─────  ──────────────────────────────  ────────────────────
-  #NN    rb_<name>                       <one-line reason>
+  Issue   Parent    Title                          Why ready
+  ──────  ────────  ─────────────────────────────  ────────────────────
+  #NN     #PP       ...                            no blockers / all closed
+  #NN     (stand)   ...                            no blockers
   ...
 
-  Blocked — run /work-issues again after these PRs merge:
-  #NN    rb_<name>   [wave N]  — depends on: #NN
+  Blocked (waiting on open issues in this batch):
+  #NN     #PP       ...  — blocked by: #NN, #NN
   ...
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   Each agent will: implement the issue → cargo check/clippy/test
-  → update CLAUDE.md + Obsidian docs → raise PR.
+  → update CLAUDE.md + Obsidian docs → raise PR that closes the sub-issue.
 
   Proceed? (yes / no / adjust)
-    yes    — launch all N agents now
-    no     — abort, nothing will be run
-    adjust — tell me which issues to include or exclude
-
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-Wait for the user's response.
+Wait for the user's response. Do not proceed automatically.
 
-- If **"yes"** — proceed to Phase 3.
-- If **"no"** — print "Aborted. No agents were spawned." and exit.
-- If **"adjust"** — parse the user's intent, re-display summary, ask again.
-
-Do not move on until you have received a clear "yes" equivalent.
+- **yes** → Phase 3
+- **no** → "Aborted." exit
+- **adjust** → parse intent, re-display
 
 ---
 
 ## Phase 3 — Spawn parallel implementation agents
 
-One agent per ready issue. All agents run concurrently. Each agent runs in its
-own git worktree for isolation.
-
-For each ready issue, spawn an Agent with `isolation: "worktree"` and
-`run_in_background: true`. The agent prompt for each issue should be:
+For each ready work unit, spawn an Agent with `isolation: "worktree"` and
+`run_in_background: true`. Agent prompt template:
 
 ```
 You are a Randlebrot implementation agent. Your task is to implement issue #<NUMBER>
-and raise a pull request.
+and raise a pull request that closes it.
 
 Issue title: <title>
-Issue wave: <wave>
-Crates to touch: <crates>
+Parent issue: #<parent_number> (or "stand-alone")
+Crates to touch: <from body>
 
 Issue description:
 <body>
@@ -353,105 +338,103 @@ Issue description:
 
 ## Step 0 — Read context
 
-Read CLAUDE.md in full — it is the authoritative spec for the project. Pay
-special attention to:
-- The Workspace Crate Map and Dependency Graph
-- The Architecture section (chunk pipeline, noise hierarchy, three-domain split)
-- World Rules (never violate these)
+Read CLAUDE.md in full — it is the authoritative spec. Pay special attention to:
+- Workspace Crate Map and Dependency Graph
+- Architecture (chunk pipeline, noise hierarchy, three-domain split)
+- World Rules (never violate)
 - Conventions
 
-Read the "Documentation Updates" section of the issue body — you MUST update
-the specified files as part of your implementation.
+If this issue has a parent (a feature tracker), read the parent's body too for
+broader context:
+```bash
+gh issue view <parent_number> --json title,body
+```
 
-## Step 1 — Create the branch
+Read the "Documentation Updates" section of this issue — you MUST update the
+specified files.
+
+## Step 1 — Create branch
 
 ```bash
 git checkout -b issue-<NUMBER>/<short-slug>
 ```
 
-## Step 2 — Implement the issue
+## Step 2 — Implement
 
-Follow the Randlebrot conventions from CLAUDE.md:
-- Bevy systems go in `systems/` submodules within each crate
-- Plugin struct and registration in each crate's `lib.rs`
-- Use `SystemSet` for ordering
-- All authored data serializes as RON
+Follow Randlebrot conventions from CLAUDE.md:
+- Bevy systems in `systems/` submodules within each crate
+- Plugin struct + registration in each crate's `lib.rs`
+- `SystemSet` for ordering
+- RON for authored data
 - No ECS queries wider than 3 components without a documented reason
-- Prefer `&impl Trait` over `Box<dyn Trait>`
-- Noise-only code should not depend on Bevy rendering
-- Pin to Bevy 0.18 — use `workspace = true` for bevy sub-crate deps
+- `&impl Trait` over `Box<dyn Trait>`
+- Noise-only code does not depend on Bevy rendering
+- Bevy 0.18 pinned, `workspace = true` for bevy sub-crates
 
-If creating a new crate:
-- Add to workspace members in root `Cargo.toml`
-- Follow the existing crate structure pattern
-- Add to CLAUDE.md crate map and dependency graph
+If creating a new crate: add to workspace members, update CLAUDE.md crate map +
+dependency graph.
 
 ## Step 3 — Update documentation
 
-Every issue has a "Documentation Updates" section listing which files to update.
-These are mandatory — the PR will not be accepted without them:
-
+Every issue lists which docs to update. Mandatory:
 - **CLAUDE.md** at `/Users/roryhedderman/Documents/IdeaProjects/Rust/randlebrot/CLAUDE.md`
-- **Obsidian vault** at `/Users/roryhedderman/Documents/mop-jones-brain/Notes/Margin's Grip - Randlebrot Engine.md`
+- **Obsidian** at `/Users/roryhedderman/Documents/mop-jones-brain/Notes/Margin's Grip - Randlebrot Engine.md`
 
-Read the current state of each file, find the relevant section, and update it.
+If the sandbox blocks writes to Obsidian (file outside the worktree), note it
+in the PR body — the orchestrator will handle it separately. Do NOT fail the PR.
 
 ## Step 4 — Tests
 
-Add tests as specified in the acceptance criteria. Run:
-
 ```bash
 cargo check 2>&1
-cargo clippy -- -D warnings 2>&1
-cargo test 2>&1
+cargo clippy --bin randlebrot -- -D warnings 2>&1
+cargo test --workspace 2>&1
 ```
 
-Fix every error and warning before continuing. For tests that require
-generated data or a running GPU, mark them `#[ignore]` with a reason.
+Fix every error and warning. For tests requiring a display or real artifacts,
+mark `#[ignore]` with a reason.
 
 ## Step 5 — Commit and push
 
 ```bash
 git add -A
-git commit -m "feat(<crate-slug>): <title>
+git commit -m "feat(<slug>): <title>
 
 Closes #<NUMBER>."
-
 git push origin issue-<NUMBER>/<short-slug>
 ```
 
 ## Step 6 — Raise the PR
 
-Fetch the issue's labels and copy them to the PR:
-
+Copy labels from the issue (NOT wave labels — those are retired):
 ```bash
-gh issue view <NUMBER> --json labels --jq '.labels[].name'
+gh issue view <NUMBER> --json labels --jq '.labels[].name' | grep -v '^wave-'
 ```
 
 ```bash
 gh pr create \
   --title "feat: <title>" \
-  --label "<labels from issue>" \
+  --label "<labels>" \
   --body "$(cat <<'PREOF'
 ## Summary
-
-Implements — closes #<NUMBER>.
+Closes #<NUMBER>.
 
 ## What's included
+- ...
+- Tests: ...
+- Doc updates: ...
 
-- <list what was implemented>
-- Tests: <describe test coverage>
-- Doc updates: <list which docs were updated>
-
-## Acceptance Criteria from Issue
-
-<paste the acceptance criteria checkboxes>
+## Acceptance Criteria
+<paste from issue>
 
 🤖 Generated with [Claude Code](https://claude.ai/claude-code)
 PREOF
 )" \
   --base main
 ```
+
+When the PR closes the sub-issue, GitHub automatically updates the parent's
+`sub_issues_summary.completed` counter.
 
 Print: "Issue #<NUMBER> done — PR raised."
 ```
@@ -462,69 +445,64 @@ After all agents complete, proceed to Phase 4.
 
 ## Phase 4 — Collect results
 
-After all background agents have completed, load `/tmp/rb_issues_all_waves.json`
-for the full wave graph, collect agent results, and present a summary:
-
 ```
 ══════════════════════════════════════════════════════════════
   WORK-ISSUES SUMMARY
 ══════════════════════════════════════════════════════════════
 
   PRs raised:
-    #NN  <title>  → PR #<pr-number> <url>
-    #NN  <title>  → PR #<pr-number> <url>
+    #NN  <title>  → PR #<num> <url>  (sub-issue of #<parent>)
+    #NN  <title>  → PR #<num> <url>  (stand-alone)
 
   Failed:
     #NN  <title>  — <reason>
 
+  Parent progress:
+    #<parent> "<title>"  →  N/M sub-issues complete
+
   Next wave — unblocked once these PRs merge (re-run /work-issues):
-    #NN  <title>  [wave N]  — depends on: #NN
-    #NN  <title>  [wave N]  — depends on: #NN → #NN (chain)
+    #NN  <title>  — was blocked by #NN
 
 ══════════════════════════════════════════════════════════════
 ```
 
-For any failed agents, print the last few lines of their output for diagnosis.
+For failed agents, print the last few lines of their output for diagnosis.
 
 ---
 
-## Dependency resolution rules for this Randlebrot workspace
+## Rules for all agents
 
-### Crate dependency graph (from CLAUDE.md)
-
-```
-rb_core          → (none, only bevy_ecs + bevy_math)
-rb_noise         → rb_core, noise crate
-rb_world         → rb_core, rb_noise
-rb_tilemap       → rb_core, rb_world
-rb_entity_spawn  → rb_core, rb_world, rb_tilemap
-rb_editor        → rb_core, rb_noise, rb_world, rb_tilemap, bevy_egui
-rb_player        → rb_core, rb_tilemap
-rb_persistence   → rb_core, rb_world, rb_tilemap
-rb_artifacts     → rb_core, rb_noise, rb_world
-```
-
-### Wave structure for the CLI feature
-
-| Wave | Issues | Can start when |
-|------|--------|---------------|
-| 1 | CLI skeleton, Serde derives | Immediately — no cross-deps |
-| 2 | rb_artifacts crate | After serde derives merged |
-| 3 | generate layers, view list/detail | After rb_artifacts + CLI skeleton merged |
-| 4 | Layer viewer, generate level | After generate layers merged |
-| 5 | launch command, GUI migration | After generate level / rb_artifacts merged |
-
-### Rules
-
-- **Read CLAUDE.md fully.** It is the authoritative spec.
-- **One issue per agent.** Never implement more than what the issue asks for.
-- **Documentation updates are mandatory.** Every issue specifies which CLAUDE.md
-  sections and Obsidian files to update.
+- **Read CLAUDE.md fully.** Authoritative spec.
+- **One issue per agent.** Never implement more than what the issue asks.
+- **Documentation updates are mandatory.** Every issue specifies which files.
 - **`cargo check` must pass** before raising the PR.
-- **Raise the PR even if some acceptance criteria are incomplete** — document
-  what's missing rather than blocking the PR indefinitely.
-- **If an issue is ambiguous**, implement the most conservative interpretation
+- **If the issue is ambiguous**, implement the most conservative interpretation
   and document the ambiguity in the PR description.
-- **Never violate World Rules** from CLAUDE.md (tidally locked physics, no green,
-  no fossil fuels, DeterSim determinism, etc.).
+- **Never violate World Rules** from CLAUDE.md.
 - **Always use `--release`** for any cargo run commands that generate world data.
+- **Never create `wave-N` labels** — waves are derived from dependencies, not tagged.
+- **When the PR closes a sub-issue**, GitHub auto-updates the parent's progress.
+- **If the sandbox blocks Obsidian writes**, note it in the PR body and move on —
+  don't fail the PR over an external file.
+
+---
+
+## Reference: GitHub sub-issue + dependency APIs (verified)
+
+**Sub-issues** (parent ↔ child hierarchy):
+- `GET  /repos/{owner}/{repo}/issues/{N}/sub_issues` — list children
+- `POST /repos/{owner}/{repo}/issues/{N}/sub_issues` — add child (body: `sub_issue_id=<int>`, `replace_parent=<bool>`)
+- `DELETE /repos/{owner}/{repo}/issues/{N}/sub_issue` — unlink
+- Child exposes `parent_issue_url` for upward traversal
+- Parent exposes `sub_issues_summary: {total, completed, percent_completed}`
+
+**Dependencies** (blocks/blocked-by):
+- `GET /repos/{owner}/{repo}/issues/{N}/dependencies/blocked_by` — list blockers
+- `GET /repos/{owner}/{repo}/issues/{N}/dependencies/blocking` — list what this blocks
+- `POST /repos/{owner}/{repo}/issues/{N}/dependencies/blocked_by` — add blocker (body: `issue_id=<int>`)
+- `DELETE /repos/{owner}/{repo}/issues/{N}/dependencies/blocked_by/{issue_id}` — remove (use the integer id, not the issue number)
+- Summary on any issue: `issue_dependencies_summary: {blocked_by, total_blocked_by, blocking, total_blocking}`
+
+**Quirks**:
+- `sub_issue_id` and `issue_id` are the integer `id` field, NOT the issue number. Use `gh api -F` (typed) not `-f` (string).
+- DELETE on dependencies takes the integer id in the URL path.
