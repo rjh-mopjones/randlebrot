@@ -151,6 +151,252 @@ fn parse_coordinate(s: &str) -> Result<(i32, i32), String> {
     Ok((x, y))
 }
 
+// ─── View Commands (headless, stdout only) ─────────────────────────────────
+
+/// Recursively sum the size (in bytes) of every file under `path`.
+/// Returns 0 on any I/O error so listing never fails for a single broken entry.
+fn dir_size_bytes(path: &std::path::Path) -> u64 {
+    let mut total: u64 = 0;
+    let entries = match std::fs::read_dir(path) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        match entry.file_type() {
+            Ok(ft) if ft.is_dir() => total += dir_size_bytes(&entry_path),
+            Ok(ft) if ft.is_file() => {
+                if let Ok(meta) = entry.metadata() {
+                    total += meta.len();
+                }
+            }
+            _ => {}
+        }
+    }
+    total
+}
+
+/// Format a byte count as a human-readable string (B / KB / MB / GB).
+/// GB and MB use one decimal place; KB and B use integer precision.
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{} KB", bytes / KB)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+/// Convert an ISO 8601 timestamp like `2026-04-04T14:23:01Z` to
+/// a human-friendly `2026-04-04 14:23:01`. Falls back to the original
+/// string on parse failures so no information is lost.
+fn format_timestamp(iso: &str) -> String {
+    let trimmed = iso.trim_end_matches('Z');
+    // Replace the T separator between date and time. Also strip any fractional
+    // seconds component ("2026-04-04T14:23:01.123") for compactness.
+    let without_fraction = match trimmed.find('.') {
+        Some(idx) => &trimmed[..idx],
+        None => trimmed,
+    };
+    without_fraction.replacen('T', " ", 1)
+}
+
+/// Pad a string to exactly `width` characters with trailing spaces.
+/// If the string is already at or over `width`, no padding is added
+/// (callers pass `max_cell_length + 2` so this is effectively unreachable,
+/// but `saturating_sub` keeps it safe regardless).
+fn pad(s: &str, width: usize) -> String {
+    format!("{s}{}", " ".repeat(width.saturating_sub(s.len())))
+}
+
+/// `randlebrot view layers` — print a formatted table of all layer artifacts.
+fn view_layers_list() -> Result<(), String> {
+    let store = rb_artifacts::ArtifactStore::new().map_err(|e| e.to_string())?;
+    let mut entries = store.list_layers().map_err(|e| e.to_string())?;
+
+    if entries.is_empty() {
+        println!("No layers generated yet. Run: randlebrot generate layers <seed> <tag>");
+        return Ok(());
+    }
+
+    // Sort newest first. ISO 8601 is lexicographically chronological.
+    entries.sort_by(|a, b| b.1.created.cmp(&a.1.created));
+
+    // Gather rows: (tag, seed, civ_seed, created, layers, size)
+    let rows: Vec<[String; 6]> = entries
+        .iter()
+        .map(|(tag, m)| {
+            let dir = store.base_path().join("layers").join(tag);
+            let size = format_bytes(dir_size_bytes(&dir));
+            [
+                tag.clone(),
+                m.seed.to_string(),
+                m.civ_seed.to_string(),
+                format_timestamp(&m.created),
+                m.layer_images.len().to_string(),
+                size,
+            ]
+        })
+        .collect();
+
+    let headers = ["TAG", "SEED", "CIV_SEED", "CREATED", "LAYERS", "SIZE"];
+    let mut widths = headers.map(|h| h.len());
+    for row in &rows {
+        for (i, cell) in row.iter().enumerate() {
+            if cell.len() > widths[i] {
+                widths[i] = cell.len();
+            }
+        }
+    }
+
+    // Header row
+    let mut header_line = String::new();
+    for (i, h) in headers.iter().enumerate() {
+        header_line.push_str(&pad(h, widths[i] + 2));
+    }
+    println!("{}", header_line.trim_end());
+
+    // Data rows
+    for row in &rows {
+        let mut line = String::new();
+        for (i, cell) in row.iter().enumerate() {
+            line.push_str(&pad(cell, widths[i] + 2));
+        }
+        println!("{}", line.trim_end());
+    }
+
+    Ok(())
+}
+
+/// `randlebrot view levels` — print a formatted table of all level artifacts.
+fn view_levels_list() -> Result<(), String> {
+    let store = rb_artifacts::ArtifactStore::new().map_err(|e| e.to_string())?;
+    let mut entries = store.list_levels().map_err(|e| e.to_string())?;
+
+    if entries.is_empty() {
+        println!(
+            "No levels generated yet. Run: randlebrot generate level <layers-tag|--seed N> <x,y> <tag>"
+        );
+        return Ok(());
+    }
+
+    // Sort newest first.
+    entries.sort_by(|a, b| b.1.created.cmp(&a.1.created));
+
+    let rows: Vec<[String; 4]> = entries
+        .iter()
+        .map(|(tag, m)| {
+            let source = match &m.parent_layers_tag {
+                Some(parent) => parent.clone(),
+                None => format!("--seed {}", m.seed),
+            };
+            let coord = format!("({},{})", m.micro_coord.0, m.micro_coord.1);
+            [
+                tag.clone(),
+                source,
+                coord,
+                format_timestamp(&m.created),
+            ]
+        })
+        .collect();
+
+    let headers = ["TAG", "SOURCE", "COORD", "CREATED"];
+    let mut widths = headers.map(|h| h.len());
+    for row in &rows {
+        for (i, cell) in row.iter().enumerate() {
+            if cell.len() > widths[i] {
+                widths[i] = cell.len();
+            }
+        }
+    }
+
+    let mut header_line = String::new();
+    for (i, h) in headers.iter().enumerate() {
+        header_line.push_str(&pad(h, widths[i] + 2));
+    }
+    println!("{}", header_line.trim_end());
+
+    for row in &rows {
+        let mut line = String::new();
+        for (i, cell) in row.iter().enumerate() {
+            line.push_str(&pad(cell, widths[i] + 2));
+        }
+        println!("{}", line.trim_end());
+    }
+
+    Ok(())
+}
+
+/// `randlebrot view levels <tag>` — print detailed metadata for one level.
+fn view_level_detail(tag: &str) -> Result<(), String> {
+    let store = rb_artifacts::ArtifactStore::new().map_err(|e| e.to_string())?;
+
+    // `rb_artifacts::ArtifactStore` currently only exposes a full `load_level`
+    // (which deserializes the micro BiomeMap) and no `load_level_manifest`
+    // helper (`load_layer_manifest` exists, but only for layer artifacts).
+    // Listing all levels and filtering by tag lets us fetch just the manifest
+    // cheaply without adding a new public method to rb_artifacts (keeps this
+    // PR scoped to src/main.rs). A future `load_level_manifest` could make
+    // this a single call.
+    let entries = store.list_levels().map_err(|e| e.to_string())?;
+    let manifest = entries
+        .iter()
+        .find(|(t, _)| t == tag)
+        .map(|(_, m)| m.clone())
+        .ok_or_else(|| {
+            if entries.is_empty() {
+                format!(
+                    "level artifact '{tag}' not found (no levels exist — run \
+                     `randlebrot generate level <layers-tag|--seed N> <x,y> <tag>`)"
+                )
+            } else {
+                let available: Vec<&str> =
+                    entries.iter().map(|(t, _)| t.as_str()).collect();
+                format!(
+                    "level artifact '{tag}' not found. Available: {}",
+                    available.join(", ")
+                )
+            }
+        })?;
+
+    let dir = store.base_path().join("levels").join(tag);
+    let size = format_bytes(dir_size_bytes(&dir));
+
+    let source = match &manifest.parent_layers_tag {
+        Some(parent) => format!(
+            "{parent} (seed={}, civ_seed={})",
+            manifest.seed, manifest.civ_seed
+        ),
+        None => format!("--seed {} (civ_seed={})", manifest.seed, manifest.civ_seed),
+    };
+
+    // NOTE: `LevelManifest.micro_coord` semantics are not yet locked down —
+    // `generate level` is stubbed (see issue #7 / PR #19). This code assumes
+    // `micro_coord` is a global world-tile coordinate so that
+    // `mx * MICRO_WORLD_SIZE` yields the absolute world position. If a future
+    // `generate level` implementation populates it as a chunk coord (multiply
+    // by CHUNK_SIZE=64.0) or a local index within a meso tile (add meso
+    // origin), update this conversion to match.
+    let (mx, my) = manifest.micro_coord;
+    let world_x = mx as f64 * MICRO_WORLD_SIZE;
+    let world_y = my as f64 * MICRO_WORLD_SIZE;
+
+    println!("Tag:            {tag}");
+    println!("Source:         {source}");
+    println!("Micro Coord:    ({mx}, {my})");
+    println!("World Position: ({world_x:.1}, {world_y:.1})");
+    println!("Created:        {}", format_timestamp(&manifest.created));
+    println!("Size:           {size}");
+
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -201,16 +447,26 @@ fn main() {
 
         Some(Command::View { target }) => match target {
             ViewTarget::Layers { tag: None } => {
-                println!("view layers: listing all layer artifacts — not implemented yet");
+                if let Err(e) = view_layers_list() {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
             }
             ViewTarget::Layers { tag: Some(tag) } => {
+                // Interactive viewer for a specific layers artifact is #9's scope.
                 println!("view layers: tag={tag} — not implemented yet");
             }
             ViewTarget::Levels { tag: None } => {
-                println!("view levels: listing all level artifacts — not implemented yet");
+                if let Err(e) = view_levels_list() {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
             }
             ViewTarget::Levels { tag: Some(tag) } => {
-                println!("view levels: tag={tag} — not implemented yet");
+                if let Err(e) = view_level_detail(&tag) {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
             }
         },
 
