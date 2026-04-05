@@ -168,16 +168,15 @@ pub fn run(
     layer_bar.finish_with_message(format!("[4/6] Stitched {} layer PNGs", layer_image_names.len()));
 
     // ─── 5. Build MesoTerrainView and run LifeGen ───────────────────────────
-    let stage = stage_spinner("[5/6] Building MesoTerrainView (8192x4096)");
+    let stage = stage_spinner(
+        "[5/6] LifeGen (building 8192x4096 MesoTerrainView + civilisation pipeline)",
+    );
     let tile_biome_maps: HashMap<(i32, i32), Arc<BiomeMap>> = tiles
         .into_iter()
         .map(|(coord, bm)| (coord, Arc::new(bm)))
         .collect();
     let terrain_view =
         MesoTerrainView::from_tile_map(&tile_biome_maps, TILES_X, TILES_Y, TILE_MAP_SIZE);
-    stage.finish_with_message("[5/6] MesoTerrainView ready");
-
-    let stage = stage_spinner("[5/6] Running LifeGen (civilisation pipeline)");
     let lifegen = rb_world::lifegen::generate(&terrain_view, civ_seed);
     stage.finish_with_message(format!(
         "[5/6] LifeGen done: {} provinces, {} factions, {} settlements, {} roads",
@@ -252,15 +251,15 @@ pub fn run(
 /// stays under ~30 MB. This matches the output of
 /// `crates/rb_noise/examples/save_debug_layers.rs` and the in-app
 /// `save_stitched_debug_layers` helper.
+///
+/// Layers are stitched in parallel via rayon — each worker owns its own
+/// 128 MB scratch buffer. Peak memory scales with thread count rather than
+/// being sequential (~128 MB × threads instead of sequential 128 MB × 20).
 fn stitch_layer_images(
     tiles: &[((i32, i32), BiomeMap)],
     norm_hints: &NormalizationHints,
     progress: &ProgressBar,
 ) -> (HashMap<String, (u32, u32, Vec<u8>)>, Vec<String>) {
-    let full_w = (TILES_X * TILE_MAP_SIZE) as u32;
-    let full_h = (TILES_Y * TILE_MAP_SIZE) as u32;
-    let tile_px = TILE_MAP_SIZE as u32;
-
     // Index tiles by (cx, cy) for O(1) lookup during stitching.
     let mut tile_grid: Vec<Vec<Option<&BiomeMap>>> = vec![vec![None; TILES_X]; TILES_Y];
     for (coord, bm) in tiles {
@@ -271,68 +270,95 @@ fn stitch_layer_images(
         }
     }
 
-    let mut images: HashMap<String, (u32, u32, Vec<u8>)> = HashMap::new();
-    let mut names: Vec<String> = Vec::with_capacity(NoiseLayer::all().len());
+    // Stitch each layer in parallel. Each worker owns its own full-resolution
+    // scratch buffer, so peak memory is ~128 MB * rayon_thread_count instead
+    // of the sequential 128 MB allocated 20 times.
+    let results: Vec<(String, (u32, u32, Vec<u8>))> = NoiseLayer::all()
+        .par_iter()
+        .map(|layer| {
+            let file_name = layer_file_name(*layer);
+            let (half_w, half_h, small) = stitch_single_layer(*layer, &tile_grid, norm_hints);
+            progress.inc(1);
+            (file_name, (half_w, half_h, small))
+        })
+        .collect();
 
-    for layer in NoiseLayer::all() {
-        let file_name = layer_file_name(*layer);
+    // Rebuild the output map + ordered name list in `NoiseLayer::all()` order
+    // so the manifest's `layer_images` field matches the canonical noise layer
+    // ordering — makes diffs between runs easier to scan.
+    let mut images: HashMap<String, (u32, u32, Vec<u8>)> =
+        HashMap::with_capacity(results.len());
+    let mut names: Vec<String> = Vec::with_capacity(results.len());
+    for (name, data) in results {
+        names.push(name.clone());
+        images.insert(name, data);
+    }
+    (images, names)
+}
 
-        // Full-resolution buffer (tight RGBA row-major).
-        let stride_px = full_w as usize;
-        let mut full: Vec<u8> = vec![0u8; (full_w as usize) * (full_h as usize) * 4];
+/// Stitch a single noise layer into an 8192x4096 full-resolution buffer,
+/// then downscale 2x with a box filter to 4096x2048.
+///
+/// Returns `(half_w, half_h, rgba_bytes)` for the downscaled image.
+fn stitch_single_layer(
+    layer: NoiseLayer,
+    tile_grid: &[Vec<Option<&BiomeMap>>],
+    norm_hints: &NormalizationHints,
+) -> (u32, u32, Vec<u8>) {
+    let full_w = (TILES_X * TILE_MAP_SIZE) as u32;
+    let full_h = (TILES_Y * TILE_MAP_SIZE) as u32;
+    let tile_px = TILE_MAP_SIZE as u32;
 
-        for cy in 0..TILES_Y {
-            for cx in 0..TILES_X {
-                let Some(bm) = tile_grid[cy][cx] else { continue };
-                let rgba = bm.to_layer_image_with_hints(*layer, Some(norm_hints));
-                if rgba.len() != (tile_px as usize) * (tile_px as usize) * 4 {
-                    // Skip malformed tiles rather than panicking — this matches
-                    // the behaviour of `save_stitched_debug_layers` in main.rs.
-                    continue;
-                }
-                let ox = cx * TILE_MAP_SIZE;
-                let oy = cy * TILE_MAP_SIZE;
-                for py in 0..TILE_MAP_SIZE {
-                    let src_row = py * TILE_MAP_SIZE * 4;
-                    let dst_row = ((oy + py) * stride_px + ox) * 4;
-                    let row_bytes = TILE_MAP_SIZE * 4;
-                    full[dst_row..dst_row + row_bytes]
-                        .copy_from_slice(&rgba[src_row..src_row + row_bytes]);
-                }
+    // Full-resolution buffer (tight RGBA row-major).
+    let stride_px = full_w as usize;
+    let mut full: Vec<u8> = vec![0u8; (full_w as usize) * (full_h as usize) * 4];
+
+    for cy in 0..TILES_Y {
+        for cx in 0..TILES_X {
+            let Some(bm) = tile_grid[cy][cx] else { continue };
+            let rgba = bm.to_layer_image_with_hints(layer, Some(norm_hints));
+            if rgba.len() != (tile_px as usize) * (tile_px as usize) * 4 {
+                // Skip malformed tiles rather than panicking — this matches
+                // the behaviour of `save_stitched_debug_layers` in main.rs.
+                continue;
+            }
+            let ox = cx * TILE_MAP_SIZE;
+            let oy = cy * TILE_MAP_SIZE;
+            for py in 0..TILE_MAP_SIZE {
+                let src_row = py * TILE_MAP_SIZE * 4;
+                let dst_row = ((oy + py) * stride_px + ox) * 4;
+                let row_bytes = TILE_MAP_SIZE * 4;
+                full[dst_row..dst_row + row_bytes]
+                    .copy_from_slice(&rgba[src_row..src_row + row_bytes]);
             }
         }
-
-        // Downscale 2x (box filter) to keep PNGs under ~30 MB.
-        let half_w = full_w / 2;
-        let half_h = full_h / 2;
-        let mut small: Vec<u8> = vec![0u8; (half_w as usize) * (half_h as usize) * 4];
-        for sy in 0..half_h as usize {
-            for sx in 0..half_w as usize {
-                let x0 = sx * 2;
-                let y0 = sy * 2;
-                let idx = |x: usize, y: usize| (y * stride_px + x) * 4;
-                let p0 = idx(x0, y0);
-                let p1 = idx(x0 + 1, y0);
-                let p2 = idx(x0, y0 + 1);
-                let p3 = idx(x0 + 1, y0 + 1);
-                let avg = |a: u8, b: u8, c: u8, d: u8| -> u8 {
-                    ((a as u16 + b as u16 + c as u16 + d as u16) / 4) as u8
-                };
-                let dst = (sy * half_w as usize + sx) * 4;
-                small[dst] = avg(full[p0], full[p1], full[p2], full[p3]);
-                small[dst + 1] = avg(full[p0 + 1], full[p1 + 1], full[p2 + 1], full[p3 + 1]);
-                small[dst + 2] = avg(full[p0 + 2], full[p1 + 2], full[p2 + 2], full[p3 + 2]);
-                small[dst + 3] = avg(full[p0 + 3], full[p1 + 3], full[p2 + 3], full[p3 + 3]);
-            }
-        }
-
-        images.insert(file_name.clone(), (half_w, half_h, small));
-        names.push(file_name);
-        progress.inc(1);
     }
 
-    names.sort();
-    (images, names)
+    // Downscale 2x (box filter) to keep PNGs under ~30 MB.
+    let half_w = full_w / 2;
+    let half_h = full_h / 2;
+    let mut small: Vec<u8> = vec![0u8; (half_w as usize) * (half_h as usize) * 4];
+    for sy in 0..half_h as usize {
+        for sx in 0..half_w as usize {
+            let x0 = sx * 2;
+            let y0 = sy * 2;
+            let idx = |x: usize, y: usize| (y * stride_px + x) * 4;
+            let p0 = idx(x0, y0);
+            let p1 = idx(x0 + 1, y0);
+            let p2 = idx(x0, y0 + 1);
+            let p3 = idx(x0 + 1, y0 + 1);
+            let avg = |a: u8, b: u8, c: u8, d: u8| -> u8 {
+                ((a as u16 + b as u16 + c as u16 + d as u16) / 4) as u8
+            };
+            let dst = (sy * half_w as usize + sx) * 4;
+            small[dst] = avg(full[p0], full[p1], full[p2], full[p3]);
+            small[dst + 1] = avg(full[p0 + 1], full[p1 + 1], full[p2 + 1], full[p3 + 1]);
+            small[dst + 2] = avg(full[p0 + 2], full[p1 + 2], full[p2 + 2], full[p3 + 2]);
+            small[dst + 3] = avg(full[p0 + 3], full[p1 + 3], full[p2 + 3], full[p3 + 3]);
+        }
+    }
+
+    (half_w, half_h, small)
 }
 
 /// Stable filesystem-friendly filename for a noise layer.

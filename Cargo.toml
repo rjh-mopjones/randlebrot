@@ -50,7 +50,7 @@ clap.workspace = true
 image.workspace = true
 rayon = "1.10"
 indicatif = "0.17"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = "0.4"
 bincode.workspace = true
 ron.workspace = true
 rb_core.workspace = true
