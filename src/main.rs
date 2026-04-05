@@ -175,6 +175,7 @@ fn dir_size_bytes(path: &std::path::Path) -> u64 {
 }
 
 /// Format a byte count as a human-readable string (B / KB / MB / GB).
+/// GB and MB use one decimal place; KB and B use integer precision.
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
@@ -182,7 +183,7 @@ fn format_bytes(bytes: u64) -> String {
     if bytes >= GB {
         format!("{:.1} GB", bytes as f64 / GB as f64)
     } else if bytes >= MB {
-        format!("{} MB", bytes / MB)
+        format!("{:.1} MB", bytes as f64 / MB as f64)
     } else if bytes >= KB {
         format!("{} KB", bytes / KB)
     } else {
@@ -204,15 +205,12 @@ fn format_timestamp(iso: &str) -> String {
     without_fraction.replacen('T', " ", 1)
 }
 
-/// Pad a string to exactly `width` characters with trailing spaces. If the
-/// string is already at or over the width, a single trailing space is added
-/// so adjacent columns never collide.
+/// Pad a string to exactly `width` characters with trailing spaces.
+/// If the string is already at or over `width`, no padding is added
+/// (callers pass `max_cell_length + 2` so this is effectively unreachable,
+/// but `saturating_sub` keeps it safe regardless).
 fn pad(s: &str, width: usize) -> String {
-    if s.len() >= width {
-        format!("{s} ")
-    } else {
-        format!("{s}{}", " ".repeat(width - s.len()))
-    }
+    format!("{s}{}", " ".repeat(width.saturating_sub(s.len())))
 }
 
 /// `randlebrot view layers` — print a formatted table of all layer artifacts.
@@ -338,15 +336,32 @@ fn view_level_detail(tag: &str) -> Result<(), String> {
     let store = rb_artifacts::ArtifactStore::new().map_err(|e| e.to_string())?;
 
     // `rb_artifacts::ArtifactStore` currently only exposes a full `load_level`
-    // (which deserializes the micro BiomeMap). Listing all levels and filtering
-    // by tag lets us fetch just the manifest cheaply without adding a new
-    // public method to rb_artifacts (keeps this PR scoped to src/main.rs).
+    // (which deserializes the micro BiomeMap) and no `load_level_manifest`
+    // helper (`load_layer_manifest` exists, but only for layer artifacts).
+    // Listing all levels and filtering by tag lets us fetch just the manifest
+    // cheaply without adding a new public method to rb_artifacts (keeps this
+    // PR scoped to src/main.rs). A future `load_level_manifest` could make
+    // this a single call.
     let entries = store.list_levels().map_err(|e| e.to_string())?;
     let manifest = entries
-        .into_iter()
+        .iter()
         .find(|(t, _)| t == tag)
-        .map(|(_, m)| m)
-        .ok_or_else(|| format!("level artifact '{tag}' not found"))?;
+        .map(|(_, m)| m.clone())
+        .ok_or_else(|| {
+            if entries.is_empty() {
+                format!(
+                    "level artifact '{tag}' not found (no levels exist — run \
+                     `randlebrot generate level <layers-tag|--seed N> <x,y> <tag>`)"
+                )
+            } else {
+                let available: Vec<&str> =
+                    entries.iter().map(|(t, _)| t.as_str()).collect();
+                format!(
+                    "level artifact '{tag}' not found. Available: {}",
+                    available.join(", ")
+                )
+            }
+        })?;
 
     let dir = store.base_path().join("levels").join(tag);
     let size = format_bytes(dir_size_bytes(&dir));
@@ -359,6 +374,13 @@ fn view_level_detail(tag: &str) -> Result<(), String> {
         None => format!("--seed {} (civ_seed={})", manifest.seed, manifest.civ_seed),
     };
 
+    // NOTE: `LevelManifest.micro_coord` semantics are not yet locked down —
+    // `generate level` is stubbed (see issue #7 / PR #19). This code assumes
+    // `micro_coord` is a global world-tile coordinate so that
+    // `mx * MICRO_WORLD_SIZE` yields the absolute world position. If a future
+    // `generate level` implementation populates it as a chunk coord (multiply
+    // by CHUNK_SIZE=64.0) or a local index within a meso tile (add meso
+    // origin), update this conversion to match.
     let (mx, my) = manifest.micro_coord;
     let world_x = mx as f64 * MICRO_WORLD_SIZE;
     let world_y = my as f64 * MICRO_WORLD_SIZE;
