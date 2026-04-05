@@ -101,13 +101,13 @@ cargo run                                        # editor mode (default, same as
 cargo run -- gui                                 # explicit editor launch
 cargo run -- gui my-layers-tag                   # editor, opening an existing layer artifact
 
-# ─── Headless generation ───
-cargo run -- generate layers 42 my-tag                        # generate layers for seed 42
-cargo run -- generate layers 42 my-tag --civ-seed 99          # separate civ seed
-cargo run -- generate layers 42 my-tag --backend cpu          # force CPU backend
-cargo run -- generate layers 42 my-tag --force                # overwrite existing tag
-cargo run -- generate level my-layers-tag 4,3 level-tag       # generate level from layers artifact
-cargo run -- generate level --seed 42 4,3 level-tag           # generate level from raw seed
+# ─── Headless generation (primary workflow — no Bevy window) ───
+cargo run --release -- generate layers 42 my-tag                        # generate layers for seed 42
+cargo run --release -- generate layers 42 my-tag --civ-seed 99          # separate civ seed
+cargo run --release -- generate layers 42 my-tag --backend cpu          # force CPU backend (default: gpu)
+cargo run --release -- generate layers 42 my-tag --force                # overwrite existing tag
+cargo run --release -- generate level my-layers-tag 4,3 level-tag       # generate level from layers artifact
+cargo run --release -- generate level --seed 42 4,3 level-tag           # generate level from raw seed
 
 # ─── View artifacts ───
 cargo run -- view layers                         # list all layer artifacts
@@ -141,13 +141,25 @@ Headless subcommands (`generate`, `view`) never initialize Bevy or create a wind
 
 ### Debug Layer Workflow
 
-**Always use `save_debug_layers` to verify terrain changes.** After modifying noise, erosion, or biome code:
+**Use `generate layers` as the primary workflow to verify terrain changes.** After modifying noise, erosion, or biome code:
 
-1. `cargo run --release -p rb_noise --example save_debug_layers`
-2. Inspect the PNGs in `debug_layers/` (biome.png, derived/Heightmap.png, etc.)
+1. `cargo run --release -- generate layers <seed> <tag>` (e.g. `42 debug`)
+2. Inspect the PNGs in `~/.randlebrot/layers/<tag>/images/` (biome.png, heightmap.png, etc.)
 3. Iterate until the output looks correct
 
-The debug layers are stitched from meso tiles (128x64 grid, 32px each → 4096x2048) which sample the macro eroded heightmap. This IS the macro level of detail. Always use `--release` — debug builds are unacceptably slow.
+`generate layers` runs the full headless pipeline — macro BiomeMap (with erosion and rivers), 128 rayon-parallel macro tiles, LifeGen — and persists everything via `rb_artifacts`:
+
+- `~/.randlebrot/layers/<tag>/manifest.ron` — seed, civ_seed, timestamp, dimensions, backend
+- `~/.randlebrot/layers/<tag>/macro_biome.bin` — bincode BiomeMap
+- `~/.randlebrot/layers/<tag>/river_network.bin` — bincode RiverNetwork
+- `~/.randlebrot/layers/<tag>/lifegen.bin` — bincode LifeGenData
+- `~/.randlebrot/layers/<tag>/images/*.png` — ~20 layer PNGs (4096x2048, downscaled 2x from 8192x4096)
+
+Pass `--civ-seed N` to iterate on civilisation without regenerating terrain, `--backend cpu` to force CPU, and `--force` to overwrite an existing tag.
+
+The older `cargo run --release -p rb_noise --example save_debug_layers` is still available as a lightweight alternative — it writes PNGs to `debug_layers/` but skips artifact persistence. Use it when you only need the images and don't care about the bincode data.
+
+Always use `--release` — debug builds are unacceptably slow (tile generation dominated by noise evaluation).
 
 ## Workspace Crate Map
 
