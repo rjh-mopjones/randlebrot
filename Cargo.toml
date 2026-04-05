@@ -49,6 +49,10 @@ bevy_egui.workspace = true
 clap.workspace = true
 image.workspace = true
 rayon = "1.10"
+indicatif = "0.17"
+chrono = { version = "0.4", features = ["serde"] }
+bincode.workspace = true
+ron.workspace = true
 rb_core.workspace = true
 rb_noise.workspace = true
 rb_world.workspace = true

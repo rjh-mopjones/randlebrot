@@ -15,6 +15,8 @@ use clap::{Parser, Subcommand, ValueEnum, Args};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+mod commands;
+
 // ─── CLI ────────────────────────────────────────────────────────────────────
 
 /// Randlebrot — procedural world engine for Margin's Grip
@@ -166,11 +168,16 @@ fn main() {
                 backend,
                 force,
             } => {
-                let civ = civ_seed.unwrap_or(seed);
-                println!(
-                    "generate layers: seed={seed}, tag={tag}, civ_seed={civ}, \
-                     backend={backend:?}, force={force} — not implemented yet"
-                );
+                let noise_backend = match backend {
+                    Backend::Gpu => NoiseBackend::Gpu,
+                    Backend::Cpu => NoiseBackend::Cpu,
+                };
+                if let Err(err) =
+                    commands::generate_layers::run(seed, tag, civ_seed, noise_backend, force)
+                {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
             }
             GenerateTarget::Level {
                 source,
