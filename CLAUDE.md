@@ -129,7 +129,7 @@ The CLI follows a **generate → view → launch** pipeline:
 
 1. **Generate layers** — `randlebrot generate layers <seed> <tag>` runs the full TerrainGen + LifeGen pipeline headlessly (no window) and writes the result to a tagged artifact. Use `--civ-seed` to iterate on civilisation without regenerating terrain. Use `--backend cpu|gpu` to select the compute backend (default: gpu).
 
-2. **Generate level** — `randlebrot generate level <layers-tag|--seed N> <x,y> <tag>` generates a playable micro-level at the given chunk coordinate. The source is either a previously generated layers artifact (by tag) or a raw seed. Coordinate is a comma-separated `x,y` pair of i32 values.
+2. **Generate level** — `randlebrot generate level <layers-tag|--seed N> <x,y> <tag>` generates a playable micro-level at the given **global micro coordinate** (see `### Chunk Grid`). The source is either a previously generated layers artifact (by tag, fast — reuses the cached macro `BiomeMap` + `RiverNetwork`) or a raw seed (slow — regenerates the macro `BiomeMap` in memory, terrain-only, no LifeGen). Coordinate is a comma-separated `x,y` pair of i32 values in the 1024×512 global micro grid. Use `--backend cpu|gpu` and `--force` as with `generate layers`.
 
 3. **View** — `randlebrot view layers` and `randlebrot view levels` list and inspect generated artifacts. Pass a tag to see detailed metadata for a specific artifact.
 
@@ -259,7 +259,7 @@ Three detail levels with increasing octaves for progressive detail. Each tier us
 |-------|---------------|-------------|----------------|----------|
 | **Macro** | 1 | 512×512 | 64×64 chunk | World overview tiles |
 | **Meso** | 2 | 512×512 | 8×8 area | Regional zoom |
-| **Micro** | 3 | 512×512 | 0.25×0.25 area | Playable tilemap |
+| **Micro** | 3 | 512×512 | 1×1 area | Playable tilemap |
 
 The full world (1024×512) is generated once as the base biome data. Macro tiles are pre-generated for all 128 chunks at startup. Meso tiles are generated on demand in the Level Launcher when the user clicks "Generate Mesomap" (64 tiles per macro chunk). Micro tiles stream around the player during play mode.
 
@@ -494,11 +494,33 @@ The world map (F1) displays only macro-level tiles. Meso and micro detail are ac
 **Debug layer export**: After macro pre-generation, all 128 tiles are stitched into full-world PNGs (8192×4096) saved to `debug_layers/`. This exports exactly what the world map displays.
 
 ### Chunk Grid
-- World is divided into 64×64 world-unit chunks (CHUNK_SIZE)
-- At macro level: 16×8 = 128 macro tiles cover the 1024×512 world
-- Each macro tile subdivides into 8×8 = 64 meso tiles (8 world units each)
-- Each meso tile subdivides into 32×32 = 1024 micro tiles (0.25 world units each)
-- Chunk coordinates: `(chunk_x, chunk_y)` where `chunk_x = floor(world_x / tile_size)`
+
+The world is **1024×512 world units**, organised into a nested chunk hierarchy. All constants below match the canonical values in `src/cli/coords.rs` and `src/main.rs`.
+
+| Level | World units per tile | Grid          | Total tiles |
+|-------|----------------------|---------------|-------------|
+| Macro | 64 × 64              | 16 × 8        | 128         |
+| Meso  | 8 × 8                | 128 × 64      | 8,192       |
+| Micro | 1 × 1                | 1024 × 512    | 524,288     |
+
+- `CHUNK_SIZE = 64.0` world units (macro chunk size, also the terminology used for level launcher entry)
+- `MESO_WORLD_SIZE = 8.0` world units (8×8 meso tiles inside a macro chunk = 64 per macro)
+- `MICRO_WORLD_SIZE = 1.0` world units (8×8 micro tiles inside a meso tile = 64 per meso; 524,288 total globally)
+- All three levels render to a `TILE_MAP_SIZE = 512` pixel BiomeMap regardless of world coverage
+- `detail_level` octave offsets: `1` = macro, `2` = meso, `3` = micro
+
+#### Coordinate conventions
+
+**Macro / chunk coordinates** (GUI world map, `SelectedChunk`): `(chunk_x, chunk_y)` where `chunk_x = floor(world_x / CHUNK_SIZE)`. Range: `0..16 × 0..8 = 128`.
+
+**Meso coordinates** (launcher 8×8 grid, `SelectedMesoTile`): **local** indices `0..8 × 0..8` within a single macro chunk. Convert to world position via `meso_origin + (mx, my) * MESO_WORLD_SIZE`.
+
+**Micro coordinates** have **two different conventions** — do not mix them:
+
+1. **GUI launcher local micro** (`SelectedMicroTile.micro_coord`): local indices `0..8 × 0..8` within a selected meso tile. World position = `meso_origin + (local_mx, local_my) * MICRO_WORLD_SIZE`. Used only inside the level launcher state machine.
+2. **CLI global micro** (`LevelManifest.micro_coord`, `generate level` / `view levels` args): **global** indices `(mx, my)` where `mx ∈ [0, 1024)` and `my ∈ [0, 512)`. World position = `(mx * MICRO_WORLD_SIZE, my * MICRO_WORLD_SIZE) = (mx, my)` (since `MICRO_WORLD_SIZE = 1.0`). The canonical module is `src/cli/coords.rs` — use `cli::coords::micro_coord_to_world_pos` and `cli::coords::validate_micro_coord` from every CLI surface that touches a micro coordinate.
+
+Example: `randlebrot generate level my-world 512,256 terminus-village` samples the 1×1 micro tile whose top-left corner is at world `(512, 256)` — the approximate centre of the map.
 
 ## Conventions
 

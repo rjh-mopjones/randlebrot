@@ -15,6 +15,7 @@ use clap::{Parser, Subcommand, ValueEnum, Args};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+mod cli;
 mod commands;
 
 // ─── CLI ────────────────────────────────────────────────────────────────────
@@ -376,16 +377,14 @@ fn view_level_detail(tag: &str) -> Result<(), String> {
         None => format!("--seed {} (civ_seed={})", manifest.seed, manifest.civ_seed),
     };
 
-    // NOTE: `LevelManifest.micro_coord` semantics are not yet locked down —
-    // `generate level` is stubbed (see issue #7 / PR #19). This code assumes
-    // `micro_coord` is a global world-tile coordinate so that
-    // `mx * MICRO_WORLD_SIZE` yields the absolute world position. If a future
-    // `generate level` implementation populates it as a chunk coord (multiply
-    // by CHUNK_SIZE=64.0) or a local index within a meso tile (add meso
-    // origin), update this conversion to match.
+    // `LevelManifest.micro_coord` is a **global** CLI micro coordinate —
+    // see `cli::coords` for the canonical convention. `(mx, my)` indexes
+    // the 1024×512 global micro grid, so the tile's world-space top-left
+    // is `(mx * MICRO_WORLD_SIZE, my * MICRO_WORLD_SIZE)`. Resolve via the
+    // shared helper so every CLI surface (generate, view, future launch)
+    // agrees on what a micro coordinate means.
     let (mx, my) = manifest.micro_coord;
-    let world_x = mx as f64 * MICRO_WORLD_SIZE;
-    let world_y = my as f64 * MICRO_WORLD_SIZE;
+    let (world_x, world_y) = cli::coords::micro_coord_to_world_pos((mx, my));
 
     println!("Tag:            {tag}");
     println!("Source:         {source}");
@@ -432,16 +431,36 @@ fn main() {
                 backend,
                 force,
             } => {
-                let src = if let Some(ref t) = source.layers_tag {
-                    format!("layers_tag={t}")
-                } else {
-                    format!("seed={}", source.seed.unwrap())
+                let noise_backend = match backend {
+                    Backend::Gpu => NoiseBackend::Gpu,
+                    Backend::Cpu => NoiseBackend::Cpu,
                 };
-                println!(
-                    "generate level: {src}, coord=({},{}), tag={tag}, \
-                     backend={backend:?}, force={force} — not implemented yet",
-                    coord.0, coord.1,
-                );
+                // clap's `#[group(required = true, multiple = false)]` on
+                // `LevelSource` guarantees exactly one of these is `Some`.
+                let result = if let Some(layers_tag) = source.layers_tag {
+                    commands::generate_level::run_from_layers(
+                        layers_tag,
+                        coord,
+                        tag,
+                        noise_backend,
+                        force,
+                    )
+                } else {
+                    let seed = source
+                        .seed
+                        .expect("LevelSource::seed must be Some when layers_tag is None");
+                    commands::generate_level::run_from_seed(
+                        seed,
+                        coord,
+                        tag,
+                        noise_backend,
+                        force,
+                    )
+                };
+                if let Err(err) = result {
+                    eprintln!("error: {err}");
+                    std::process::exit(1);
+                }
             }
         },
 

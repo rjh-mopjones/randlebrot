@@ -5,3 +5,4 @@
 //! parallelism and `indicatif` for terminal progress bars.
 
 pub mod generate_layers;
+pub mod generate_level;
