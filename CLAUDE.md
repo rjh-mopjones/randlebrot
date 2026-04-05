@@ -163,7 +163,8 @@ randlebrot/
 │   │   ├── generator_ui.rs    # World Generator mode UI (seed, params, save/load)
 │   │   └── launcher_ui.rs     # Level Launcher UI (phase-aware side panel, LauncherPhase state machine)
 │   ├── rb_player/        # Player controller, camera, 2D top-down interaction
-│   └── rb_persistence/   # Delta storage, save/load (RON format)
+│   ├── rb_persistence/   # Delta storage, save/load (RON format)
+│   └── rb_artifacts/     # Artifact storage: ~/.randlebrot/ layer/level persistence, manifests
 ├── assets/
 │   ├── tilesets/         # Tileset sprite sheets
 │   ├── authored/         # Hand-placed data: plates, landmarks, key NPCs (RON files)
@@ -183,6 +184,7 @@ rb_entity_spawn  → rb_core, rb_world, rb_tilemap
 rb_editor        → rb_core, rb_noise, rb_world, rb_tilemap, bevy_egui
 rb_player        → rb_core, rb_tilemap
 rb_persistence   → rb_core, rb_world, rb_tilemap
+rb_artifacts     → rb_core, rb_noise, rb_world
 ```
 
 ## Architecture
@@ -425,6 +427,34 @@ RegenerationRequest // Signal to regenerate world map from updated params
 CursorWorldPos      // Cursor position in world coordinates for chunk highlighting
 PlayableLevel       // Active playable level state (origin, seed, etc.)
 ```
+
+### Artifact Storage
+
+The `rb_artifacts` crate manages `~/.randlebrot/` for persistent layer and level artifacts.
+
+```
+~/.randlebrot/
+├── layers/
+│   └── <tag>/
+│       ├── manifest.ron           # LayerManifest (seed, civ_seed, timestamp, dims, backend, layer list)
+│       ├── macro_biome.bin        # bincode: BiomeMap (1024×512 macro)
+│       ├── river_network.bin      # bincode: RiverNetwork (separate from BiomeMap — Arc is serde(skip))
+│       ├── lifegen.bin            # bincode: LifeGenData
+│       └── images/                # layer PNGs (4096×2048, same as save_debug_layers output)
+│           ├── biome.png
+│           ├── heightmap.png
+│           └── ... (~20 layers)
+└── levels/
+    └── <tag>/
+        ├── manifest.ron           # LevelManifest (parent layers tag, seed, civ_seed, micro coord, timestamp)
+        └── micro_biome.bin        # bincode: micro-level BiomeMap
+```
+
+**Estimated sizes:** Layer artifacts are ~200-400 MB (dominated by bincode BiomeMap at 1024×512 with ~20 f64 layers + LifeGenData at 8192×4096). Layer PNGs add ~20-40 MB. Level artifacts are much smaller (~50-100 MB for a single micro BiomeMap).
+
+**Tags:** Alphanumeric + hyphens + underscores only. Used as directory names.
+
+**Manifests:** Pretty-printed RON for human readability. `LayerManifest` records seed, civ_seed, world dimensions, backend used, and list of available image filenames. `LevelManifest` records the parent layers tag, seed, civ_seed, micro coordinate, and timestamp.
 
 ### Map Navigation & Controls
 
