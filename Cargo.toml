@@ -9,6 +9,7 @@ members = [
     "crates/rb_editor",
     "crates/rb_player",
     "crates/rb_persistence",
+    "crates/rb_artifacts",
 ]
 
 [workspace.dependencies]
@@ -31,6 +32,7 @@ rb_entity_spawn = { path = "crates/rb_entity_spawn" }
 rb_editor = { path = "crates/rb_editor" }
 rb_player = { path = "crates/rb_player" }
 rb_persistence = { path = "crates/rb_persistence" }
+rb_artifacts = { path = "crates/rb_artifacts" }
 
 [package]
 name = "randlebrot"
@@ -55,6 +57,7 @@ rb_entity_spawn.workspace = true
 rb_editor.workspace = true
 rb_player.workspace = true
 rb_persistence.workspace = true
+rb_artifacts.workspace = true
 
 [workspace.lints.clippy]
 # TODO: fix these and remove the allows
