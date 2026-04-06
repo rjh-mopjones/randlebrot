@@ -6,3 +6,4 @@
 
 pub mod generate_layers;
 pub mod generate_level;
+pub mod view_layers;
