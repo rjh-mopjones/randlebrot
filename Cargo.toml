@@ -10,6 +10,7 @@ members = [
     "crates/rb_player",
     "crates/rb_persistence",
     "crates/rb_artifacts",
+    "crates/rb_voxel",
 ]
 
 [workspace.dependencies]
@@ -33,6 +34,7 @@ rb_editor = { path = "crates/rb_editor" }
 rb_player = { path = "crates/rb_player" }
 rb_persistence = { path = "crates/rb_persistence" }
 rb_artifacts = { path = "crates/rb_artifacts" }
+rb_voxel = { path = "crates/rb_voxel" }
 
 [package]
 name = "randlebrot"

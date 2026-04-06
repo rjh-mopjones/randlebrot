@@ -234,7 +234,8 @@ randlebrot/
 │   │   └── launcher_ui.rs     # Level Launcher UI (phase-aware side panel, LauncherPhase state machine)
 │   ├── rb_player/        # Player controller, camera, 2D top-down interaction
 │   ├── rb_persistence/   # Delta storage, save/load (RON format)
-│   └── rb_artifacts/     # Artifact storage: ~/.randlebrot/ layer/level persistence, manifests
+│   ├── rb_artifacts/     # Artifact storage: ~/.randlebrot/ layer/level persistence, manifests
+│   └── rb_voxel/         # Comanche-style voxel space terrain raycaster (pure Rust + rayon, no Bevy)
 ├── assets/
 │   ├── tilesets/         # Tileset sprite sheets
 │   ├── authored/         # Hand-placed data: plates, landmarks, key NPCs (RON files)
@@ -256,6 +257,7 @@ rb_editor        → rb_core, rb_noise, rb_world, rb_tilemap, bevy_egui
 rb_player        → rb_core, rb_tilemap
 rb_persistence   → rb_core, rb_world, rb_tilemap
 rb_artifacts     → rb_core, rb_noise, rb_world
+rb_voxel         → rayon (no Bevy, no rb_core)
 ```
 
 ## Architecture
@@ -615,6 +617,29 @@ The world is **1024×512 world units**, organised into a nested chunk hierarchy.
 2. **CLI global micro** (`LevelManifest.micro_coord`, `generate level` / `view levels` args): **global** indices `(mx, my)` where `mx ∈ [0, 1024)` and `my ∈ [0, 512)`. World position = `(mx * MICRO_WORLD_SIZE, my * MICRO_WORLD_SIZE) = (mx, my)` (since `MICRO_WORLD_SIZE = 1.0`). The canonical module is `src/cli/coords.rs` — use `cli::coords::micro_coord_to_world_pos` and `cli::coords::validate_micro_coord` from every CLI surface that touches a micro coordinate.
 
 Example: `randlebrot generate level my-world 512,256 terminus-village` samples the 1×1 micro tile whose top-left corner is at world `(512, 256)` — the approximate centre of the map.
+
+### Voxel Rendering
+
+The `rb_voxel` crate implements Comanche-style voxel space raycasting -- a column-based heightmap renderer that produces a 2.5D terrain perspective view. This is NOT Minecraft-style block voxels; it renders a 2D heightmap as a 3D-looking terrain flyover.
+
+**Algorithm:** For each screen column, cast a ray forward over the heightmap, sampling terrain height and color at regular intervals. Project each sample to a screen Y coordinate based on height difference and distance. Draw vertical color slices bottom-up, skipping already-drawn pixels (back-to-front occlusion). Each column is independent, making the algorithm embarrassingly parallel.
+
+**Key design decisions:**
+- **Pure Rust + rayon** -- no Bevy dependency, no ECS. The crate takes raw `&[f64]` heightmap and `&[u8]` RGBA colormap slices, outputs to a `&mut [u8]` RGBA buffer. The caller (e.g., a Bevy system) handles data extraction and texture upload.
+- **Bilinear interpolation** on both heightmap and colormap sampling for smooth terrain between integer coordinates.
+- **Distance fog** with quadratic falloff toward a configurable fog color.
+- **Fisheye correction** using perpendicular distance (cosine of angle offset from center).
+- **Adaptive ray stepping** -- finer steps near the camera for detail, coarser steps at distance for performance.
+- **Camera modes**: `FirstPerson` (eye-level forward view) and `ThirdPerson { distance, pitch }` (elevated behind a target point, looking down).
+
+**Integration path:** The caller extracts heightmap data from `BiomeMap` (via the Heightmap derived layer) and color data from `BiomeMap::to_layer_image(NoiseLayer::Biome)`, then calls `render_frame()`. The output RGBA buffer can be uploaded to a Bevy `Image` for display. The `TerrainQuery` trait from `rb_core` provides the sampling interface at meso resolution.
+
+**Performance:** ~470 FPS at 1280x720 with rayon on a 1024x1024 heightmap (release build). Target is 60+ FPS.
+
+```bash
+cargo run --release -p rb_voxel --example voxel_preview  # render sine-wave hills to PNG
+cargo test -p rb_voxel                                    # unit tests
+```
 
 ## Conventions
 
