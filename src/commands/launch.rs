@@ -1,7 +1,7 @@
 //! Launch a playable level from a previously generated level artifact.
 //!
 //! `randlebrot launch <level-tag>` opens a minimal Bevy window with the player
-//! spawned at the level's micro coordinate. Surrounding micro tiles stream in
+//! spawned at the level's chunk coordinate. Surrounding chunks stream in
 //! as the player moves, using the parent layers artifact (macro `BiomeMap` +
 //! `RiverNetwork`) for on-the-fly generation. If the parent layers artifact is
 //! missing but the level manifest has a seed, the macro data is regenerated at
@@ -35,12 +35,12 @@ use rb_player::{Player, PlayerCamera, RbPlayerPlugin};
 use rb_tilemap::{LevelChunk, LoadedChunks, RbTilemapPlugin};
 
 use crate::cli::coords::{
-    micro_coord_to_world_pos, MICRO_WORLD_SIZE, WORLD_HEIGHT, WORLD_WIDTH,
+    chunk_coord_to_world_pos, CHUNK_WORLD_SIZE, WORLD_HEIGHT, WORLD_WIDTH,
 };
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
-/// Output resolution per micro tile (512x512).
+/// Output resolution per chunk (512x512).
 const TILE_MAP_SIZE: usize = 512;
 
 /// Level chunk load radius (in level chunks around the player).
@@ -62,7 +62,7 @@ const POLL_BUDGET: usize = 16;
 
 /// Launch a playable level from a previously generated level artifact.
 ///
-/// Validates the tag, loads the level manifest + micro BiomeMap, loads
+/// Validates the tag, loads the level manifest + chunk BiomeMap, loads
 /// (or regenerates) the parent layers artifact, and runs a minimal Bevy app.
 pub fn run(level_tag: String) -> Result<(), String> {
     // ─── 1. Load the level artifact ────────────────────────────────────
@@ -88,12 +88,12 @@ pub fn run(level_tag: String) -> Result<(), String> {
         other => format!("failed to load level artifact '{level_tag}': {other}"),
     })?;
 
-    let (world_x, world_y) = micro_coord_to_world_pos(level_manifest.micro_coord);
+    let (world_x, world_y) = chunk_coord_to_world_pos(level_manifest.chunk_coord);
     let seed = level_manifest.seed;
 
     println!(
         "Launching level '{level_tag}': seed={seed}, coord=({},{}), world=({world_x:.1},{world_y:.1})",
-        level_manifest.micro_coord.0, level_manifest.micro_coord.1,
+        level_manifest.chunk_coord.0, level_manifest.chunk_coord.1,
     );
 
     // ─── 2. Load parent layers for macro context ───────────────────────
@@ -110,7 +110,7 @@ pub fn run(level_tag: String) -> Result<(), String> {
 
     // ─── 4. Build and run the Bevy app ─────────────────────────────────
     let origin = WorldPos::new(world_x, world_y);
-    // Compute the macro chunk that contains this micro coordinate.
+    // Compute the macro chunk that contains this chunk coordinate.
     let chunk_x = (world_x / 64.0).floor() as i32;
     let chunk_y = (world_y / 64.0).floor() as i32;
 
@@ -150,9 +150,9 @@ pub fn run(level_tag: String) -> Result<(), String> {
     app.insert_resource(LaunchLevelChunkQueue::default());
     app.insert_resource(MapOverlayState::default());
 
-    // Pre-render the initial micro tile sprite from the loaded level artifact
+    // Pre-render the initial chunk sprite from the loaded level artifact
     let initial_tile_data = micro_biome.to_layer_image(NoiseLayer::Biome);
-    app.insert_resource(InitialMicroTile {
+    app.insert_resource(InitialChunkTile {
         image_data: initial_tile_data,
     });
 
@@ -169,7 +169,7 @@ pub fn run(level_tag: String) -> Result<(), String> {
 
     app.insert_resource(LaunchState {
         level_tag,
-        micro_coord: level_manifest.micro_coord,
+        chunk_coord: level_manifest.chunk_coord,
     });
 
     app.add_systems(Startup, launch_setup);
@@ -275,7 +275,7 @@ fn load_or_render_map_image(
 
 // ─── Resources ─────────────────────────────────────────────────────────────
 
-/// Macro BiomeMap for generating micro tiles on the fly.
+/// Macro BiomeMap for generating chunks on the fly.
 #[derive(Resource)]
 struct LaunchMacroBiomeData {
     biome_map: Arc<BiomeMap>,
@@ -299,9 +299,9 @@ struct LaunchLevelChunkTask {
     task: Task<((i32, i32), Arc<BiomeMap>)>,
 }
 
-/// The pre-generated micro tile from the level artifact, displayed immediately.
+/// The pre-generated chunk from the level artifact, displayed immediately.
 #[derive(Resource)]
-struct InitialMicroTile {
+struct InitialChunkTile {
     image_data: Vec<u8>,
 }
 
@@ -332,7 +332,7 @@ struct MapImageData {
 #[derive(Resource)]
 struct LaunchState {
     level_tag: String,
-    micro_coord: (i32, i32),
+    chunk_coord: (i32, i32),
 }
 
 /// Marker for the map overlay sprite.
@@ -352,11 +352,11 @@ struct MapOverlayEntity;
 
 // ─── Startup ───────────────────────────────────────────────────────────────
 
-/// Set up the camera and spawn the initial micro tile.
+/// Set up the camera and spawn the initial chunk tile.
 fn launch_setup(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
-    initial_tile: Option<Res<InitialMicroTile>>,
+    initial_tile: Option<Res<InitialChunkTile>>,
     map_image_data: Option<Res<MapImageData>>,
 ) {
     // Camera is already spawned by RbPlayerPlugin when PlayableLevel is inserted.
@@ -366,7 +366,7 @@ fn launch_setup(
     // trigger on the first frame. We just need the Camera2d to exist.
     commands.spawn(Camera2d);
 
-    // Spawn the initial micro tile (pre-generated from the level artifact)
+    // Spawn the initial chunk tile (pre-generated from the level artifact)
     if let Some(tile) = initial_tile {
         let image = create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, tile.image_data.clone());
         let texture = images.add(image);
@@ -467,8 +467,8 @@ fn launch_chunk_load_system(
             }
 
             // Map level chunk to world coordinates
-            let world_x = level.origin.x + cx as f64 * MICRO_WORLD_SIZE;
-            let world_y = level.origin.y + cy as f64 * MICRO_WORLD_SIZE;
+            let world_x = level.origin.x + cx as f64 * CHUNK_WORLD_SIZE;
+            let world_y = level.origin.y + cy as f64 * CHUNK_WORLD_SIZE;
 
             let macro_map = world_textures.biome_map.clone();
             let river_net_clone = river_net.clone();
@@ -478,7 +478,7 @@ fn launch_chunk_load_system(
                     seed,
                     world_x,
                     world_y,
-                    MICRO_WORLD_SIZE,
+                    CHUNK_WORLD_SIZE,
                     TILE_MAP_SIZE,
                     height,
                     3, // micro detail level
@@ -652,8 +652,8 @@ fn update_map_player_marker(
 
     // Convert player's level-space position to world coordinates
     let player_pos = player_transform.translation;
-    let world_x = level.origin.x + (player_pos.x as f64 / LEVEL_CHUNK_TILES as f64) * MICRO_WORLD_SIZE;
-    let world_y = level.origin.y + ((-player_pos.y) as f64 / LEVEL_CHUNK_TILES as f64) * MICRO_WORLD_SIZE;
+    let world_x = level.origin.x + (player_pos.x as f64 / LEVEL_CHUNK_TILES as f64) * CHUNK_WORLD_SIZE;
+    let world_y = level.origin.y + ((-player_pos.y) as f64 / LEVEL_CHUNK_TILES as f64) * CHUNK_WORLD_SIZE;
 
     // Normalize to [0,1] in world space
     let norm_x = (world_x / map_data.world_width as f64) as f32;
@@ -736,7 +736,7 @@ fn launch_hud_system(
             ui.label(format!("Level: {}", launch_state.level_tag));
             ui.label(format!(
                 "Coord: ({}, {})",
-                launch_state.micro_coord.0, launch_state.micro_coord.1
+                launch_state.chunk_coord.0, launch_state.chunk_coord.1
             ));
             ui.label(format!("Seed: {}", level.seed));
             ui.label(player_info);

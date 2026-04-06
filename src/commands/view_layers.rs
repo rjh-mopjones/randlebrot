@@ -6,13 +6,12 @@
 //!
 //! Unlike the full editor GUI, this viewer does NOT spin up the editor stack
 //! (rb_editor, world generation pipelines, mode state machine). It uses
-//! `DefaultPlugins` + `EguiPlugin` for the HUD and nothing else — loading
-//! is a simple matter of reading PNG files from
+//! `DefaultPlugins` + `EguiPlugin` for the side panel and nothing else —
+//! loading is a simple matter of reading PNG files from
 //! `~/.randlebrot/layers/<tag>/images/`.
 //!
 //! Controls:
-//!   Left/Right arrows — cycle base layer
-//!   Up/Down arrows    — cycle overlay layer (wraps through None)
+//!   Side panel        — select base/overlay layer, adjust overlay opacity
 //!   Scroll wheel      — zoom
 //!   Click-drag        — pan
 //!   ESC               — exit
@@ -102,18 +101,26 @@ pub fn run(tag: String) -> Result<(), String> {
         ..default()
     }));
 
-    // Egui is only used for the minimal HUD overlay.
+    // Egui is used for the side panel (layer selection + HUD info).
     app.add_plugins(EguiPlugin {
         enable_multipass_for_primary_context: false,
         ..Default::default()
     });
 
+    // Pre-compute human-readable display names for the egui combo boxes.
+    let layer_display_names: Vec<String> = layer_files
+        .iter()
+        .map(|f| display_name_from_filename(f))
+        .collect();
+
     app.insert_resource(ViewerState {
         tag,
         layer_files,
+        layer_display_names,
         layer_paths,
         base_index,
         overlay_index: None,
+        overlay_alpha: 0.5,
         lru: Vec::with_capacity(LRU_CAPACITY),
         dirty: true,
         needs_fit_to_window: true,
@@ -123,12 +130,12 @@ pub fn run(tag: String) -> Result<(), String> {
     app.add_systems(
         Update,
         (
-            handle_keyboard_input,
+            handle_exit_input,
+            layer_panel_ui,
             update_sprite_textures,
             fit_camera_to_first_image.after(update_sprite_textures),
             viewer_camera_zoom,
             viewer_camera_pan,
-            hud_system,
             exit_on_window_close,
         ),
     );
@@ -153,16 +160,20 @@ struct ViewerState {
     tag: String,
     /// Image filenames from the manifest (e.g. "biome.png", "heightmap.png").
     layer_files: Vec<String>,
+    /// Human-readable display names corresponding to `layer_files`.
+    layer_display_names: Vec<String>,
     /// Absolute paths resolved via `ArtifactStore::layer_image_path`.
     layer_paths: Vec<PathBuf>,
     /// Index into `layer_files` for the currently displayed base layer.
     base_index: usize,
     /// Index into `layer_files` for the overlay layer, or `None` for no overlay.
     overlay_index: Option<usize>,
+    /// Alpha blending for the overlay sprite (0.0 = transparent, 1.0 = opaque).
+    overlay_alpha: f32,
     /// LRU cache: (layer_index, texture_handle). Most recently used at the end.
     lru: Vec<(usize, Handle<Image>)>,
-    /// Flag set when base_index or overlay_index changes, prompting a
-    /// sprite texture refresh in `update_sprite_textures`.
+    /// Flag set when base_index, overlay_index, or overlay_alpha changes,
+    /// prompting a sprite texture refresh in `update_sprite_textures`.
     dirty: bool,
     /// On the very first load we don't know the image size until after disk
     /// decode, so we set the camera's ortho scale to fit the image to the
@@ -275,56 +286,13 @@ fn setup(mut commands: Commands) {
 
 // ─── Input Handling ─────────────────────────────────────────────────────────
 
-/// Keyboard cycling + ESC exit.
-///
-/// Left/Right cycle the base layer through `layer_files` (wrapping).
-/// Up/Down cycle the overlay layer through `None → 0 → ... → last → None`.
-/// Same-frame multiple keypresses are handled via `just_pressed`, so holding
-/// a key does not cycle rapidly.
-fn handle_keyboard_input(
+/// ESC exit only. Layer selection is handled by the egui side panel.
+fn handle_exit_input(
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut state: ResMut<ViewerState>,
     mut exit_events: MessageWriter<AppExit>,
 ) {
     if keyboard.just_pressed(KeyCode::Escape) {
         exit_events.write(AppExit::Success);
-        return;
-    }
-
-    let count = state.layer_files.len();
-    if count == 0 {
-        return;
-    }
-
-    // Base layer cycling (Left/Right).
-    if keyboard.just_pressed(KeyCode::ArrowRight) {
-        state.base_index = (state.base_index + 1) % count;
-        state.dirty = true;
-    }
-    if keyboard.just_pressed(KeyCode::ArrowLeft) {
-        state.base_index = (state.base_index + count - 1) % count;
-        state.dirty = true;
-    }
-
-    // Overlay cycling (Up/Down) — steps through None → 0 → ... → last → None.
-    // Using `count + 1` slots lets us encode the None state as index `count`.
-    if keyboard.just_pressed(KeyCode::ArrowDown) {
-        let next = match state.overlay_index {
-            None => Some(0),
-            Some(i) if i + 1 >= count => None,
-            Some(i) => Some(i + 1),
-        };
-        state.overlay_index = next;
-        state.dirty = true;
-    }
-    if keyboard.just_pressed(KeyCode::ArrowUp) {
-        let prev = match state.overlay_index {
-            None => Some(count - 1),
-            Some(0) => None,
-            Some(i) => Some(i - 1),
-        };
-        state.overlay_index = prev;
-        state.dirty = true;
     }
 }
 
@@ -392,6 +360,7 @@ fn update_sprite_textures(
     }
 
     // ─── Overlay layer ─────────────────────────────────────────────────────
+    let overlay_alpha = state.overlay_alpha;
     if let Some(overlay_idx) = state.overlay_index {
         let overlay_handle = match state.get_or_load(overlay_idx, &mut images) {
             Ok(h) => h,
@@ -403,6 +372,7 @@ fn update_sprite_textures(
         if let Ok((mut overlay_sprite, mut visibility)) = overlay_query.single_mut() {
             overlay_sprite.image = overlay_handle;
             overlay_sprite.custom_size = Some(natural_size);
+            overlay_sprite.color = Color::srgba(1.0, 1.0, 1.0, overlay_alpha);
             *visibility = Visibility::Visible;
         }
     } else if let Ok((_, mut visibility)) = overlay_query.single_mut() {
@@ -529,51 +499,118 @@ fn viewer_camera_pan(
     }
 }
 
-// ─── HUD ────────────────────────────────────────────────────────────────────
+// ─── Side Panel UI ─────────────────────────────────────────────────────────
 
-/// Minimal egui HUD showing the active tag, base/overlay layer names, and
-/// the current zoom as a percentage (100% = default scale).
-fn hud_system(
+/// Egui side panel with combo boxes for base/overlay layer selection,
+/// an opacity slider for the overlay, and HUD info (tag, zoom).
+///
+/// Replaces the old keyboard-based cycling (Left/Right/Up/Down arrows)
+/// which was broken because egui captures keyboard input.
+fn layer_panel_ui(
     mut contexts: EguiContexts,
-    state: Res<ViewerState>,
+    mut state: ResMut<ViewerState>,
     camera_query: Query<&Projection, With<Camera2d>>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
-    let base_name = state
-        .layer_files
-        .get(state.base_index)
-        .map(|f| display_name_from_filename(f))
-        .unwrap_or_else(|| "—".to_string());
-
-    let overlay_name = state
-        .overlay_index
-        .and_then(|i| state.layer_files.get(i))
-        .map(|f| display_name_from_filename(f))
-        .unwrap_or_else(|| "None".to_string());
-
-    // Zoom as a percentage (100% = default scale of 1.0).
-    let zoom_percent = camera_query
-        .single()
-        .ok()
-        .and_then(|p| match p {
-            Projection::Orthographic(o) => Some(100.0 / o.scale),
-            _ => None,
-        })
-        .unwrap_or(100.0);
-
-    egui::Window::new("Layer Viewer")
-        .anchor(egui::Align2::LEFT_TOP, [8.0, 8.0])
+    egui::SidePanel::left("layer_panel")
+        .default_width(250.0)
         .resizable(false)
-        .collapsible(false)
         .show(ctx, |ui| {
-            ui.label(format!("Tag:     {}", state.tag));
-            ui.label(format!("Base:    {base_name}"));
-            ui.label(format!("Overlay: {overlay_name}"));
-            ui.label(format!("Zoom:    {zoom_percent:.0}%"));
+            ui.heading("Layer Viewer");
             ui.separator();
-            ui.small("Left/Right: base · Up/Down: overlay");
-            ui.small("Scroll: zoom · Drag: pan · ESC: exit");
+
+            // Tag name.
+            ui.label(format!("Tag: {}", state.tag));
+
+            // Zoom percentage.
+            let zoom_percent = camera_query
+                .single()
+                .ok()
+                .and_then(|p| match p {
+                    Projection::Orthographic(o) => Some(100.0 / o.scale),
+                    _ => None,
+                })
+                .unwrap_or(100.0);
+            ui.label(format!("Zoom: {zoom_percent:.0}%"));
+            ui.separator();
+
+            // ─── Base layer combo box ──────────────────────────────────
+            ui.label("Base Layer");
+            let base_label = state
+                .layer_display_names
+                .get(state.base_index)
+                .cloned()
+                .unwrap_or_else(|| "—".to_string());
+
+            let mut new_base = state.base_index;
+            egui::ComboBox::from_id_salt("base_layer")
+                .selected_text(&base_label)
+                .width(210.0)
+                .show_ui(ui, |ui| {
+                    for (i, name) in state.layer_display_names.iter().enumerate() {
+                        ui.selectable_value(&mut new_base, i, name);
+                    }
+                });
+            if new_base != state.base_index {
+                state.base_index = new_base;
+                state.dirty = true;
+            }
+
+            ui.add_space(8.0);
+
+            // ─── Overlay layer combo box ───────────────────────────────
+            ui.label("Overlay Layer");
+
+            // Encode overlay selection: 0 = None, 1..=N = layer index 0..N-1.
+            let overlay_selection = state.overlay_index.map_or(0usize, |i| i + 1);
+            let overlay_label = match state.overlay_index {
+                None => "None".to_string(),
+                Some(i) => state
+                    .layer_display_names
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| "—".to_string()),
+            };
+
+            let mut new_overlay = overlay_selection;
+            egui::ComboBox::from_id_salt("overlay_layer")
+                .selected_text(&overlay_label)
+                .width(210.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut new_overlay, 0, "None");
+                    for (i, name) in state.layer_display_names.iter().enumerate() {
+                        ui.selectable_value(&mut new_overlay, i + 1, name);
+                    }
+                });
+            let new_overlay_index = if new_overlay == 0 {
+                None
+            } else {
+                Some(new_overlay - 1)
+            };
+            if new_overlay_index != state.overlay_index {
+                state.overlay_index = new_overlay_index;
+                state.dirty = true;
+            }
+
+            ui.add_space(8.0);
+
+            // ─── Overlay opacity slider ────────────────────────────────
+            let overlay_enabled = state.overlay_index.is_some();
+            ui.add_enabled_ui(overlay_enabled, |ui| {
+                ui.label("Overlay Opacity");
+                let mut alpha = state.overlay_alpha;
+                let slider = egui::Slider::new(&mut alpha, 0.0..=1.0)
+                    .text("")
+                    .fixed_decimals(2);
+                if ui.add(slider).changed() {
+                    state.overlay_alpha = alpha;
+                    state.dirty = true;
+                }
+            });
+
+            ui.separator();
+            ui.small("Scroll: zoom  |  Drag: pan  |  ESC: exit");
         });
 }
 
