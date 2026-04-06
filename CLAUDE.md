@@ -428,35 +428,52 @@ World Map (F1)          Level Launcher (F4)
 │              │        │ GeneratingMeso: async 64-tile generation + bar   │
 │              │        │                                                  │
 │              │        │ MesoView: 8×8 meso grid, click to select tile   │
-│              │        │   └─▶ "Launch Level" button                      │
+│              │        │   └─▶ "Generate Micromap" button                 │
+│              │        │                                                  │
+│              │        │ GeneratingMicro: async 64-tile generation + bar  │
+│              │        │                                                  │
+│              │        │ MicroView: 8×8 micro grid, click to select tile  │
+│              │        │   └─▶ "Play" button + "Save Level" button        │
 │              │        │                                                  │
 │              │        │ Playing: micro chunks stream around player       │
-│              │        │   └─▶ ESC returns to MesoView (not full exit)   │
+│              │        │   └─▶ "Save Level" button                        │
+│              │        │   └─▶ ESC returns to MicroView (not full exit)   │
 └──────────────┘        └──────────────────────────────────────────────────┘
 ```
 
 **Phase flow:**
 1. **MacroView** — Shows the selected macro chunk enlarged (512px display). Side panel shows chunk coords and "Generate Mesomap" button.
 2. **GeneratingMeso** — Async generates all 64 meso tiles (8×8 grid within the chunk, each 8×8 world units at 512px, detail_level=2). Progress bar shown.
-3. **MesoView** — Displays the 8×8 meso grid. Hover highlights tiles, click to select. Side panel shows meso tile coords and "Launch Level" button.
-4. **Playing** — Micro-level chunks (detail_level=3) stream around the player. ESC returns to MesoView (meso sprites re-shown, not all the way back to world map).
+3. **MesoView** — Displays the 8×8 meso grid. Hover highlights tiles, click to select. Side panel shows meso tile coords and "Generate Micromap" button.
+4. **GeneratingMicro** — Async generates all 64 micro tiles (8×8 grid within the meso tile, each 1×1 world unit at 512px, detail_level=3). Progress bar shown.
+5. **MicroView** — Displays the 8×8 micro grid. Click to select a micro tile. Side panel shows micro tile coords, "Play" button, and "Save Level" button.
+6. **Playing** — Micro-level chunks (detail_level=3) stream around the player. "Save Level" button available. ESC returns to MicroView (micro sprites re-shown, not all the way back to world map).
+
+**Save Level** — Available in MicroView and Playing phases when a micro tile is selected. Prompts for a tag name, then persists the micro BiomeMap and a `LevelManifest` (with global micro coordinates) via `rb_artifacts::save_level()`. The local launcher coordinates (0..8 within meso) are converted to global CLI coordinates (0..1024, 0..512) using the macro chunk + meso tile offsets: `global_x = chunk_x * 64 + meso_x * 8 + micro_x`. Saved levels appear in `randlebrot view levels` output.
 
 **Key implementation details:**
 - World map pool sprites are hidden on `OnEnter(LevelLauncher)` and re-shown on `OnExit(LevelLauncher)`
 - Meso tiles are generated via `AsyncComputeTaskPool` with `MACRO_PREGEN_CONCURRENCY` parallelism
 - `MesoTileCache` stores generated textures; `MesoPregenState` tracks generation progress
-- Camera pan works in all launcher phases; zoom is available in MesoView
-- `LauncherMacroSprite`, `LauncherMesoSprite`, `MesoHighlight` entities are all cleaned up on exit
+- `MicroTileCache` stores generated micro textures + `Arc<BiomeMap>` for save
+- Camera pan works in all launcher phases; zoom is available in MesoView/MicroView
+- `LauncherMacroSprite`, `LauncherMesoSprite`, `LauncherMicroSprite`, `MesoHighlight`, `MicroHighlight` entities are all cleaned up on exit
 
 **Key types:**
 ```rust
-LauncherPhase        // MacroView | GeneratingMeso | MesoView | Playing
+LauncherPhase        // MacroView | GeneratingMeso | MesoView | GeneratingMicro | MicroView | Playing
 GenerateMesoRequest  // Signal resource: user clicked "Generate Mesomap"
-LaunchLevelRequest   // Signal resource: user clicked "Launch Level"
+LaunchLevelRequest   // Signal resource: user clicked "Generate Micromap"
+StartPlayRequest     // Signal resource: user clicked "Play"
+SaveLevelRequest     // Signal resource: user confirmed a level tag for save
+SaveLevelUiState     // UI state for the save dialog (tag input, status message)
 SelectedChunk        // Macro chunk selected on world map (chunk_coord, origin)
 SelectedMesoTile     // Meso tile selected in launcher grid (meso_coord, origin)
+SelectedMicroTile    // Micro tile selected in launcher grid (micro_coord, origin)
 MesoTileCache        // HashMap<(i32,i32), MesoCachedTile> + sprite entity list
+MicroTileCache       // HashMap<(i32,i32), MicroCachedTile> + sprite entity list
 MesoPregenState      // Tracks async meso generation (total, completed, remaining, in_flight)
+MicroPregenState     // Tracks async micro generation (total, completed, remaining, in_flight)
 PlayableLevel        // Active level state (origin, chunk_coord, seed, world_height)
 ```
 
