@@ -133,7 +133,7 @@ The CLI follows a **generate → view → launch** pipeline:
 
 3. **View** — `randlebrot view layers` and `randlebrot view levels` list and inspect generated artifacts. `view levels <tag>` prints detailed metadata; `view layers <tag>` opens the interactive layer viewer (see CLI Visual Tools below).
 
-4. **Launch** — `randlebrot launch <level-tag>` launches a playable level from a previously generated level artifact.
+4. **Launch** — `randlebrot launch <level-tag>` opens a playable Bevy window for a previously generated level artifact. Loads the parent layers artifact for macro context (streaming new micro tiles on the fly as the player moves). Press M to toggle a world map overlay with the player's position. ESC exits.
 
 5. **GUI** — `randlebrot gui [layers-tag]` (or just `randlebrot` with no args) launches the full Bevy editor. Optionally opens an existing layer artifact.
 
@@ -190,6 +190,32 @@ Always use `--release` — debug builds are unacceptably slow (tile generation d
 - If `<tag>` does not exist, prints a clear error and exits non-zero without opening a window.
 
 **Implementation**: `src/commands/view_layers.rs`. Uses `Sprite { image, custom_size, .. }` entities rather than `AssetServer` — images are loaded via the `image` crate and converted to Bevy `Image` in-memory with nearest-neighbor sampling (so debug pixels stay crisp at high zoom).
+
+### Level Launcher (CLI)
+
+`randlebrot launch <level-tag>` opens a playable level from a previously generated level artifact. It is a minimal Bevy app: `DefaultPlugins` + `EguiPlugin` + `RbPlayerPlugin` + `RbTilemapPlugin`. No editor stack, no world generation pipeline — the macro `BiomeMap` and `RiverNetwork` are loaded from the parent layers artifact (or regenerated from seed if the parent is missing).
+
+**Purpose**: quick testing of a specific micro-level tile without clicking through the GUI launcher drill-down (F4 → generate meso → select → generate micro → select → play).
+
+**Controls**:
+
+| Control | Action |
+|---------|--------|
+| WASD | Move player |
+| M | Toggle world map overlay |
+| Scroll wheel | Zoom map overlay (when visible) |
+| ESC | Exit |
+
+**Behaviour**:
+
+- Player spawns at the level's micro coordinate with micro tiles streaming around them.
+- The initial micro tile (from the level artifact) is displayed immediately; surrounding tiles generate asynchronously.
+- Press M to toggle a semi-transparent world map overlay showing the biome layer with a red dot marking the player's current position.
+- Parent layers artifact is loaded for macro context (fast path); if missing, macro data is regenerated from seed (slow path with a console message).
+- Window title is `Randlebrot - Playing: <tag>`.
+- Egui HUD shows level tag, coordinate, seed, and player position.
+
+**Implementation**: `src/commands/launch.rs`. Follows the same pattern as `view_layers.rs` — standalone Bevy app with isolated resources (no shared state with the GUI editor). Level chunk streaming replicates the load/poll/unload pattern from `main.rs` (`level_chunk_load_system` / `level_chunk_poll_system` / `level_chunk_unload_system`).
 
 ## Workspace Crate Map
 
@@ -415,7 +441,14 @@ pub enum AppMode {
 - **Chunk Editor** (F3): Select chunk from map (Ctrl+Click), edit tiles and entities
 - **Level Launcher** (F4): Multi-step drill-down from macro chunk to playable level (see below)
 
-### Level Launcher Workflow (F4)
+### Level Launcher Workflow (F4 / CLI)
+
+There are two paths to a playable micro-level:
+
+1. **GUI path (F4)** — Interactive drill-down from the world map through macro → meso → micro selection.
+2. **CLI path** — `randlebrot launch <level-tag>` opens a level artifact directly. Loads the parent layers artifact for macro context, spawns the player, streams micro tiles. Press M to toggle a world map overlay showing the player's position.
+
+#### GUI Launcher (F4)
 
 The Level Launcher uses a phase-based state machine (`LauncherPhase` resource) to guide the user from world map selection to playable micro-level:
 
@@ -513,6 +546,10 @@ The `rb_artifacts` crate manages `~/.randlebrot/` for persistent layer and level
 | **Left/Right** | Layer Viewer | Cycle base layer |
 | **Up/Down** | Layer Viewer | Cycle overlay layer |
 | **ESC** | Layer Viewer | Exit |
+| **WASD** | Launch (Playing) | Move player |
+| **M** | Launch (Playing) | Toggle world map overlay |
+| **Scroll wheel** | Launch (Map overlay) | Zoom map overlay |
+| **ESC** | Launch (Playing) | Exit |
 
 ### World Map View
 
