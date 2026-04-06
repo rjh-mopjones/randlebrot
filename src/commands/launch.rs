@@ -202,7 +202,7 @@ pub fn run(level_tag: String) -> Result<(), String> {
         pitch: 0.0,
         fov: std::f64::consts::FRAC_PI_3,
         draw_distance: DEFAULT_DRAW_DISTANCE,
-        mode: VoxelCameraMode::FirstPerson,
+        mode: VoxelCameraMode::ThirdPerson { distance: 30.0, pitch: 0.5 },
     };
     app.insert_resource(VoxelCameraState { camera: voxel_camera });
 
@@ -598,11 +598,12 @@ fn camera_input_system(
     let dt = time.delta_secs() as f64;
     let cam = &mut camera_state.camera;
 
-    // Check if egui wants input (it shouldn't with interactable(false), but be safe)
-    let egui_wants_kb = contexts
-        .ctx_mut()
-        .map(|ctx| ctx.wants_keyboard_input())
-        .unwrap_or(false);
+    // Force egui to release keyboard/pointer focus so WASD and mouse always work.
+    // The HUD is non-interactive (.interactable(false)) but egui can still claim
+    // focus in some configurations. This is the nuclear option.
+    if let Ok(ctx) = contexts.ctx_mut() {
+        ctx.memory_mut(|mem| mem.surrender_focus(egui::Id::NULL));
+    }
 
     // ─── Mouse look ────────────────────────────────────────────────
     if !map_state.visible {
@@ -621,7 +622,7 @@ fn camera_input_system(
     }
 
     // ─── WASD movement ─────────────────────────────────────────────
-    if !egui_wants_kb {
+    {
         let mut forward = 0.0_f64;
         let mut strafe = 0.0_f64;
 

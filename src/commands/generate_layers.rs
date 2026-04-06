@@ -164,7 +164,7 @@ pub fn run(
     // ─── 4. Stitch layer PNGs (8192x4096 → 4096x2048) ───────────────────────
     let layer_count = NoiseLayer::all().len();
     let layer_bar = tile_progress_bar(layer_count as u64, "[4/6] Stitching layer PNGs");
-    let (images, layer_image_names) = stitch_layer_images(&tiles, &norm_hints, &layer_bar);
+    let (mut images, mut layer_image_names) = stitch_layer_images(&tiles, &norm_hints, &layer_bar);
     layer_bar.finish_with_message(format!("[4/6] Stitched {} layer PNGs", layer_image_names.len()));
 
     // ─── 5. Build MesoTerrainView and run LifeGen ───────────────────────────
@@ -185,6 +185,20 @@ pub fn run(
         lifegen.settlement_seeds.len(),
         lifegen.road_segments.len(),
     ));
+
+    // ─── 5b. Render LifeGen layer PNGs and add to images ─────────────────────
+    let lifegen_layers = [
+        "habitability", "navigation_cost", "resource_desirability",
+        "factions", "settlements", "roads", "composite",
+    ];
+    for layer_name in &lifegen_layers {
+        let rgba = lifegen.to_layer_image(layer_name);
+        if !rgba.is_empty() {
+            let filename = format!("lifegen_{layer_name}.png");
+            images.insert(filename.clone(), (lifegen.width as u32, lifegen.height as u32, rgba));
+            layer_image_names.push(filename);
+        }
+    }
 
     // ─── 6. Persist artifact ────────────────────────────────────────────────
     let stage = stage_spinner("[6/6] Saving artifact (bincode + PNGs + manifest)");
