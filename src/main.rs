@@ -5,7 +5,7 @@ use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use rb_core::{AppMode, ModeTransitionEvent, PlayableLevel, SelectedChunk, SelectedMesoTile, SelectedMicroTile, TerrainQuery, WorldPos, handle_mode_shortcuts};
-use rb_editor::{CurrentLayer, CurrentLifeGenLayer, GenerateMesoRequest, GeneratorUiState, LaunchLevelRequest, LauncherPhase, LifeGenLayer, RegenerateLifeGenRequest, RegenerationRequest, StartPlayRequest};
+use rb_editor::{CurrentLayer, CurrentLifeGenLayer, GenerateMesoRequest, GeneratorUiState, LaunchLevelRequest, LauncherPhase, LifeGenLayer, RegenerateLifeGenRequest, RegenerationRequest, SaveLevelRequest, SaveLevelUiState, StartPlayRequest};
 use rb_noise::{BiomeMap, MesoTerrainView, NoiseBackend, NormalizationHints};
 use rb_player::Player;
 use rb_tilemap::{LevelChunk, LoadedChunks};
@@ -709,6 +709,12 @@ fn launch_gui(layers_tag: Option<String>) {
             handle_start_play_request
                 .run_if(in_state(AppPhase::Ready)
                     .and(resource_exists::<StartPlayRequest>)),
+        )
+        // Launcher: save level artifact
+        .add_systems(Update,
+            handle_save_level_request
+                .run_if(in_state(AppPhase::Ready)
+                    .and(resource_exists::<SaveLevelRequest>)),
         )
         // Launcher: re-show micro grid when ESC returns from Playing
         .add_systems(Update,
@@ -4046,6 +4052,84 @@ fn reshow_micro_on_return(
     for entity in &micro_highlight {
         commands.entity(entity).insert(Visibility::Inherited);
     }
+}
+
+/// Handle "Save Level" request: extract the micro BiomeMap from cache,
+/// build a LevelManifest with global micro coordinates, and persist via rb_artifacts.
+fn handle_save_level_request(
+    mut commands: Commands,
+    request: Res<SaveLevelRequest>,
+    micro_cache: Option<Res<MicroTileCache>>,
+    selected_micro: Option<Res<SelectedMicroTile>>,
+    selected_meso: Option<Res<SelectedMesoTile>>,
+    selected_chunk: Option<Res<SelectedChunk>>,
+    world_def: Res<WorldDefinition>,
+    mut save_ui: ResMut<SaveLevelUiState>,
+) {
+    // Always consume the request this frame.
+    let tag = request.tag.clone();
+    commands.remove_resource::<SaveLevelRequest>();
+
+    // Validate we have all the data we need.
+    let (Some(micro_cache), Some(selected_micro), Some(selected_meso), Some(selected_chunk)) =
+        (micro_cache, selected_micro, selected_meso, selected_chunk)
+    else {
+        save_ui.status = Some(("No micro tile data available".to_string(), true));
+        return;
+    };
+
+    let local_coord = selected_micro.micro_coord;
+    let Some(cached_tile) = micro_cache.tiles.get(&local_coord) else {
+        save_ui.status = Some((format!("Micro tile ({}, {}) not in cache", local_coord.0, local_coord.1), true));
+        return;
+    };
+
+    // Convert local launcher coords to global CLI micro coords.
+    // global_x = macro_chunk_x * 64 + meso_local_x * 8 + micro_local_x
+    // global_y = macro_chunk_y * 64 + meso_local_y * 8 + micro_local_y
+    // (64 = CHUNK_SIZE in world units, 8 = MESO_WORLD_SIZE, 1 = MICRO_WORLD_SIZE)
+    let (chunk_x, chunk_y) = selected_chunk.chunk_coord;
+    let (meso_x, meso_y) = selected_meso.meso_coord;
+    let (micro_x, micro_y) = local_coord;
+    // CHUNK_SIZE_I (64) = MESO_GRID_SIZE (8) * MICRO_GRID_SIZE (8) micro tiles across a macro chunk.
+    let global_micro_x = chunk_x * CHUNK_SIZE_I as i32 + meso_x * MICRO_GRID_SIZE + micro_x;
+    let global_micro_y = chunk_y * CHUNK_SIZE_I as i32 + meso_y * MICRO_GRID_SIZE + micro_y;
+
+    let manifest = rb_artifacts::LevelManifest {
+        parent_layers_tag: None,
+        seed: world_def.seed,
+        civ_seed: world_def.civ_seed,
+        micro_coord: (global_micro_x, global_micro_y),
+        created: chrono_timestamp(),
+    };
+
+    // Save via rb_artifacts.
+    match rb_artifacts::ArtifactStore::new() {
+        Ok(store) => {
+            match store.save_level(&tag, &cached_tile._biome_map, &manifest) {
+                Ok(()) => {
+                    println!(
+                        "Saved level artifact '{}' at global micro ({}, {})",
+                        tag, global_micro_x, global_micro_y,
+                    );
+                    save_ui.status = Some((format!("Saved as '{tag}'"), false));
+                }
+                Err(e) => {
+                    eprintln!("Failed to save level artifact: {e}");
+                    save_ui.status = Some((format!("Save failed: {e}"), true));
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to open artifact store: {e}");
+            save_ui.status = Some((format!("Store error: {e}"), true));
+        }
+    }
+}
+
+/// Generate an ISO 8601 timestamp string for manifest creation times.
+fn chrono_timestamp() -> String {
+    chrono::Utc::now().to_rfc3339()
 }
 
 /// Clean up all launcher-specific entities when leaving LevelLauncher mode.
