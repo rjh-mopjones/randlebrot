@@ -98,8 +98,8 @@ These rules derive from the game design and are non-negotiable constraints on th
 ```bash
 # ─── GUI (default) ───
 cargo run                                        # editor mode (default, same as `cargo run -- gui`)
-cargo run -- gui                                 # explicit editor launch
-cargo run -- gui my-layers-tag                   # editor, opening an existing layer artifact
+cargo run -- gui                                 # explicit editor launch (auto-saves after generation)
+cargo run -- gui my-layers-tag                   # editor, loading an existing layer artifact (skips generation)
 
 # ─── Headless generation (primary workflow — no Bevy window) ───
 cargo run --release -- generate layers 42 my-tag                        # generate layers for seed 42
@@ -135,9 +135,11 @@ The CLI follows a **generate → view → launch** pipeline:
 
 4. **Launch** — `randlebrot launch <level-tag>` launches a playable level from a previously generated level artifact.
 
-5. **GUI** — `randlebrot gui [layers-tag]` (or just `randlebrot` with no args) launches the full Bevy editor. Optionally opens an existing layer artifact.
+5. **GUI** — `randlebrot gui [layers-tag]` (or just `randlebrot` with no args) launches the full Bevy editor. Two artifact integration paths:
+   - **Auto-save after generation**: When "Generate World" completes, the user is prompted for a tag name and the result is saved via `rb_artifacts::save_layers()`. The user can skip saving.
+   - **Load from artifact**: `randlebrot gui my-world` loads an existing layer artifact, skips the entire generation pipeline (Config, Generating, GeneratingMacro, GeneratingLifeGen), and goes straight to the editor with all resources populated.
 
-The `generate` subcommand and the list forms of `view` are headless (no window). `view layers <tag>`, `gui`, and `launch` open a Bevy window.
+The `generate` subcommand and the list forms of `view` are headless (no window). `view layers <tag>`, `gui`, and `launch` open a Bevy window. CLI-generated worlds can be opened in the GUI and vice versa.
 
 ### Debug Layer Workflow
 
@@ -212,7 +214,8 @@ randlebrot/
 │   ├── authored/         # Hand-placed data: plates, landmarks, key NPCs (RON files)
 │   └── palettes/         # District-type → tileset/entity mappings (RON files)
 └── src/main.rs           # Plugin composition, AppMode/AppPhase states, macro pre-generation,
-                          #   tile cache/sprite pool, Level Launcher systems, level chunk streaming
+                          #   tile cache/sprite pool, Level Launcher systems, level chunk streaming,
+                          #   artifact save (SavingArtifact phase), artifact load (LoadingArtifact phase)
 ```
 
 ## Dependency Graph (crate → depends on)
@@ -408,6 +411,8 @@ pub enum AppMode {
 }
 ```
 
+The editor loads and saves through `rb_artifacts`. After generating a world in the GUI, the result is auto-saved as a layers artifact. The GUI can also open an existing layers artifact via `randlebrot gui <tag>`, skipping the full generation pipeline. This unifies CLI and GUI workflows: CLI-generated worlds open in the editor, editor-generated worlds are available to the CLI.
+
 ### Mode Transitions
 - **F1-F4** keys switch between modes instantly
 - **World Generator** (F1): Generate procedural world, adjust noise params, save/load world definitions
@@ -468,6 +473,8 @@ SelectedMesoTile    // Meso tile selected within the launcher grid
 RegenerationRequest // Signal to regenerate world map from updated params
 CursorWorldPos      // Cursor position in world coordinates for chunk highlighting
 PlayableLevel       // Active playable level state (origin, seed, etc.)
+LoadLayersTag       // CLI-provided layers tag for load-from-artifact (`gui <tag>`)
+ArtifactSaveState   // Post-generation save dialog state (tag input, error, saving flag)
 ```
 
 ### Artifact Storage
