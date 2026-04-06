@@ -492,7 +492,10 @@ fn main() {
         },
 
         Some(Command::Launch { level_tag }) => {
-            println!("launch: level_tag={level_tag} — not implemented yet");
+            if let Err(e) = commands::launch::run(level_tag) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
         }
     }
 }
