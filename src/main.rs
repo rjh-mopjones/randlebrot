@@ -504,8 +504,40 @@ const MAP_HEIGHT: usize = 512;
 const CHUNK_SIZE_I: usize = 64;
 
 /// Launch the full Bevy editor GUI. This is the default entrypoint.
-fn launch_gui(_layers_tag: Option<String>) {
-    App::new()
+fn launch_gui(layers_tag: Option<String>) {
+    // If a layers tag was provided, validate it exists before launching Bevy.
+    if let Some(ref tag) = layers_tag {
+        match rb_artifacts::ArtifactStore::new() {
+            Ok(store) => {
+                if !store.exists(rb_artifacts::ArtifactKind::Layers, tag) {
+                    // List available tags for a helpful error message.
+                    let available = store.list_layers().unwrap_or_default();
+                    if available.is_empty() {
+                        eprintln!(
+                            "error: layer artifact '{tag}' not found (no layers exist \
+                             — run `randlebrot generate layers <seed> <tag>` first)"
+                        );
+                    } else {
+                        let tags: Vec<&str> = available.iter().map(|(t, _)| t.as_str()).collect();
+                        eprintln!(
+                            "error: layer artifact '{tag}' not found. Available: {}",
+                            tags.join(", ")
+                        );
+                    }
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("error: failed to initialise artifact store: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let loading_from_artifact = layers_tag.is_some();
+    let mut app = App::new();
+
+    app
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Randlebrot - World Editor".into(),
@@ -515,8 +547,16 @@ fn launch_gui(_layers_tag: Option<String>) {
             ..default()
         }))
         // State and events
-        .init_state::<AppMode>()
-        .init_state::<AppPhase>()
+        .init_state::<AppMode>();
+
+    // When loading from artifact, start in LoadingArtifact instead of Config.
+    if loading_from_artifact {
+        app.insert_state(AppPhase::LoadingArtifact);
+    } else {
+        app.init_state::<AppPhase>();
+    }
+
+    app
         .add_message::<ModeTransitionEvent>()
         .init_resource::<CurrentLayer>()
         .init_resource::<GeneratorParams>()
@@ -687,7 +727,24 @@ fn launch_gui(_layers_tag: Option<String>) {
             level_chunk_poll_system,
             level_chunk_unload_system,
         ).run_if(in_state(AppPhase::Ready).and(resource_exists::<PlayableLevel>)))
-        .run();
+        // SavingArtifact phase - prompt for tag and save
+        .add_systems(Update,
+            artifact_save_ui
+                .run_if(in_state(AppPhase::SavingArtifact)),
+        )
+        // LoadingArtifact phase - load from disk and populate resources
+        .add_systems(Update,
+            artifact_load_system
+                .run_if(in_state(AppPhase::LoadingArtifact)),
+        );
+
+    // If a layers tag was provided, insert it as a resource so the
+    // LoadingArtifact system can read it.
+    if let Some(tag) = layers_tag {
+        app.insert_resource(LoadLayersTag(tag));
+    }
+
+    app.run();
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -752,6 +809,42 @@ const MICRO_TILE_DISPLAY_PX: f32 = 16.0;
 /// Marker resource to trigger generation start.
 #[derive(Resource)]
 struct GenerationStarted;
+
+/// Layers tag passed via CLI (`randlebrot gui <tag>`) for load-from-artifact.
+#[derive(Resource)]
+struct LoadLayersTag(String);
+
+/// State for the post-generation artifact save dialog.
+#[derive(Resource)]
+struct ArtifactSaveState {
+    /// Tag name input by the user.
+    tag_input: String,
+    /// Error message to display (validation/save failure).
+    error: Option<String>,
+    /// Whether the save is in progress (async task running).
+    saving: bool,
+}
+
+impl Default for ArtifactSaveState {
+    fn default() -> Self {
+        Self {
+            tag_input: String::new(),
+            error: None,
+            saving: false,
+        }
+    }
+}
+
+/// State for the load-from-artifact phase.
+#[derive(Resource)]
+struct ArtifactLoadState {
+    /// Current status message.
+    status: String,
+    /// Whether loading is in progress.
+    loading: bool,
+    /// Error message if loading failed.
+    error: Option<String>,
+}
 
 /// Global heightmap normalization hints computed after macro pregen.
 /// Ensures all tiles use the same heightmap range for consistent shading.
@@ -1022,6 +1115,8 @@ enum AppPhase {
     Generating,          // Generate macro biome data
     GeneratingMacro,     // Pre-generate all 128 macro tiles
     GeneratingLifeGen,   // Run civilisation generation pipeline
+    SavingArtifact,      // Prompt for tag name and save via rb_artifacts
+    LoadingArtifact,     // Load layers from disk, populate resources, jump to Ready
     Ready,
 }
 
@@ -1266,6 +1361,7 @@ fn poll_macro_pregen(
     mut commands: Commands,
     global_rivers: Option<Res<GlobalRiverNetwork>>,
     world_def: Res<WorldDefinition>,
+    existing_lifegen: Option<Res<LifeGenData>>,
 ) {
     let frame = tile_cache.frame;
 
@@ -1373,24 +1469,31 @@ fn poll_macro_pregen(
                 MesoTerrainView::from_tile_map(&tile_biome_maps, chunks_x, chunks_y, TILE_MAP_SIZE),
             ));
 
-            // Spawn async LifeGen task
-            let terrain_view = Arc::new(MesoTerrainView::from_tile_map(
-                &tile_biome_maps, chunks_x, chunks_y, TILE_MAP_SIZE,
-            ));
-            let civ_seed = world_def.civ_seed;
-            let progress = rb_world::lifegen::new_progress();
-            let progress_clone = progress.clone();
-            let task = AsyncComputeTaskPool::get().spawn(async move {
-                let data = rb_world::lifegen::generate_with_progress(
-                    terrain_view.as_ref(), civ_seed, Some(progress_clone),
-                );
-                data.save_debug_layers(std::path::Path::new("debug_layers"));
-                data
-            });
-            commands.insert_resource(LifeGenTask { task, progress });
-
             commands.remove_resource::<MacroPregenState>();
-            next_phase.set(AppPhase::GeneratingLifeGen);
+
+            // If LifeGenData already exists (loaded from artifact), skip LifeGen
+            // and go straight to Ready.
+            if existing_lifegen.is_some() {
+                println!("LifeGenData already loaded from artifact, skipping generation.");
+                next_phase.set(AppPhase::Ready);
+            } else {
+                // Spawn async LifeGen task
+                let terrain_view = Arc::new(MesoTerrainView::from_tile_map(
+                    &tile_biome_maps, chunks_x, chunks_y, TILE_MAP_SIZE,
+                ));
+                let civ_seed = world_def.civ_seed;
+                let progress = rb_world::lifegen::new_progress();
+                let progress_clone = progress.clone();
+                let task = AsyncComputeTaskPool::get().spawn(async move {
+                    let data = rb_world::lifegen::generate_with_progress(
+                        terrain_view.as_ref(), civ_seed, Some(progress_clone),
+                    );
+                    data.save_debug_layers(std::path::Path::new("debug_layers"));
+                    data
+                });
+                commands.insert_resource(LifeGenTask { task, progress });
+                next_phase.set(AppPhase::GeneratingLifeGen);
+            }
         }
     }
 }
@@ -1561,11 +1664,13 @@ fn macro_pregen_progress_ui(
         });
 }
 
-/// Poll async LifeGen task. When complete, insert LifeGenData and transition to Ready.
+/// Poll async LifeGen task. When complete, insert LifeGenData and transition to
+/// SavingArtifact (to prompt the user for a tag) or Ready (if skipping save).
 fn poll_lifegen_task(
     mut commands: Commands,
     mut task_res: ResMut<LifeGenTask>,
     mut next_phase: ResMut<NextState<AppPhase>>,
+    world_def: Res<WorldDefinition>,
 ) {
     if let Some(lifegen) = block_on(poll_once(&mut task_res.task)) {
         println!(
@@ -1577,7 +1682,15 @@ fn poll_lifegen_task(
         );
         commands.insert_resource(lifegen);
         commands.remove_resource::<LifeGenTask>();
-        next_phase.set(AppPhase::Ready);
+
+        // Pre-fill the tag input with the world name (sanitised for filesystem).
+        let default_tag = sanitize_tag(&world_def.name);
+        commands.insert_resource(ArtifactSaveState {
+            tag_input: default_tag,
+            error: None,
+            saving: false,
+        });
+        next_phase.set(AppPhase::SavingArtifact);
     }
 }
 
@@ -1657,6 +1770,481 @@ fn lifegen_progress_ui(
                 }
             });
         });
+}
+
+/// Sanitise a string into a valid artifact tag (alphanumeric + hyphens + underscores).
+/// Replaces spaces with hyphens, strips invalid characters, and lowercases.
+fn sanitize_tag(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else if c == ' ' {
+                '-'
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "world".to_string()
+    } else {
+        sanitized
+    }
+}
+
+// ─── Artifact Save (post-generation) ────────────────────────────────────────
+
+/// UI system for the SavingArtifact phase.
+/// Shows an egui dialog prompting for a tag name, then saves via rb_artifacts.
+fn artifact_save_ui(
+    mut contexts: EguiContexts,
+    mut save_state: ResMut<ArtifactSaveState>,
+    mut next_phase: ResMut<NextState<AppPhase>>,
+    mut commands: Commands,
+    macro_biome: Option<Res<MacroBiomeData>>,
+    global_rivers: Option<Res<GlobalRiverNetwork>>,
+    lifegen: Option<Res<LifeGenData>>,
+    tile_cache: Option<Res<TileCache>>,
+    norm_hints: Option<Res<GlobalNormHints>>,
+    world_def: Res<WorldDefinition>,
+    ui_state: Res<GeneratorUiState>,
+) {
+    let ctx = contexts.ctx_mut().unwrap();
+
+    egui::CentralPanel::default()
+        .frame(egui::Frame::default().fill(egui::Color32::from_rgb(30, 30, 30)))
+        .show(ctx, |_| {});
+
+    let mut do_save = false;
+    let mut do_skip = false;
+
+    egui::Window::new("Save World Artifact")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .fixed_size([380.0, 160.0])
+        .show(ctx, |ui| {
+            ui.vertical(|ui| {
+                ui.label("Generation complete. Save as artifact?");
+                ui.add_space(10.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Tag:");
+                    ui.text_edit_singleline(&mut save_state.tag_input);
+                });
+                ui.add_space(5.0);
+
+                if let Some(ref err) = save_state.error {
+                    ui.label(
+                        egui::RichText::new(err)
+                            .color(egui::Color32::from_rgb(255, 100, 100))
+                            .size(12.0),
+                    );
+                    ui.add_space(5.0);
+                }
+
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() && !save_state.saving {
+                        do_save = true;
+                    }
+                    if ui.button("Skip").clicked() {
+                        do_skip = true;
+                    }
+                });
+
+                if save_state.saving {
+                    ui.add_space(5.0);
+                    ui.label("Saving...");
+                }
+            });
+        });
+
+    if do_skip {
+        commands.remove_resource::<ArtifactSaveState>();
+        next_phase.set(AppPhase::Ready);
+        return;
+    }
+
+    if do_save {
+        let tag = save_state.tag_input.trim().to_string();
+
+        // Validate tag
+        if tag.is_empty() {
+            save_state.error = Some("Tag must not be empty".to_string());
+            return;
+        }
+        if !tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            save_state.error = Some(
+                "Tag must contain only letters, numbers, hyphens, and underscores".to_string(),
+            );
+            return;
+        }
+
+        save_state.saving = true;
+        save_state.error = None;
+
+        // Perform the save synchronously (bincode serialisation is fast).
+        let save_result = perform_artifact_save(
+            &tag,
+            macro_biome.as_deref(),
+            global_rivers.as_deref(),
+            lifegen.as_deref(),
+            tile_cache.as_deref(),
+            norm_hints.as_deref(),
+            &world_def,
+            &ui_state,
+        );
+
+        match save_result {
+            Ok(path) => {
+                println!("Artifact saved to {}", path);
+                commands.remove_resource::<ArtifactSaveState>();
+                next_phase.set(AppPhase::Ready);
+            }
+            Err(err) => {
+                save_state.saving = false;
+                save_state.error = Some(err);
+            }
+        }
+    }
+}
+
+/// Perform the actual artifact save. Returns the artifact path on success.
+fn perform_artifact_save(
+    tag: &str,
+    macro_biome: Option<&MacroBiomeData>,
+    global_rivers: Option<&GlobalRiverNetwork>,
+    lifegen: Option<&LifeGenData>,
+    tile_cache: Option<&TileCache>,
+    norm_hints: Option<&GlobalNormHints>,
+    world_def: &WorldDefinition,
+    ui_state: &GeneratorUiState,
+) -> Result<String, String> {
+    let store = rb_artifacts::ArtifactStore::new()
+        .map_err(|e| format!("Failed to initialise artifact store: {e}"))?;
+
+    // If artifact already exists, overwrite it (the user chose this tag in a dialog).
+    if store.exists(rb_artifacts::ArtifactKind::Layers, tag) {
+        store
+            .delete(rb_artifacts::ArtifactKind::Layers, tag)
+            .map_err(|e| format!("Failed to remove existing artifact '{tag}': {e}"))?;
+    }
+
+    let macro_biome = macro_biome.ok_or("No macro BiomeMap available for saving")?;
+    let lifegen = lifegen.ok_or("No LifeGenData available for saving")?;
+
+    // Build the river network for serialisation.
+    // The GlobalRiverNetwork holds an Arc; we need an owned reference for save_layers.
+    let empty_river_network: rb_noise::RiverNetwork =
+        ron::de::from_str("(segments: [], lakes: [])").map_err(|e| format!("Internal error: {e}"))?;
+    let river_network_ref = match global_rivers {
+        Some(gr) => &*gr.network,
+        None => &empty_river_network,
+    };
+
+    // Stitch layer images from the tile cache (same as save_stitched_debug_layers
+    // but producing the HashMap format that save_layers expects).
+    let images = if let (Some(cache), Some(hints)) = (tile_cache, norm_hints) {
+        stitch_layer_images_for_artifact(cache, &hints.0)
+    } else {
+        HashMap::new()
+    };
+
+    let layer_image_names: Vec<String> = {
+        let mut names: Vec<String> = images.keys().cloned().collect();
+        names.sort();
+        names
+    };
+
+    let backend_label = if ui_state.use_gpu { "gpu" } else { "cpu" };
+
+    let manifest = rb_artifacts::LayerManifest {
+        seed: world_def.seed,
+        civ_seed: world_def.civ_seed,
+        created: chrono::Utc::now().to_rfc3339(),
+        world_width: world_def.width as u32,
+        world_height: world_def.height as u32,
+        backend: backend_label.to_string(),
+        layer_images: layer_image_names,
+    };
+
+    store
+        .save_layers(tag, &macro_biome.biome_map, river_network_ref, lifegen, &images, &manifest)
+        .map_err(|e| format!("Failed to save artifact: {e}"))?;
+
+    let artifact_path = store.base_path().join("layers").join(tag);
+    Ok(artifact_path.display().to_string())
+}
+
+/// Stitch tile cache into layer PNGs for artifact saving.
+/// Returns a map of filename -> (width, height, rgba_bytes).
+fn stitch_layer_images_for_artifact(
+    tile_cache: &TileCache,
+    norm_hints: &NormalizationHints,
+) -> HashMap<String, (u32, u32, Vec<u8>)> {
+    use rb_noise::NoiseLayer;
+
+    let chunks_x = (MAP_WIDTH as f32 / CHUNK_SIZE).ceil() as usize;
+    let chunks_y = (MAP_HEIGHT as f32 / CHUNK_SIZE).ceil() as usize;
+    let full_w = (chunks_x * TILE_MAP_SIZE) as u32;
+    let full_h = (chunks_y * TILE_MAP_SIZE) as u32;
+    let tile_px = TILE_MAP_SIZE as u32;
+    let half_w = full_w / 2;
+    let half_h = full_h / 2;
+
+    let mut images: HashMap<String, (u32, u32, Vec<u8>)> = HashMap::new();
+
+    for layer in NoiseLayer::all() {
+        let stride_px = full_w as usize;
+        let mut full: Vec<u8> = vec![0u8; (full_w as usize) * (full_h as usize) * 4];
+
+        for cy in 0..chunks_y {
+            for cx in 0..chunks_x {
+                let coord = (cx as i32, cy as i32);
+                let Some(cached) = tile_cache.macro_tiles.get(&coord) else { continue };
+                let rgba = cached.biome_map.to_layer_image_with_hints(*layer, Some(norm_hints));
+                if rgba.len() != (tile_px as usize) * (tile_px as usize) * 4 {
+                    continue;
+                }
+                let ox = cx * TILE_MAP_SIZE;
+                let oy = cy * TILE_MAP_SIZE;
+                for py in 0..TILE_MAP_SIZE {
+                    let src_row = py * TILE_MAP_SIZE * 4;
+                    let dst_row = ((oy + py) * stride_px + ox) * 4;
+                    let row_bytes = TILE_MAP_SIZE * 4;
+                    full[dst_row..dst_row + row_bytes]
+                        .copy_from_slice(&rgba[src_row..src_row + row_bytes]);
+                }
+            }
+        }
+
+        // Downscale 2x (box filter) to 4096x2048.
+        let mut small: Vec<u8> = vec![0u8; (half_w as usize) * (half_h as usize) * 4];
+        for sy in 0..half_h as usize {
+            for sx in 0..half_w as usize {
+                let x0 = sx * 2;
+                let y0 = sy * 2;
+                let idx = |x: usize, y: usize| (y * stride_px + x) * 4;
+                let p0 = idx(x0, y0);
+                let p1 = idx(x0 + 1, y0);
+                let p2 = idx(x0, y0 + 1);
+                let p3 = idx(x0 + 1, y0 + 1);
+                let avg = |a: u8, b: u8, c: u8, d: u8| -> u8 {
+                    ((a as u16 + b as u16 + c as u16 + d as u16) / 4) as u8
+                };
+                let dst = (sy * half_w as usize + sx) * 4;
+                small[dst] = avg(full[p0], full[p1], full[p2], full[p3]);
+                small[dst + 1] = avg(full[p0 + 1], full[p1 + 1], full[p2 + 1], full[p3 + 1]);
+                small[dst + 2] = avg(full[p0 + 2], full[p1 + 2], full[p2 + 2], full[p3 + 2]);
+                small[dst + 3] = avg(full[p0 + 3], full[p1 + 3], full[p2 + 3], full[p3 + 3]);
+            }
+        }
+
+        let file_name = commands::generate_layers::layer_file_name(*layer);
+        images.insert(file_name, (half_w, half_h, small));
+    }
+
+    images
+}
+
+// ──��� Artifact Load (from CLI tag) ───────────────────────────────────────────
+
+/// System that runs during AppPhase::LoadingArtifact.
+/// Loads the layer artifact from disk, populates Bevy resources, and transitions
+/// to AppPhase::GeneratingMacro (to re-generate the 128 macro tile textures
+/// from the loaded BiomeMap, since textures cannot be serialised).
+fn artifact_load_system(
+    mut commands: Commands,
+    mut next_phase: ResMut<NextState<AppPhase>>,
+    load_tag: Option<Res<LoadLayersTag>>,
+    mut contexts: EguiContexts,
+) {
+    // Show a loading screen while we work.
+    let ctx = contexts.ctx_mut().unwrap();
+    egui::CentralPanel::default()
+        .frame(egui::Frame::default().fill(egui::Color32::from_rgb(30, 30, 30)))
+        .show(ctx, |_| {});
+
+    let Some(load_tag) = load_tag else {
+        // No tag provided — should not happen, but fall back to Config.
+        next_phase.set(AppPhase::Config);
+        return;
+    };
+    let tag = load_tag.0.clone();
+
+    egui::Window::new("Loading Artifact")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .fixed_size([380.0, 80.0])
+        .show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.label(format!("Loading layer artifact '{tag}'..."));
+                ui.add_space(10.0);
+                ui.spinner();
+            });
+        });
+
+    // Load the data from disk.
+    let store = match rb_artifacts::ArtifactStore::new() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: failed to initialise artifact store: {e}");
+            next_phase.set(AppPhase::Config);
+            commands.remove_resource::<LoadLayersTag>();
+            return;
+        }
+    };
+
+    let manifest = match store.load_layer_manifest(&tag) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: failed to load manifest for '{tag}': {e}");
+            next_phase.set(AppPhase::Config);
+            commands.remove_resource::<LoadLayersTag>();
+            return;
+        }
+    };
+
+    let (mut biome_map, river_network, lifegen) = match store.load_layers_data(&tag) {
+        Ok(data) => data,
+        Err(e) => {
+            eprintln!("error: failed to load layer data for '{tag}': {e}");
+            next_phase.set(AppPhase::Config);
+            commands.remove_resource::<LoadLayersTag>();
+            return;
+        }
+    };
+
+    println!(
+        "Loaded artifact '{tag}': seed={}, civ_seed={}, {}x{}, backend={}",
+        manifest.seed, manifest.civ_seed, manifest.world_width, manifest.world_height,
+        manifest.backend,
+    );
+    println!(
+        "  BiomeMap: {}x{}, LifeGen: {} provinces, {} factions, {} settlements, {} roads",
+        biome_map.width, biome_map.height,
+        lifegen.provinces.len(), lifegen.factions.len(),
+        lifegen.settlement_seeds.len(), lifegen.road_segments.len(),
+    );
+
+    // Reconnect the river network Arc to the BiomeMap (it is serde(skip)).
+    let river_arc = Arc::new(river_network);
+    biome_map.river_network = Some(river_arc.clone());
+
+    // Update WorldDefinition from the manifest.
+    let mut world_def = WorldDefinition::default();
+    world_def.seed = manifest.seed;
+    world_def.civ_seed = manifest.civ_seed;
+    world_def.width = manifest.world_width as usize;
+    world_def.height = manifest.world_height as usize;
+    world_def.name = tag.clone();
+    commands.insert_resource(world_def);
+
+    // Insert core resources.
+    commands.insert_resource(GlobalRiverNetwork {
+        network: river_arc,
+    });
+    commands.insert_resource(MacroBiomeData {
+        biome_map: Arc::new(biome_map),
+    });
+    commands.insert_resource(lifegen);
+    commands.insert_resource(GenerationStarted);
+
+    // Spawn chunk highlight (follows cursor).
+    commands.spawn((
+        Sprite {
+            color: Color::srgba(1.0, 1.0, 0.8, 0.3),
+            custom_size: Some(Vec2::splat(CHUNK_SIZE)),
+            ..default()
+        },
+        Transform::from_xyz(-10000.0, -10000.0, 0.5),
+        ChunkHighlight,
+    ));
+
+    // Spawn persistent selection highlight.
+    commands.spawn((
+        Sprite {
+            color: Color::srgba(0.2, 0.8, 1.0, 0.45),
+            custom_size: Some(Vec2::splat(CHUNK_SIZE)),
+            ..default()
+        },
+        Transform::from_xyz(-10000.0, -10000.0, 0.4),
+        Visibility::Hidden,
+        ChunkSelectionHighlight,
+    ));
+
+    // Province highlight overlay.
+    commands.spawn((
+        Sprite {
+            color: Color::WHITE,
+            custom_size: Some(Vec2::new(MAP_WIDTH as f32, MAP_HEIGHT as f32)),
+            ..default()
+        },
+        Transform::from_xyz(0.0, 0.0, 0.6),
+        Visibility::Hidden,
+        ProvinceHighlightSprite,
+    ));
+
+    // Settlement proximity marker.
+    commands.spawn((
+        Sprite {
+            color: Color::srgba(1.0, 1.0, 0.3, 0.8),
+            custom_size: Some(Vec2::splat(4.0)),
+            ..default()
+        },
+        Transform::from_xyz(-10000.0, -10000.0, 0.7),
+        Visibility::Hidden,
+        SettlementHighlightSprite,
+    ));
+
+    // Spawn sprite pool.
+    let mut macro_sprites = Vec::with_capacity(MACRO_POOL_SIZE);
+    let mut macro_assigned = Vec::with_capacity(MACRO_POOL_SIZE);
+    for _i in 0..MACRO_POOL_SIZE {
+        let entity = commands.spawn((
+            Sprite { ..default() },
+            Transform::from_xyz(-10000.0, -10000.0, 0.1),
+            Visibility::Hidden,
+            PoolSlot,
+        )).id();
+        macro_sprites.push(entity);
+        macro_assigned.push(None);
+    }
+    commands.insert_resource(SpritePool {
+        macro_sprites,
+        macro_assigned,
+    });
+    commands.insert_resource(TileCache::default());
+    commands.insert_resource(TileRequestQueue::default());
+
+    // Queue all macro tiles for texture generation (we have the BiomeMap data
+    // but need to re-generate the 128 tile textures for display).
+    let chunks_x = (manifest.world_width as f32 / CHUNK_SIZE).ceil() as i32;
+    let chunks_y = (manifest.world_height as f32 / CHUNK_SIZE).ceil() as i32;
+    let mut remaining: Vec<(i32, i32)> = Vec::new();
+    for cy in 0..chunks_y {
+        for cx in 0..chunks_x {
+            remaining.push((cx, cy));
+        }
+    }
+    let total = remaining.len();
+    commands.insert_resource(MacroPregenState {
+        total,
+        completed: 0,
+        remaining,
+        in_flight: Vec::new(),
+        post_phase: MacroPostPhase::Generating,
+    });
+
+    commands.remove_resource::<LoadLayersTag>();
+    // Transition to GeneratingMacro to re-generate tile textures from the loaded data.
+    // The LifeGen data is already loaded, so once macro tiles finish the
+    // BuildingTerrain post-phase will skip the LifeGen task and go straight to Ready.
+    next_phase.set(AppPhase::GeneratingMacro);
+    println!("Artifact loaded. Pre-generating {} macro tile textures...", total);
 }
 
 /// Show progress bar during meso tile pre-generation.
