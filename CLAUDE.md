@@ -622,7 +622,7 @@ Example: `randlebrot generate level my-world 512,256 terminus-village` samples t
 
 The `rb_voxel` crate implements Comanche-style voxel space raycasting -- a column-based heightmap renderer that produces a 2.5D terrain perspective view. This is NOT Minecraft-style block voxels; it renders a 2D heightmap as a 3D-looking terrain flyover.
 
-**Algorithm:** For each screen column, cast a ray forward over the heightmap, sampling terrain height and color at regular intervals. Project each sample to a screen Y coordinate based on height difference and distance. Draw vertical color slices bottom-up, skipping already-drawn pixels (back-to-front occlusion). Each column is independent, making the algorithm embarrassingly parallel.
+**Algorithm:** For each screen column, cast a ray from near to far over the heightmap, sampling terrain height and color at regular intervals. Project each sample to a screen Y coordinate based on height difference and distance. Draw vertical color slices with front-to-back occlusion (skip already-drawn pixels). Each column is independent, making the algorithm embarrassingly parallel.
 
 **Key design decisions:**
 - **Pure Rust + rayon** -- no Bevy dependency, no ECS. The crate takes raw `&[f64]` heightmap and `&[u8]` RGBA colormap slices, outputs to a `&mut [u8]` RGBA buffer. The caller (e.g., a Bevy system) handles data extraction and texture upload.

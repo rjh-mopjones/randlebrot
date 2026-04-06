@@ -1,8 +1,8 @@
 //! Comanche-style voxel space terrain raycaster.
 //!
-//! Column-based heightmap renderer: for each screen column, cast a ray forward
-//! over a 2D heightmap, draw vertical slices bottom-up. Produces the classic
-//! terrain-flight perspective (Comanche, Outcast, Delta Force).
+//! Column-based heightmap renderer: for each screen column, cast a ray from near
+//! to far over a 2D heightmap, draw vertical slices with front-to-back occlusion.
+//! Produces the classic terrain-flight perspective (Comanche, Outcast, Delta Force).
 //!
 //! This is NOT Minecraft-style block voxels -- it is a heightmap column renderer.
 //!
@@ -31,9 +31,9 @@ pub enum CameraMode {
     /// Camera behind and above a target point.
     ThirdPerson {
         /// Distance behind the target along the yaw axis.
-        distance: f32,
+        distance: f64,
         /// Downward pitch angle in radians (0 = horizontal, positive = look down).
-        pitch: f32,
+        pitch: f64,
     },
 }
 
@@ -208,12 +208,11 @@ fn effective_camera(camera: &Camera) -> (f64, f64, f64, f64, f64) {
         CameraMode::FirstPerson => (camera.x, camera.y, camera.height, camera.yaw, camera.pitch),
         CameraMode::ThirdPerson { distance, pitch } => {
             // Camera is behind and above the target point (camera.x, camera.y).
-            let d = distance as f64;
-            let cam_x = camera.x - camera.yaw.cos() * d;
-            let cam_y = camera.y - camera.yaw.sin() * d;
-            let cam_height = camera.height + d * (pitch as f64).sin();
+            let cam_x = camera.x - camera.yaw.cos() * distance;
+            let cam_y = camera.y - camera.yaw.sin() * distance;
+            let cam_height = camera.height + distance * pitch.sin();
             // Look toward the target, so yaw stays the same. Pitch is downward.
-            (cam_x, cam_y, cam_height, camera.yaw, -(pitch as f64))
+            (cam_x, cam_y, cam_height, camera.yaw, -pitch)
         }
     }
 }
@@ -290,14 +289,11 @@ pub fn render_frame(
     // Each column only writes to its own x coordinate across all rows, so no data races.
 
     // First, fill entire output with fog/sky color.
-    for y in 0..screen_height {
-        for x in 0..screen_width {
-            let offset = (y * screen_width + x) * 4;
-            output[offset] = fog_color[0];
-            output[offset + 1] = fog_color[1];
-            output[offset + 2] = fog_color[2];
-            output[offset + 3] = 255;
-        }
+    for pixel in output.chunks_exact_mut(4) {
+        pixel[0] = fog_color[0];
+        pixel[1] = fog_color[1];
+        pixel[2] = fog_color[2];
+        pixel[3] = 255;
     }
 
     // We use a raw pointer (stored as usize) to allow parallel mutable access
