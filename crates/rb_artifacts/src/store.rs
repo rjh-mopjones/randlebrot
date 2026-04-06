@@ -525,7 +525,7 @@ mod tests {
             parent_layers_tag: Some("test-layers".to_string()),
             seed: 42,
             civ_seed: 99,
-            micro_coord: (4, 3),
+            chunk_coord: (4, 3),
             created: "2026-01-15T12:30:00Z".to_string(),
         }
     }
@@ -669,7 +669,7 @@ mod tests {
         let listed = store.list_levels().unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].0, "level-one");
-        assert_eq!(listed[0].1.micro_coord, (4, 3));
+        assert_eq!(listed[0].1.chunk_coord, (4, 3));
     }
 
     #[test]

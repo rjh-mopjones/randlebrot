@@ -129,11 +129,11 @@ The CLI follows a **generate → view → launch** pipeline:
 
 1. **Generate layers** — `randlebrot generate layers <seed> <tag>` runs the full TerrainGen + LifeGen pipeline headlessly (no window) and writes the result to a tagged artifact. Use `--civ-seed` to iterate on civilisation without regenerating terrain. Use `--backend cpu|gpu` to select the compute backend (default: gpu).
 
-2. **Generate level** — `randlebrot generate level <layers-tag|--seed N> <x,y> <tag>` generates a playable micro-level at the given **global micro coordinate** (see `### Chunk Grid`). The source is either a previously generated layers artifact (by tag, fast — reuses the cached macro `BiomeMap` + `RiverNetwork`) or a raw seed (slow — regenerates the macro `BiomeMap` in memory, terrain-only, no LifeGen). Coordinate is a comma-separated `x,y` pair of i32 values in the 1024×512 global micro grid. Use `--backend cpu|gpu` and `--force` as with `generate layers`.
+2. **Generate level** — `randlebrot generate level <layers-tag|--seed N> <x,y> <tag>` generates a playable chunk at the given **global chunk coordinate** (see `### Chunk Grid`). The source is either a previously generated layers artifact (by tag, fast — reuses the cached macro `BiomeMap` + `RiverNetwork`) or a raw seed (slow — regenerates the macro `BiomeMap` in memory, terrain-only, no LifeGen). Coordinate is a comma-separated `x,y` pair of i32 values in the 1024×512 global chunk grid. Use `--backend cpu|gpu` and `--force` as with `generate layers`.
 
 3. **View** — `randlebrot view layers` and `randlebrot view levels` list and inspect generated artifacts. `view levels <tag>` prints detailed metadata; `view layers <tag>` opens the interactive layer viewer (see CLI Visual Tools below).
 
-4. **Launch** — `randlebrot launch <level-tag>` opens a playable Bevy window for a previously generated level artifact. Loads the parent layers artifact for macro context (streaming new micro tiles on the fly as the player moves). Press M to toggle a world map overlay with the player's position. ESC exits.
+4. **Launch** — `randlebrot launch <level-tag>` opens a playable Bevy window for a previously generated level artifact. Loads the parent layers artifact for macro context (streaming new chunks on the fly as the player moves). Press M to toggle a world map overlay with the player's position. ESC exits.
 
 5. **GUI** — `randlebrot gui [layers-tag]` (or just `randlebrot` with no args) launches the full Bevy editor. Two artifact integration paths:
    - **Auto-save after generation**: When "Generate World" completes, the user is prompted for a tag name and the result is saved via `rb_artifacts::save_layers()`. The user can skip saving.
@@ -175,8 +175,9 @@ Always use `--release` — debug builds are unacceptably slow (tile generation d
 
 | Control | Action |
 |---------|--------|
-| Left/Right arrows | Cycle base layer |
-| Up/Down arrows | Cycle overlay layer (wraps through "None") |
+| Side panel combo box | Select base layer |
+| Side panel combo box | Select overlay layer (includes "None") |
+| Side panel slider | Adjust overlay opacity (0.0-1.0) |
 | Scroll wheel | Zoom in/out |
 | Left-click drag | Pan |
 | ESC | Exit |
@@ -184,10 +185,10 @@ Always use `--release` — debug builds are unacceptably slow (tile generation d
 **Behaviour**:
 
 - Default base layer is `biome.png` (falls back to first layer in manifest if absent).
-- Overlay starts at "None" and cycles through every other layer before wrapping back to "None".
-- Overlay is composited at z=1 with 50% alpha on top of the base sprite at z=0, so any of the ~20 layers can be any-on-any (full combinatorial).
+- Overlay starts at "None"; any layer can be selected as overlay from the combo box.
+- Overlay is composited at z=1 with adjustable alpha (default 0.5) on top of the base sprite at z=0, so any of the ~20 layers can be any-on-any (full combinatorial).
 - Textures are lazy-loaded and kept in a 4-entry LRU cache — only the currently displayed base + overlay consume GPU memory, with room for smooth back-and-forth cycling.
-- HUD (top-left egui window) shows the tag, base/overlay layer names (human-readable like "Rock Hardness", not `rock_hardness.png`), and zoom percentage.
+- Egui side panel (left, ~250px) shows the tag, zoom percentage, base/overlay layer combo boxes, and overlay opacity slider.
 - Window title is `Randlebrot - Layers: <tag>`.
 - If `<tag>` does not exist, prints a clear error and exits non-zero without opening a window.
 
@@ -197,7 +198,7 @@ Always use `--release` — debug builds are unacceptably slow (tile generation d
 
 `randlebrot launch <level-tag>` opens a playable level from a previously generated level artifact. It is a minimal Bevy app: `DefaultPlugins` + `EguiPlugin` + `RbPlayerPlugin` + `RbTilemapPlugin`. No editor stack, no world generation pipeline — the macro `BiomeMap` and `RiverNetwork` are loaded from the parent layers artifact (or regenerated from seed if the parent is missing).
 
-**Purpose**: quick testing of a specific micro-level tile without clicking through the GUI launcher drill-down (F4 → generate meso → select → generate micro → select → play).
+**Purpose**: quick testing of a specific chunk without clicking through the GUI launcher drill-down (F4 → generate meso → select → generate chunks → select → play).
 
 **Controls**:
 
@@ -210,8 +211,8 @@ Always use `--release` — debug builds are unacceptably slow (tile generation d
 
 **Behaviour**:
 
-- Player spawns at the level's micro coordinate with micro tiles streaming around them.
-- The initial micro tile (from the level artifact) is displayed immediately; surrounding tiles generate asynchronously.
+- Player spawns at the level's chunk coordinate with chunks streaming around them.
+- The initial chunk (from the level artifact) is displayed immediately; surrounding chunks generate asynchronously.
 - Press M to toggle a semi-transparent world map overlay showing the biome layer with a red dot marking the player's current position.
 - Parent layers artifact is loaded for macro context (fast path); if missing, macro data is regenerated from seed (slow path with a console message).
 - Window title is `Randlebrot - Playing: <tag>`.
@@ -318,9 +319,9 @@ Three detail levels with increasing octaves for progressive detail. Each tier us
 |-------|---------------|-------------|----------------|----------|
 | **Macro** | 1 | 512×512 | 64×64 chunk | World overview tiles |
 | **Meso** | 2 | 512×512 | 8×8 area | Regional zoom |
-| **Micro** | 3 | 512×512 | 1×1 area | Playable tilemap |
+| **Chunk** | 3 | 512×512 | 1×1 area | Playable tilemap |
 
-The full world (1024×512) is generated once as the base biome data. Macro tiles are pre-generated for all 128 chunks at startup. Meso tiles are generated on demand in the Level Launcher when the user clicks "Generate Mesomap" (64 tiles per macro chunk). Micro tiles stream around the player during play mode.
+The full world (1024×512) is generated once as the base biome data. Macro tiles are pre-generated for all 128 chunks at startup. Meso tiles are generated on demand in the Level Launcher when the user clicks "Generate Mesomap" (64 tiles per macro chunk). Chunks stream around the player during play mode.
 
 `BiomeMap::generate_region()` supports generating any detail level for any world region:
 ```rust
@@ -432,7 +433,7 @@ LifeGenData       // Serialize + Deserialize (all nested types: Province, Factio
 pub enum AppMode {
     WorldGenerator,   // F1 — procedural world generation, seed tweaking, save/load
     WorldMapEditor,   // F2 — place cities, landmarks, draw regions on world map
-    ChunkEditor,      // F3 — detail editing at street level (512×512 MicroMap)
+    ChunkEditor,      // F3 — detail editing at street level (512×512 chunk)
     LevelLauncher,    // F4 — test gameplay, spawn player, debug overlays
 }
 ```
@@ -448,14 +449,14 @@ The editor loads and saves through `rb_artifacts`. After generating a world in t
 
 ### Level Launcher Workflow (F4 / CLI)
 
-There are two paths to a playable micro-level:
+There are two paths to a playable chunk:
 
-1. **GUI path (F4)** — Interactive drill-down from the world map through macro → meso → micro selection.
-2. **CLI path** — `randlebrot launch <level-tag>` opens a level artifact directly. Loads the parent layers artifact for macro context, spawns the player, streams micro tiles. Press M to toggle a world map overlay showing the player's position.
+1. **GUI path (F4)** — Interactive drill-down from the world map through macro → meso → chunk selection.
+2. **CLI path** — `randlebrot launch <level-tag>` opens a level artifact directly. Loads the parent layers artifact for macro context, spawns the player, streams chunks. Press M to toggle a world map overlay showing the player's position.
 
 #### GUI Launcher (F4)
 
-The Level Launcher uses a phase-based state machine (`LauncherPhase` resource) to guide the user from world map selection to playable micro-level:
+The Level Launcher uses a phase-based state machine (`LauncherPhase` resource) to guide the user from world map selection to a playable chunk:
 
 ```
 World Map (F1)          Level Launcher (F4)
@@ -466,14 +467,14 @@ World Map (F1)          Level Launcher (F4)
 │              │        │ GeneratingMeso: async 64-tile generation + bar   │
 │              │        │                                                  │
 │              │        │ MesoView: 8×8 meso grid, click to select tile   │
-│              │        │   └─▶ "Generate Micromap" button                 │
+│              │        │   └─▶ "Generate Chunks" button                   │
 │              │        │                                                  │
 │              │        │ GeneratingMicro: async 64-tile generation + bar  │
 │              │        │                                                  │
-│              │        │ MicroView: 8×8 micro grid, click to select tile  │
+│              │        │ MicroView: 8×8 chunk grid, click to select tile  │
 │              │        │   └─▶ "Play" button + "Save Level" button        │
 │              │        │                                                  │
-│              │        │ Playing: micro chunks stream around player       │
+│              │        │ Playing: chunks stream around player             │
 │              │        │   └─▶ "Save Level" button                        │
 │              │        │   └─▶ ESC returns to MicroView (not full exit)   │
 └──────────────┘        └──────────────────────────────────────────────────┘
@@ -482,18 +483,18 @@ World Map (F1)          Level Launcher (F4)
 **Phase flow:**
 1. **MacroView** — Shows the selected macro chunk enlarged (512px display). Side panel shows chunk coords and "Generate Mesomap" button.
 2. **GeneratingMeso** — Async generates all 64 meso tiles (8×8 grid within the chunk, each 8×8 world units at 512px, detail_level=2). Progress bar shown.
-3. **MesoView** — Displays the 8×8 meso grid. Hover highlights tiles, click to select. Side panel shows meso tile coords and "Generate Micromap" button.
-4. **GeneratingMicro** — Async generates all 64 micro tiles (8×8 grid within the meso tile, each 1×1 world unit at 512px, detail_level=3). Progress bar shown.
-5. **MicroView** — Displays the 8×8 micro grid. Click to select a micro tile. Side panel shows micro tile coords, "Play" button, and "Save Level" button.
-6. **Playing** — Micro-level chunks (detail_level=3) stream around the player. "Save Level" button available. ESC returns to MicroView (micro sprites re-shown, not all the way back to world map).
+3. **MesoView** — Displays the 8×8 meso grid. Hover highlights tiles, click to select. Side panel shows meso tile coords and "Generate Chunks" button.
+4. **GeneratingMicro** — Async generates all 64 chunks (8×8 grid within the meso tile, each 1×1 world unit at 512px, detail_level=3). Progress bar shown.
+5. **MicroView** — Displays the 8×8 chunk grid. Click to select a chunk. Side panel shows chunk coords, "Play" button, and "Save Level" button.
+6. **Playing** — Chunks (detail_level=3) stream around the player. "Save Level" button available. ESC returns to MicroView (chunk sprites re-shown, not all the way back to world map).
 
-**Save Level** — Available in MicroView and Playing phases when a micro tile is selected. Prompts for a tag name, then persists the micro BiomeMap and a `LevelManifest` (with global micro coordinates) via `rb_artifacts::save_level()`. The local launcher coordinates (0..8 within meso) are converted to global CLI coordinates (0..1024, 0..512) using the macro chunk + meso tile offsets: `global_x = chunk_x * 64 + meso_x * 8 + micro_x`. Saved levels appear in `randlebrot view levels` output.
+**Save Level** — Available in MicroView and Playing phases when a chunk is selected. Prompts for a tag name, then persists the chunk BiomeMap and a `LevelManifest` (with global chunk coordinates) via `rb_artifacts::save_level()`. The local launcher coordinates (0..8 within meso) are converted to global CLI coordinates (0..1024, 0..512) using the macro chunk + meso tile offsets: `global_x = chunk_x * 64 + meso_x * 8 + micro_x`. Saved levels appear in `randlebrot view levels` output.
 
 **Key implementation details:**
 - World map pool sprites are hidden on `OnEnter(LevelLauncher)` and re-shown on `OnExit(LevelLauncher)`
 - Meso tiles are generated via `AsyncComputeTaskPool` with `MACRO_PREGEN_CONCURRENCY` parallelism
 - `MesoTileCache` stores generated textures; `MesoPregenState` tracks generation progress
-- `MicroTileCache` stores generated micro textures + `Arc<BiomeMap>` for save
+- `MicroTileCache` stores generated chunk textures + `Arc<BiomeMap>` for save
 - Camera pan works in all launcher phases; zoom is available in MesoView/MicroView
 - `LauncherMacroSprite`, `LauncherMesoSprite`, `LauncherMicroSprite`, `MesoHighlight`, `MicroHighlight` entities are all cleaned up on exit
 
@@ -501,17 +502,17 @@ World Map (F1)          Level Launcher (F4)
 ```rust
 LauncherPhase        // MacroView | GeneratingMeso | MesoView | GeneratingMicro | MicroView | Playing
 GenerateMesoRequest  // Signal resource: user clicked "Generate Mesomap"
-LaunchLevelRequest   // Signal resource: user clicked "Generate Micromap"
+LaunchLevelRequest   // Signal resource: user clicked "Generate Chunks"
 StartPlayRequest     // Signal resource: user clicked "Play"
 SaveLevelRequest     // Signal resource: user confirmed a level tag for save
 SaveLevelUiState     // UI state for the save dialog (tag input, status message)
 SelectedChunk        // Macro chunk selected on world map (chunk_coord, origin)
 SelectedMesoTile     // Meso tile selected in launcher grid (meso_coord, origin)
-SelectedMicroTile    // Micro tile selected in launcher grid (micro_coord, origin)
+SelectedMicroTile    // Chunk selected in launcher grid (micro_coord, origin)
 MesoTileCache        // HashMap<(i32,i32), MesoCachedTile> + sprite entity list
-MicroTileCache       // HashMap<(i32,i32), MicroCachedTile> + sprite entity list
+MicroTileCache       // HashMap<(i32,i32), MicroCachedTile> + chunk sprite entity list
 MesoPregenState      // Tracks async meso generation (total, completed, remaining, in_flight)
-MicroPregenState     // Tracks async micro generation (total, completed, remaining, in_flight)
+MicroPregenState     // Tracks async chunk generation (total, completed, remaining, in_flight)
 PlayableLevel        // Active level state (origin, chunk_coord, seed, world_height)
 ```
 
@@ -545,15 +546,15 @@ The `rb_artifacts` crate manages `~/.randlebrot/` for persistent layer and level
 │           └── ... (~20 layers)
 └── levels/
     └── <tag>/
-        ├── manifest.ron           # LevelManifest (parent layers tag, seed, civ_seed, micro coord, timestamp)
-        └── micro_biome.bin        # bincode: micro-level BiomeMap
+        ├── manifest.ron           # LevelManifest (parent layers tag, seed, civ_seed, chunk coord, timestamp)
+        └── micro_biome.bin        # bincode: chunk-level BiomeMap
 ```
 
-**Estimated sizes:** Layer artifacts are ~200-400 MB (dominated by bincode BiomeMap at 1024×512 with ~20 f64 layers + LifeGenData at 8192×4096). Layer PNGs add ~20-40 MB. Level artifacts are much smaller (~50-100 MB for a single micro BiomeMap).
+**Estimated sizes:** Layer artifacts are ~200-400 MB (dominated by bincode BiomeMap at 1024×512 with ~20 f64 layers + LifeGenData at 8192×4096). Layer PNGs add ~20-40 MB. Level artifacts are much smaller (~50-100 MB for a single chunk BiomeMap).
 
 **Tags:** Alphanumeric + hyphens + underscores only. Used as directory names.
 
-**Manifests:** Pretty-printed RON for human readability. `LayerManifest` records seed, civ_seed, world dimensions, backend used, and list of available image filenames. `LevelManifest` records the parent layers tag, seed, civ_seed, micro coordinate, and timestamp.
+**Manifests:** Pretty-printed RON for human readability. `LayerManifest` records seed, civ_seed, world dimensions, backend used, and list of available image filenames. `LevelManifest` records the parent layers tag, seed, civ_seed, chunk coordinate, and timestamp.
 
 ### Map Navigation & Controls
 
@@ -567,8 +568,7 @@ The `rb_artifacts` crate manages `~/.randlebrot/` for persistent layer and level
 | **Space** | World map | Cycle layer view |
 | **F1-F4** | Any | Switch editor modes |
 | **ESC** | Launcher (Playing) | Return to MesoView |
-| **Left/Right** | Layer Viewer | Cycle base layer |
-| **Up/Down** | Layer Viewer | Cycle overlay layer |
+| **Side panel** | Layer Viewer | Select base/overlay layer, adjust opacity |
 | **ESC** | Layer Viewer | Exit |
 | **WASD** | Launch (Playing) | Move player |
 | **M** | Launch (Playing) | Toggle world map overlay |
@@ -577,13 +577,13 @@ The `rb_artifacts` crate manages `~/.randlebrot/` for persistent layer and level
 
 ### World Map View
 
-The world map (F1) displays only macro-level tiles. Meso and micro detail are accessed through the Level Launcher (F4).
+The world map (F1) displays only macro-level tiles. Meso and chunk detail are accessed through the Level Launcher (F4).
 
 - **Macro tiles**: Pre-generated 128 tiles (16×8 grid) covering the full 1024×512 world, each 64×64 world units at 512×512 pixels, detail_level=1
 - **Zoom range**: Camera scale 0.05–10.0, all at macro resolution
 - **Chunk highlighting**: Hover shows which macro tile the cursor is over
 - **Click to select**: Left-click selects a macro chunk (stores `SelectedChunk`), then press F4 to enter Level Launcher
-- **No on-scroll streaming**: Meso/micro tiles are never generated on the world map screen
+- **No on-scroll streaming**: Meso/chunk tiles are never generated on the world map screen
 
 **Debug layer export**: After macro pre-generation, all 128 tiles are stitched into full-world PNGs (8192×4096) saved to `debug_layers/`. This exports exactly what the world map displays.
 
@@ -595,13 +595,13 @@ The world is **1024×512 world units**, organised into a nested chunk hierarchy.
 |-------|----------------------|---------------|-------------|
 | Macro | 64 × 64              | 16 × 8        | 128         |
 | Meso  | 8 × 8                | 128 × 64      | 8,192       |
-| Micro | 1 × 1                | 1024 × 512    | 524,288     |
+| Chunk | 1 × 1                | 1024 × 512    | 524,288     |
 
 - `CHUNK_SIZE = 64.0` world units (macro chunk size, also the terminology used for level launcher entry)
 - `MESO_WORLD_SIZE = 8.0` world units (8×8 meso tiles inside a macro chunk = 64 per macro)
-- `MICRO_WORLD_SIZE = 1.0` world units (8×8 micro tiles inside a meso tile = 64 per meso; 524,288 total globally)
+- `CHUNK_WORLD_SIZE = 1.0` world units (8×8 chunks inside a meso tile = 64 per meso; 524,288 total globally)
 - All three levels render to a `TILE_MAP_SIZE = 512` pixel BiomeMap regardless of world coverage
-- `detail_level` octave offsets: `1` = macro, `2` = meso, `3` = micro
+- `detail_level` octave offsets: `1` = macro, `2` = meso, `3` = chunk
 
 #### Coordinate conventions
 
@@ -609,12 +609,12 @@ The world is **1024×512 world units**, organised into a nested chunk hierarchy.
 
 **Meso coordinates** (launcher 8×8 grid, `SelectedMesoTile`): **local** indices `0..8 × 0..8` within a single macro chunk. Convert to world position via `meso_origin + (mx, my) * MESO_WORLD_SIZE`.
 
-**Micro coordinates** have **two different conventions** — do not mix them:
+**Chunk coordinates** have **two different conventions** — do not mix them:
 
-1. **GUI launcher local micro** (`SelectedMicroTile.micro_coord`): local indices `0..8 × 0..8` within a selected meso tile. World position = `meso_origin + (local_mx, local_my) * MICRO_WORLD_SIZE`. Used only inside the level launcher state machine.
-2. **CLI global micro** (`LevelManifest.micro_coord`, `generate level` / `view levels` args): **global** indices `(mx, my)` where `mx ∈ [0, 1024)` and `my ∈ [0, 512)`. World position = `(mx * MICRO_WORLD_SIZE, my * MICRO_WORLD_SIZE) = (mx, my)` (since `MICRO_WORLD_SIZE = 1.0`). The canonical module is `src/cli/coords.rs` — use `cli::coords::micro_coord_to_world_pos` and `cli::coords::validate_micro_coord` from every CLI surface that touches a micro coordinate.
+1. **GUI launcher local** (`SelectedMicroTile.micro_coord`): local indices `0..8 × 0..8` within a selected meso tile. World position = `meso_origin + (local_x, local_y) * CHUNK_WORLD_SIZE`. Used only inside the level launcher state machine.
+2. **CLI global chunk** (`LevelManifest.chunk_coord`, `generate level` / `view levels` args): **global** indices `(cx, cy)` where `cx ∈ [0, 1024)` and `cy ∈ [0, 512)`. World position = `(cx * CHUNK_WORLD_SIZE, cy * CHUNK_WORLD_SIZE) = (cx, cy)` (since `CHUNK_WORLD_SIZE = 1.0`). The canonical module is `src/cli/coords.rs` — use `cli::coords::chunk_coord_to_world_pos` and `cli::coords::validate_chunk_coord` from every CLI surface that touches a chunk coordinate.
 
-Example: `randlebrot generate level my-world 512,256 terminus-village` samples the 1×1 micro tile whose top-left corner is at world `(512, 256)` — the approximate centre of the map.
+Example: `randlebrot generate level my-world 512,256 terminus-village` samples the 1×1 chunk whose top-left corner is at world `(512, 256)` — the approximate centre of the map.
 
 ## Conventions
 
@@ -650,7 +650,7 @@ See `docs/DOMAIN_ARCHITECTURE.md` for the full design document.
 
 - **TerrainGen** (`rb_noise`): Dead planet. Noise layers, biomes, rivers, erosion. Output is immutable after generation.
 - **LifeGen** (`rb_world`): Civilisation. Reads terrain via `TerrainQuery` trait in `rb_core`. Provinces, factions, settlements, roads, trade. Operates at 8192×4096 meso pixel resolution.
-- **SceneGen** (future): Micro-level tile generation for settlements. Pure function from terrain + lifegen inputs. No state, no cache.
+- **SceneGen** (future): Chunk-level tile generation for settlements. Pure function from terrain + lifegen inputs. No state, no cache.
 
 ### Interface Contracts
 
