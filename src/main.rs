@@ -835,17 +835,6 @@ impl Default for ArtifactSaveState {
     }
 }
 
-/// State for the load-from-artifact phase.
-#[derive(Resource)]
-struct ArtifactLoadState {
-    /// Current status message.
-    status: String,
-    /// Whether loading is in progress.
-    loading: bool,
-    /// Error message if loading failed.
-    error: Option<String>,
-}
-
 /// Global heightmap normalization hints computed after macro pregen.
 /// Ensures all tiles use the same heightmap range for consistent shading.
 #[derive(Resource, Clone)]
@@ -2049,7 +2038,7 @@ fn stitch_layer_images_for_artifact(
     images
 }
 
-// ──��� Artifact Load (from CLI tag) ───────────────────────────────────────────
+// ─── Artifact Load (from CLI tag) ────────────────────────────────────────────
 
 /// System that runs during AppPhase::LoadingArtifact.
 /// Loads the layer artifact from disk, populates Bevy resources, and transitions
@@ -2135,13 +2124,14 @@ fn artifact_load_system(
     biome_map.river_network = Some(river_arc.clone());
 
     // Update WorldDefinition from the manifest.
-    let mut world_def = WorldDefinition::default();
-    world_def.seed = manifest.seed;
-    world_def.civ_seed = manifest.civ_seed;
-    world_def.width = manifest.world_width as usize;
-    world_def.height = manifest.world_height as usize;
-    world_def.name = tag.clone();
-    commands.insert_resource(world_def);
+    commands.insert_resource(WorldDefinition {
+        seed: manifest.seed,
+        civ_seed: manifest.civ_seed,
+        width: manifest.world_width as usize,
+        height: manifest.world_height as usize,
+        name: tag.clone(),
+        ..Default::default()
+    });
 
     // Insert core resources.
     commands.insert_resource(GlobalRiverNetwork {
