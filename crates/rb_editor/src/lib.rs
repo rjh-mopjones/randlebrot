@@ -8,7 +8,7 @@ pub mod launcher_ui;
 pub mod scene_ui;
 
 pub use generator_ui::{CurrentLayer, GeneratorUiState, RegenerationRequest};
-pub use launcher_ui::{GenerateMesoRequest, LaunchLevelRequest, LauncherPhase, StartPlayRequest};
+pub use launcher_ui::{GenerateMesoRequest, LaunchLevelRequest, LauncherPhase, SaveLevelRequest, SaveLevelUiState, StartPlayRequest};
 pub use civ_ui::{CivUiState, CurrentLifeGenLayer, LifeGenLayer, OverlayState, RegenerateLifeGenRequest};
 pub use scene_ui::{CurrentSceneLayer, SceneLayer};
 
@@ -35,6 +35,8 @@ impl Plugin for RbEditorPlugin {
             .init_resource::<CurrentLifeGenLayer>()
             .init_resource::<OverlayState>()
             .init_resource::<RegenerateLifeGenRequest>()
+            // Launcher save-level UI state
+            .init_resource::<SaveLevelUiState>()
             // Scene inspector resources
             .init_resource::<CurrentSceneLayer>()
             // Mode bar (runs in all modes) — must run before side panels
