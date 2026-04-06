@@ -7,7 +7,7 @@ pub mod generator_ui;
 pub mod launcher_ui;
 pub mod scene_ui;
 
-pub use generator_ui::{CurrentLayer, GeneratorUiState, RegenerationRequest};
+pub use generator_ui::{CurrentLayer, GeneratorUiState, OpenArtifactRequest, RegenerationRequest, SaveAsArtifactRequest};
 pub use launcher_ui::{GenerateMesoRequest, LaunchLevelRequest, LauncherPhase, SaveLevelRequest, SaveLevelUiState, StartPlayRequest};
 pub use civ_ui::{CivUiState, CurrentLifeGenLayer, LifeGenLayer, OverlayState, RegenerateLifeGenRequest};
 pub use scene_ui::{CurrentSceneLayer, SceneLayer};
