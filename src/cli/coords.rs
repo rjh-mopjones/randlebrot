@@ -37,10 +37,11 @@
 //!
 //! # Keeping this in sync with `src/main.rs`
 //!
-//! The GUI code in `src/main.rs` defines its own copies of `MICRO_WORLD_SIZE`
-//! (= 1.0) and world dimensions (`MAP_WIDTH` = 1024, `MAP_HEIGHT` = 512).
-//! They must match the values in this module. If `src/main.rs` changes
-//! `MICRO_WORLD_SIZE`, update the constants below and regenerate any
+//! The GUI code in `src/main.rs` defines its own constant `MICRO_WORLD_SIZE`
+//! (= 1.0, the internal name for the same value as `CHUNK_WORLD_SIZE` here)
+//! and world dimensions (`MAP_WIDTH` = 1024, `MAP_HEIGHT` = 512). They must
+//! match the values in this module. If `src/main.rs` changes
+//! `MICRO_WORLD_SIZE`, update `CHUNK_WORLD_SIZE` below and regenerate any
 //! affected level artifacts.
 
 // ─── Core Constants ─────────────────────────────────────────────────────────
@@ -53,7 +54,7 @@ pub const WORLD_HEIGHT: usize = 512;
 
 /// Size of a single chunk in world units.
 ///
-/// Must stay in sync with `MICRO_WORLD_SIZE` in `src/main.rs`.
+/// Must stay in sync with `MICRO_WORLD_SIZE` (the internal name) in `src/main.rs`.
 pub const CHUNK_WORLD_SIZE: f64 = 1.0;
 
 /// Output resolution (pixels per side) of a generated chunk `BiomeMap`.

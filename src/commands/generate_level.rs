@@ -46,11 +46,11 @@ use crate::cli::coords::{
 /// Run `generate level <layers-tag> <x,y> <level-tag>`.
 ///
 /// Loads the cached macro `BiomeMap` + `RiverNetwork` from the layers
-/// artifact, generates a single micro-level tile at `micro_coord`, and saves
+/// artifact, generates a single chunk at `chunk_coord`, and saves
 /// the result as a level artifact tagged `level_tag`.
 pub fn run_from_layers(
     layers_tag: String,
-    micro_coord: (i32, i32),
+    chunk_coord: (i32, i32),
     level_tag: String,
     backend: NoiseBackend,
     force: bool,
@@ -59,7 +59,7 @@ pub fn run_from_layers(
     println!(
         "generate level: layers_tag={layers_tag}, coord=({},{}), \
          level_tag={level_tag}, backend={backend_label}, force={force}",
-        micro_coord.0, micro_coord.1,
+        chunk_coord.0, chunk_coord.1,
     );
 
     // ─── 0. Prepare store + validate inputs ─────────────────────────────────
@@ -69,7 +69,7 @@ pub fn run_from_layers(
     // Validate the coordinate *before* touching the filesystem. Otherwise a
     // typo combined with `--force` would delete the existing level artifact
     // inside `check_level_tag_available` before returning the coord error.
-    validate_chunk_coord(micro_coord).map_err(|e| e.to_string())?;
+    validate_chunk_coord(chunk_coord).map_err(|e| e.to_string())?;
     check_level_tag_available(&store, &level_tag, force)?;
 
     // ─── 1. Load the layers artifact ────────────────────────────────────────
@@ -89,12 +89,12 @@ pub fn run_from_layers(
     // `generate_meso_full_with_backend` call (it takes `Option<&Arc<RiverNetwork>>`).
     let river_network_arc: Arc<RiverNetwork> = Arc::new(river_network);
 
-    // ─── 2. Generate the micro tile ─────────────────────────────────────────
-    let (world_x, world_y) = chunk_coord_to_world_pos(micro_coord);
+    // ─── 2. Generate the chunk ────────────────────────────────────────────
+    let (world_x, world_y) = chunk_coord_to_world_pos(chunk_coord);
     let stage = stage_spinner(&format!(
-        "[2/3] Generating micro tile at world ({world_x:.2}, {world_y:.2})"
+        "[2/3] Generating chunk at world ({world_x:.2}, {world_y:.2})"
     ));
-    let micro_biome = BiomeMap::generate_meso_full_with_backend(
+    let chunk_biome = BiomeMap::generate_meso_full_with_backend(
         layers_manifest.seed,
         world_x,
         world_y,
@@ -108,8 +108,8 @@ pub fn run_from_layers(
         Some(&river_network_arc),
     );
     stage.finish_with_message(format!(
-        "[2/3] Micro tile done ({}x{} pixels)",
-        micro_biome.width, micro_biome.height
+        "[2/3] Chunk done ({}x{} pixels)",
+        chunk_biome.width, chunk_biome.height
     ));
 
     // ─── 3. Save the level artifact ─────────────────────────────────────────
@@ -118,11 +118,11 @@ pub fn run_from_layers(
         parent_layers_tag: Some(layers_tag.clone()),
         seed: layers_manifest.seed,
         civ_seed: layers_manifest.civ_seed,
-        chunk_coord: micro_coord,
+        chunk_coord,
         created: chrono::Utc::now().to_rfc3339(),
     };
     store
-        .save_level(&level_tag, &micro_biome, &level_manifest)
+        .save_level(&level_tag, &chunk_biome, &level_manifest)
         .map_err(|e| format!("failed to save level artifact '{level_tag}': {e}"))?;
     stage.finish_with_message("[3/3] Level artifact saved");
 
@@ -134,12 +134,12 @@ pub fn run_from_layers(
 /// Run `generate level --seed N <x,y> <level-tag>`.
 ///
 /// Generates the macro `BiomeMap` in memory from `seed` (including erosion
-/// and river network), then samples a single micro-level tile at
-/// `micro_coord`. No LifeGen pipeline runs — the level artifact is pure
-/// terrain with `parent_layers_tag = None`.
+/// and river network), then samples a single chunk at `chunk_coord`. No
+/// LifeGen pipeline runs — the level artifact is pure terrain with
+/// `parent_layers_tag = None`.
 pub fn run_from_seed(
     seed: u32,
-    micro_coord: (i32, i32),
+    chunk_coord: (i32, i32),
     level_tag: String,
     backend: NoiseBackend,
     force: bool,
@@ -148,7 +148,7 @@ pub fn run_from_seed(
     println!(
         "generate level: seed={seed}, coord=({},{}), level_tag={level_tag}, \
          backend={backend_label}, force={force}",
-        micro_coord.0, micro_coord.1,
+        chunk_coord.0, chunk_coord.1,
     );
 
     // ─── 0. Prepare store + validate inputs ─────────────────────────────────
@@ -158,7 +158,7 @@ pub fn run_from_seed(
     // Validate the coordinate *before* touching the filesystem. Otherwise a
     // typo combined with `--force` would delete the existing level artifact
     // inside `check_level_tag_available` before returning the coord error.
-    validate_chunk_coord(micro_coord).map_err(|e| e.to_string())?;
+    validate_chunk_coord(chunk_coord).map_err(|e| e.to_string())?;
     check_level_tag_available(&store, &level_tag, force)?;
 
     // ─── 1. Generate macro BiomeMap in memory (erosion + rivers) ────────────
@@ -178,12 +178,12 @@ pub fn run_from_seed(
     };
     stage.finish_with_message(format!("[1/3] Macro BiomeMap done — river network: {river_msg}"));
 
-    // ─── 2. Generate the micro tile ─────────────────────────────────────────
-    let (world_x, world_y) = chunk_coord_to_world_pos(micro_coord);
+    // ─── 2. Generate the chunk ────────────────────────────────────────────
+    let (world_x, world_y) = chunk_coord_to_world_pos(chunk_coord);
     let stage = stage_spinner(&format!(
-        "[2/3] Generating micro tile at world ({world_x:.2}, {world_y:.2})"
+        "[2/3] Generating chunk at world ({world_x:.2}, {world_y:.2})"
     ));
-    let micro_biome = BiomeMap::generate_meso_full_with_backend(
+    let chunk_biome = BiomeMap::generate_meso_full_with_backend(
         seed,
         world_x,
         world_y,
@@ -197,8 +197,8 @@ pub fn run_from_seed(
         river_network_arc.as_ref(),
     );
     stage.finish_with_message(format!(
-        "[2/3] Micro tile done ({}x{} pixels)",
-        micro_biome.width, micro_biome.height
+        "[2/3] Chunk done ({}x{} pixels)",
+        chunk_biome.width, chunk_biome.height
     ));
 
     // ─── 3. Save the level artifact ─────────────────────────────────────────
@@ -209,11 +209,11 @@ pub fn run_from_seed(
         // No civ pipeline ran — reuse the terrain seed as a placeholder so
         // downstream tooling always has a concrete u32.
         civ_seed: seed,
-        chunk_coord: micro_coord,
+        chunk_coord,
         created: chrono::Utc::now().to_rfc3339(),
     };
     store
-        .save_level(&level_tag, &micro_biome, &level_manifest)
+        .save_level(&level_tag, &chunk_biome, &level_manifest)
         .map_err(|e| format!("failed to save level artifact '{level_tag}': {e}"))?;
     stage.finish_with_message("[3/3] Level artifact saved");
 

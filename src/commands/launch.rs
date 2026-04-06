@@ -1,7 +1,7 @@
 //! Launch a playable level from a previously generated level artifact.
 //!
 //! `randlebrot launch <level-tag>` opens a minimal Bevy window with the player
-//! spawned at the level's micro coordinate. Surrounding micro tiles stream in
+//! spawned at the level's chunk coordinate. Surrounding chunks stream in
 //! as the player moves, using the parent layers artifact (macro `BiomeMap` +
 //! `RiverNetwork`) for on-the-fly generation. If the parent layers artifact is
 //! missing but the level manifest has a seed, the macro data is regenerated at
@@ -40,7 +40,7 @@ use crate::cli::coords::{
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
-/// Output resolution per micro tile (512x512).
+/// Output resolution per chunk (512x512).
 const TILE_MAP_SIZE: usize = 512;
 
 /// Level chunk load radius (in level chunks around the player).
@@ -62,7 +62,7 @@ const POLL_BUDGET: usize = 16;
 
 /// Launch a playable level from a previously generated level artifact.
 ///
-/// Validates the tag, loads the level manifest + micro BiomeMap, loads
+/// Validates the tag, loads the level manifest + chunk BiomeMap, loads
 /// (or regenerates) the parent layers artifact, and runs a minimal Bevy app.
 pub fn run(level_tag: String) -> Result<(), String> {
     // ─── 1. Load the level artifact ────────────────────────────────────
@@ -110,7 +110,7 @@ pub fn run(level_tag: String) -> Result<(), String> {
 
     // ─── 4. Build and run the Bevy app ─────────────────────────────────
     let origin = WorldPos::new(world_x, world_y);
-    // Compute the macro chunk that contains this micro coordinate.
+    // Compute the macro chunk that contains this chunk coordinate.
     let chunk_x = (world_x / 64.0).floor() as i32;
     let chunk_y = (world_y / 64.0).floor() as i32;
 
@@ -150,9 +150,9 @@ pub fn run(level_tag: String) -> Result<(), String> {
     app.insert_resource(LaunchLevelChunkQueue::default());
     app.insert_resource(MapOverlayState::default());
 
-    // Pre-render the initial micro tile sprite from the loaded level artifact
+    // Pre-render the initial chunk sprite from the loaded level artifact
     let initial_tile_data = micro_biome.to_layer_image(NoiseLayer::Biome);
-    app.insert_resource(InitialMicroTile {
+    app.insert_resource(InitialChunkTile {
         image_data: initial_tile_data,
     });
 
@@ -275,7 +275,7 @@ fn load_or_render_map_image(
 
 // ─── Resources ─────────────────────────────────────────────────────────────
 
-/// Macro BiomeMap for generating micro tiles on the fly.
+/// Macro BiomeMap for generating chunks on the fly.
 #[derive(Resource)]
 struct LaunchMacroBiomeData {
     biome_map: Arc<BiomeMap>,
@@ -299,9 +299,9 @@ struct LaunchLevelChunkTask {
     task: Task<((i32, i32), Arc<BiomeMap>)>,
 }
 
-/// The pre-generated micro tile from the level artifact, displayed immediately.
+/// The pre-generated chunk from the level artifact, displayed immediately.
 #[derive(Resource)]
-struct InitialMicroTile {
+struct InitialChunkTile {
     image_data: Vec<u8>,
 }
 
@@ -352,11 +352,11 @@ struct MapOverlayEntity;
 
 // ─── Startup ───────────────────────────────────────────────────────────────
 
-/// Set up the camera and spawn the initial micro tile.
+/// Set up the camera and spawn the initial chunk tile.
 fn launch_setup(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
-    initial_tile: Option<Res<InitialMicroTile>>,
+    initial_tile: Option<Res<InitialChunkTile>>,
     map_image_data: Option<Res<MapImageData>>,
 ) {
     // Camera is already spawned by RbPlayerPlugin when PlayableLevel is inserted.
@@ -366,7 +366,7 @@ fn launch_setup(
     // trigger on the first frame. We just need the Camera2d to exist.
     commands.spawn(Camera2d);
 
-    // Spawn the initial micro tile (pre-generated from the level artifact)
+    // Spawn the initial chunk tile (pre-generated from the level artifact)
     if let Some(tile) = initial_tile {
         let image = create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, tile.image_data.clone());
         let texture = images.add(image);

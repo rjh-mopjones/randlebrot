@@ -4197,7 +4197,7 @@ fn handle_save_level_request(
             match store.save_level(&tag, &cached_tile.biome_map, &manifest) {
                 Ok(()) => {
                     println!(
-                        "Saved level artifact '{}' at global micro ({}, {})",
+                        "Saved level artifact '{}' at global chunk ({}, {})",
                         tag, global_micro_x, global_micro_y,
                     );
                     save_ui.status = Some((format!("Saved as '{tag}'"), false));
