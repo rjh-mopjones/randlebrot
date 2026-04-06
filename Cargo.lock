@@ -4676,6 +4676,7 @@ dependencies = [
  "clap",
  "image",
  "indicatif",
+ "objc2 0.6.4",
  "rayon",
  "rb_artifacts",
  "rb_core",
