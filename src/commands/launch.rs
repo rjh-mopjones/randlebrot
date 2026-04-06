@@ -35,7 +35,7 @@ use rb_player::{Player, PlayerCamera, RbPlayerPlugin};
 use rb_tilemap::{LevelChunk, LoadedChunks, RbTilemapPlugin};
 
 use crate::cli::coords::{
-    micro_coord_to_world_pos, MICRO_WORLD_SIZE, WORLD_HEIGHT, WORLD_WIDTH,
+    chunk_coord_to_world_pos, CHUNK_WORLD_SIZE, WORLD_HEIGHT, WORLD_WIDTH,
 };
 
 // ─── Constants ─────────────────────────────────────────────────────────────
@@ -88,12 +88,12 @@ pub fn run(level_tag: String) -> Result<(), String> {
         other => format!("failed to load level artifact '{level_tag}': {other}"),
     })?;
 
-    let (world_x, world_y) = micro_coord_to_world_pos(level_manifest.micro_coord);
+    let (world_x, world_y) = chunk_coord_to_world_pos(level_manifest.chunk_coord);
     let seed = level_manifest.seed;
 
     println!(
         "Launching level '{level_tag}': seed={seed}, coord=({},{}), world=({world_x:.1},{world_y:.1})",
-        level_manifest.micro_coord.0, level_manifest.micro_coord.1,
+        level_manifest.chunk_coord.0, level_manifest.chunk_coord.1,
     );
 
     // ─── 2. Load parent layers for macro context ───────────────────────
@@ -169,7 +169,7 @@ pub fn run(level_tag: String) -> Result<(), String> {
 
     app.insert_resource(LaunchState {
         level_tag,
-        micro_coord: level_manifest.micro_coord,
+        chunk_coord: level_manifest.chunk_coord,
     });
 
     app.add_systems(Startup, launch_setup);
@@ -332,7 +332,7 @@ struct MapImageData {
 #[derive(Resource)]
 struct LaunchState {
     level_tag: String,
-    micro_coord: (i32, i32),
+    chunk_coord: (i32, i32),
 }
 
 /// Marker for the map overlay sprite.
@@ -467,8 +467,8 @@ fn launch_chunk_load_system(
             }
 
             // Map level chunk to world coordinates
-            let world_x = level.origin.x + cx as f64 * MICRO_WORLD_SIZE;
-            let world_y = level.origin.y + cy as f64 * MICRO_WORLD_SIZE;
+            let world_x = level.origin.x + cx as f64 * CHUNK_WORLD_SIZE;
+            let world_y = level.origin.y + cy as f64 * CHUNK_WORLD_SIZE;
 
             let macro_map = world_textures.biome_map.clone();
             let river_net_clone = river_net.clone();
@@ -478,7 +478,7 @@ fn launch_chunk_load_system(
                     seed,
                     world_x,
                     world_y,
-                    MICRO_WORLD_SIZE,
+                    CHUNK_WORLD_SIZE,
                     TILE_MAP_SIZE,
                     height,
                     3, // micro detail level
@@ -652,8 +652,8 @@ fn update_map_player_marker(
 
     // Convert player's level-space position to world coordinates
     let player_pos = player_transform.translation;
-    let world_x = level.origin.x + (player_pos.x as f64 / LEVEL_CHUNK_TILES as f64) * MICRO_WORLD_SIZE;
-    let world_y = level.origin.y + ((-player_pos.y) as f64 / LEVEL_CHUNK_TILES as f64) * MICRO_WORLD_SIZE;
+    let world_x = level.origin.x + (player_pos.x as f64 / LEVEL_CHUNK_TILES as f64) * CHUNK_WORLD_SIZE;
+    let world_y = level.origin.y + ((-player_pos.y) as f64 / LEVEL_CHUNK_TILES as f64) * CHUNK_WORLD_SIZE;
 
     // Normalize to [0,1] in world space
     let norm_x = (world_x / map_data.world_width as f64) as f32;
@@ -736,7 +736,7 @@ fn launch_hud_system(
             ui.label(format!("Level: {}", launch_state.level_tag));
             ui.label(format!(
                 "Coord: ({}, {})",
-                launch_state.micro_coord.0, launch_state.micro_coord.1
+                launch_state.chunk_coord.0, launch_state.chunk_coord.1
             ));
             ui.label(format!("Seed: {}", level.seed));
             ui.label(player_info);

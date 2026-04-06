@@ -297,7 +297,7 @@ fn view_levels_list() -> Result<(), String> {
                 Some(parent) => parent.clone(),
                 None => format!("--seed {}", m.seed),
             };
-            let coord = format!("({},{})", m.micro_coord.0, m.micro_coord.1);
+            let coord = format!("({},{})", m.chunk_coord.0, m.chunk_coord.1);
             [
                 tag.clone(),
                 source,
@@ -377,18 +377,18 @@ fn view_level_detail(tag: &str) -> Result<(), String> {
         None => format!("--seed {} (civ_seed={})", manifest.seed, manifest.civ_seed),
     };
 
-    // `LevelManifest.micro_coord` is a **global** CLI micro coordinate —
-    // see `cli::coords` for the canonical convention. `(mx, my)` indexes
-    // the 1024×512 global micro grid, so the tile's world-space top-left
-    // is `(mx * MICRO_WORLD_SIZE, my * MICRO_WORLD_SIZE)`. Resolve via the
+    // `LevelManifest.chunk_coord` is a **global** CLI chunk coordinate —
+    // see `cli::coords` for the canonical convention. `(cx, cy)` indexes
+    // the 1024×512 global chunk grid, so the tile's world-space top-left
+    // is `(cx * CHUNK_WORLD_SIZE, cy * CHUNK_WORLD_SIZE)`. Resolve via the
     // shared helper so every CLI surface (generate, view, future launch)
-    // agrees on what a micro coordinate means.
-    let (mx, my) = manifest.micro_coord;
-    let (world_x, world_y) = cli::coords::micro_coord_to_world_pos((mx, my));
+    // agrees on what a chunk coordinate means.
+    let (cx, cy) = manifest.chunk_coord;
+    let (world_x, world_y) = cli::coords::chunk_coord_to_world_pos((cx, cy));
 
     println!("Tag:            {tag}");
     println!("Source:         {source}");
-    println!("Micro Coord:    ({mx}, {my})");
+    println!("Chunk Coord:    ({cx}, {cy})");
     println!("World Position: ({world_x:.1}, {world_y:.1})");
     println!("Created:        {}", format_timestamp(&manifest.created));
     println!("Size:           {size}");
@@ -4187,7 +4187,7 @@ fn handle_save_level_request(
         parent_layers_tag: None,
         seed: world_def.seed,
         civ_seed: world_def.civ_seed,
-        micro_coord: (global_micro_x, global_micro_y),
+        chunk_coord: (global_micro_x, global_micro_y),
         created: chrono_timestamp(),
     };
 
