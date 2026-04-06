@@ -73,80 +73,270 @@ Work with the user to pick an approach (or synthesise from multiple). Settle on:
 - How it shows up in debug layer output
 - How it would be tested (unit tests, debug PNG inspection, or both)
 
-## Phase 3: Break Down into GitHub Issues
+## Phase 3: Break Down into a Parent Issue + Sub-Issues
 
-Once the design is agreed, decompose the work into **maximally parallelisable** GitHub issues.
+Once the design is agreed, decompose the work into a **parent feature tracker**
+with **sub-issues** for each concrete work item. Dependencies between sub-issues
+are expressed via GitHub's native issue dependencies API, NOT via wave labels
+(which have been retired).
 
-### Rules for Issue Decomposition
+### Rules for Decomposition
 
-1. **Dependency graph first**: Draw the dependency graph of work items. Issues that share no code dependencies should be in the same "wave" (parallel batch).
-2. **One crate per issue where possible**: Randlebrot's crate layout is designed for parallel work. Respect that boundary.
-3. **rb_core types before implementations**: Core types and traits must be in an earlier wave than the crates that use them.
-4. **Test in the same issue**: Each issue should include its own tests — no separate "add tests" issues.
-5. **Editor/launcher integration last**: Wiring the feature into `rb_editor` or the Level Launcher is always a later wave.
-6. **Debug layer verification**: If the feature produces visible output, the issue must include `save_debug_layers` integration.
-7. **Issue template**:
+1. **Stand-alone issues for trivial features**. If the feature is genuinely a
+   single small change (one function, one test, one config tweak, one doc
+   update), skip the parent entirely and create a single stand-alone issue.
+   Parents are only worth their overhead when there are 2+ sub-issues.
+   `/work-issues` handles stand-alone issues as first-class work units.
+2. **Otherwise: one parent per feature**. The parent issue describes the
+   feature at a high level (goal, design, acceptance at the feature level).
+   It is NOT a work unit — no agent will implement it directly. Its job is
+   to track progress across its sub-issues (GitHub auto-updates
+   `sub_issues_summary`).
+3. **Sub-issues are the work units**. Each sub-issue is small enough for one
+   agent to implement in a single PR. If a sub-issue is too big, split it.
+4. **Dependencies via the native API**. If sub-issue B needs sub-issue A's
+   output, encode it as `B.blocked_by = [A]` via the dependencies API. No
+   "Depends on: #X" text in issue bodies — the API is the source of truth.
+5. **One crate per sub-issue where possible**. Respect the workspace crate
+   boundary to maximise parallelism.
+6. **rb_core types before implementations**. Core traits/types are always early
+   sub-issues that later ones depend on.
+7. **Test in the same sub-issue**. Each sub-issue includes its own tests — no
+   separate "add tests" sub-issues.
+8. **Debug layer verification**. If the feature produces visible terrain output,
+   the relevant sub-issue must include `save_debug_layers` integration.
+9. **No `wave-N` labels**. Waves are derived from the dependency graph at
+   `/work-issues` discovery time. Agents never see wave numbers.
 
-For each issue, provide:
+### Parent issue template
 
+```markdown
+# [Feature] <name>
+
+## Summary
+2-4 sentences on what the feature delivers and why it matters.
+
+## Design Context
+Which Obsidian design doc(s) informed this, and what game design goal it serves.
+Cite specific sections.
+
+## Architecture Decision
+Summarise the approach chosen in Phase 2d. Key types/traits/systems and which
+crates they live in. Link to any relevant ADRs or design docs.
+
+## World Rules
+List the World Rules that apply to this feature and how they are respected.
+
+## Sub-Issues
+GitHub will auto-populate this list when sub-issues are linked. Progress tracked
+automatically via `sub_issues_summary`.
+
+## Success Criteria
+Feature-level acceptance — what must be true when ALL sub-issues are closed for
+this feature to be considered done. Usually includes an end-to-end smoke test
+or debug layer spot-check.
 ```
-### Title: [concise, imperative — e.g. "Add wind layer to rb_noise derived layers"]
 
-**Wave**: N (where 1 = no dependencies, higher = depends on earlier waves)
-**Crate(s)**: which crate(s) this touches
-**Depends on**: list of issue titles this blocks on
-**Parallel with**: list of issue titles that can run simultaneously
+### Sub-issue template
 
-**Summary**: 2-3 sentences on what this issue delivers.
+```markdown
+# <concise imperative title, e.g. "Add wind derived layer to rb_noise">
 
-**Design context**: Which Obsidian design doc(s) informed this, and what game design goal it serves.
+## Summary
+2-3 sentences on what this sub-issue delivers.
 
-**Acceptance Criteria**:
+## Crate(s)
+Which crate(s) this touches.
+
+## Acceptance Criteria
 - [ ] Concrete, testable items
 - [ ] Including tests that must pass
 - [ ] Including debug layer output if visual
-- [ ] World Rules compliance (list which rules are relevant)
+- [ ] World Rules compliance (list applicable rules)
 
-**Technical Notes**: Any gotchas, decisions, or pointers into the codebase (with file paths and line numbers from exploration).
+## Documentation Updates
+- [ ] CLAUDE.md section(s) to update
+- [ ] Obsidian vault section(s) to update (if any)
 
-**Agent Prompt Hint**: A one-liner that a Claude Code agent could use as its starting instruction for this issue.
+## Technical Notes
+Gotchas, decisions, codebase pointers with file paths and line numbers from
+exploration.
+
+## Agent Prompt Hint
+One-liner a Claude Code agent could use as its starting instruction.
 ```
 
-8. **Wave summary table**: After all issues, produce a table:
+### Dependency graph
 
-| Wave | Issues (parallel) | Estimated complexity | Blocked by |
-|------|-------------------|---------------------|------------|
-| 1    | ...               | ...                 | --          |
-| 2    | ...               | ...                 | Wave 1     |
+After drafting all sub-issues, produce the dependency graph as a simple list:
 
-### Output Format
+```
+A → B  (B is blocked by A)
+A → C
+B → D
+C → D
+```
 
-At the very end, after the user confirms the issues look good, output a shell script block that creates all the issues via `gh issue create`. Use labels `randlebrot`, `feature`, and `wave-N`. Example:
+Plus a table showing which sub-issues can run in parallel at each topological
+level (for the user's mental model — but this is NOT encoded as labels):
+
+| Level | Sub-issues (parallel) | Blocked by |
+|-------|----------------------|------------|
+| 0     | A                    | --          |
+| 1     | B, C                 | A           |
+| 2     | D                    | B, C        |
+
+### Output format — shell script that wires everything up
+
+At the very end, after the user confirms the design, output a bash script that:
+1. Creates the parent issue
+2. Creates each sub-issue
+3. Links each sub-issue as a child of the parent via the sub-issues API
+4. Encodes inter-sub-issue dependencies via the dependencies API
+5. Prints a summary of all created issues with their numbers + ids
+
+Use labels `randlebrot` and `feature`. **Do not create or use `wave-N` labels.**
 
 ```bash
 #!/bin/bash
-# Create GitHub issues for: $ARGUMENTS
+set -euo pipefail
 
-gh issue create --title "Add wind derived layer to rb_noise" \
-  --label "randlebrot,feature,wave-1" \
+# Create GitHub parent + sub-issues for: $ARGUMENTS
+#
+# NOTE TO THE AGENT GENERATING THIS SCRIPT: every literal below
+# ("Wind system", sub-issue titles, body contents) is an example — replace
+# them with the real feature data from Phase 2. REPO should stay as-is.
+
+REPO="rjh-mopjones/randlebrot"
+CREATED_ISSUES=()
+
+# If anything fails partway through, close any issues we already created
+# so the repo is not left with orphan parents or disconnected sub-issues.
+cleanup_on_failure() {
+  local rc=$?
+  if [ $rc -ne 0 ] && [ ${#CREATED_ISSUES[@]} -gt 0 ]; then
+    echo "" >&2
+    echo "ERROR: script failed with exit code $rc, closing partially-created issues:" >&2
+    for n in "${CREATED_ISSUES[@]}"; do
+      echo "  closing #$n" >&2
+      gh issue close "$n" --repo "$REPO" \
+        --comment "Automated cleanup: creation script failed partway through." \
+        2>/dev/null || true
+    done
+  fi
+  return $rc
+}
+trap cleanup_on_failure EXIT
+
+# ---- Parent ----
+PARENT_URL=$(gh issue create --repo "$REPO" \
+  --title "[Feature] Wind system" \
+  --label "randlebrot,feature" \
   --body "$(cat <<'EOF'
+# [Feature] Wind system
+
 ## Summary
 ...
 
 ## Design Context
-From Margin's Grip - Geography.md: permanent unidirectional wind from dayside pressure differential.
+From Margin's Grip - Geography.md: permanent unidirectional wind from dayside
+pressure differential...
+
+## Architecture Decision
+...
+
+## World Rules
+- Tidally locked: wind is sub-stellar → antistellar, never reversed
+- No fossil fuels: wind is the primary kinetic energy source
+
+## Success Criteria
+...
+EOF
+)")
+PARENT_NUM=$(basename "$PARENT_URL")
+CREATED_ISSUES+=("$PARENT_NUM")
+PARENT_ID=$(gh api "/repos/$REPO/issues/$PARENT_NUM" --jq '.id')
+echo "Created parent #$PARENT_NUM (id=$PARENT_ID)"
+
+# ---- Sub-issue A ----
+A_URL=$(gh issue create --repo "$REPO" \
+  --title "Add WindStrategy base noise layer to rb_noise" \
+  --label "randlebrot,feature" \
+  --body "$(cat <<'EOF'
+## Summary
+...
+
+## Crate(s)
+rb_noise
 
 ## Acceptance Criteria
 - [ ] ...
+
+## Documentation Updates
+- [ ] CLAUDE.md noise layer table
+- [ ] Obsidian Geography.md cross-reference
 
 ## Technical Notes
 ...
 
 ## Agent Prompt Hint
+Add a WindStrategy to rb_noise following the ContinentalnessStrategy pattern.
+EOF
+)")
+A_NUM=$(basename "$A_URL")
+CREATED_ISSUES+=("$A_NUM")
+A_ID=$(gh api "/repos/$REPO/issues/$A_NUM" --jq '.id')
+
+# Link as sub-issue of parent
+gh api --method POST "/repos/$REPO/issues/$PARENT_NUM/sub_issues" \
+  -F sub_issue_id="$A_ID" \
+  -F replace_parent=false > /dev/null
+echo "  #$A_NUM linked as sub-issue of #$PARENT_NUM"
+
+# ---- Sub-issue B (depends on A) ----
+B_URL=$(gh issue create --repo "$REPO" \
+  --title "Add wind derived layer (direction + intensity) to rb_noise derived layers" \
+  --label "randlebrot,feature" \
+  --body "$(cat <<'EOF'
+## Summary
 ...
 EOF
-)"
+)")
+B_NUM=$(basename "$B_URL")
+CREATED_ISSUES+=("$B_NUM")
+B_ID=$(gh api "/repos/$REPO/issues/$B_NUM" --jq '.id')
+
+gh api --method POST "/repos/$REPO/issues/$PARENT_NUM/sub_issues" \
+  -F sub_issue_id="$B_ID" \
+  -F replace_parent=false > /dev/null
+
+# B is blocked by A
+gh api --method POST "/repos/$REPO/issues/$B_NUM/dependencies/blocked_by" \
+  -F issue_id="$A_ID" > /dev/null
+echo "  #$B_NUM linked as sub-issue of #$PARENT_NUM, blocked by #$A_NUM"
+
+# ... continue for each sub-issue ...
+
+# All issues created successfully — disarm the cleanup trap so we don't
+# close the freshly-created issues on normal exit.
+trap - EXIT
+
+echo ""
+echo "Done. Run '/work-issues' to implement the ready sub-issues, or"
+echo "'/work-issues $PARENT_NUM' to scope to this feature's sub-issues only."
 ```
+
+### Important API quirks (learned the hard way)
+
+- `sub_issue_id` and `issue_id` in POST bodies are the **integer `id` field**
+  of the issue, NOT the issue number. Get them via `gh api /repos/.../issues/N --jq .id`.
+- Use `gh api -F key=value` (typed) not `-f key=value` (string) — the APIs
+  reject string values for integer/boolean fields.
+- DELETE on dependencies takes the integer id in the URL path, not the issue number:
+  `DELETE /repos/.../issues/N/dependencies/blocked_by/<id>`
+- Sub-issues and dependencies are **separate systems**. A sub-issue is a
+  parent-child hierarchy relation. A dependency is an ordering relation. Use
+  both: sub-issues for decomposition, dependencies for sequencing.
 
 ## Important Reminders
 
