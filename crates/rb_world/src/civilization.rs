@@ -506,8 +506,10 @@ mod tests {
     #[test]
     fn generator_creates_factions() {
         let biome_map = BiomeMap::generate(42, 256, 128);
-        let mut world_def = WorldDefinition::default();
-        world_def.seed = 42;
+        let mut world_def = WorldDefinition {
+            seed: 42,
+            ..Default::default()
+        };
 
         let generator = CivilizationGenerator::new(42, CivilizationConfig::default());
         let result = generator.generate(&biome_map, &mut world_def);

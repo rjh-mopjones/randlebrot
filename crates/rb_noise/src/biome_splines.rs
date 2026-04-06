@@ -604,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn hot_humid_is_NOT_jungle() {
+    fn hot_humid_is_not_jungle() {
         let s = splines();
         // 65°C is above the 45°C hard gate — even with humidity, no green biomes
         let biome = s.evaluate(0.1, 65.0, 0.5, 0.5, 0.0, 0.7, 0.3, 0.5);
