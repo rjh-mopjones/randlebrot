@@ -194,22 +194,8 @@ pub fn run(
     // a deep clone. If the strong count is still >1 (unexpected), fall back to
     // a serialize round-trip so we never panic.
     drop(river_network_arc);
-    let river_network_owned: RiverNetwork = match macro_biome.river_network.take() {
-        Some(arc) => match Arc::try_unwrap(arc) {
-            Ok(net) => net,
-            Err(arc) => {
-                // Unexpected outstanding reference — fall back to serde roundtrip.
-                // `RiverNetwork` doesn't derive `Clone` (the spatial index is skipped),
-                // so this is the supported deep-copy path.
-                let bytes = bincode::serialize(&*arc)
-                    .map_err(|e| format!("failed to clone RiverNetwork for saving: {e}"))?;
-                bincode::deserialize(&bytes)
-                    .map_err(|e| format!("failed to clone RiverNetwork for saving: {e}"))?
-            }
-        },
-        None => ron::de::from_str("(segments: [], lakes: [])")
-            .map_err(|e| format!("failed to build empty RiverNetwork: {e}"))?,
-    };
+    let river_network_owned: RiverNetwork =
+        extract_river_network(macro_biome.river_network.take())?;
 
     let manifest = LayerManifest {
         seed,
@@ -255,7 +241,7 @@ pub fn run(
 /// Layers are stitched in parallel via rayon — each worker owns its own
 /// 128 MB scratch buffer. Peak memory scales with thread count rather than
 /// being sequential (~128 MB × threads instead of sequential 128 MB × 20).
-fn stitch_layer_images(
+pub(crate) fn stitch_layer_images(
     tiles: &[((i32, i32), BiomeMap)],
     norm_hints: &NormalizationHints,
     progress: &ProgressBar,
@@ -300,34 +286,57 @@ fn stitch_layer_images(
 /// then downscale 2x with a box filter to 4096x2048.
 ///
 /// Returns `(half_w, half_h, rgba_bytes)` for the downscaled image.
-fn stitch_single_layer(
+pub(crate) fn stitch_single_layer(
     layer: NoiseLayer,
     tile_grid: &[Vec<Option<&BiomeMap>>],
     norm_hints: &NormalizationHints,
 ) -> (u32, u32, Vec<u8>) {
-    let full_w = (TILES_X * TILE_MAP_SIZE) as u32;
-    let full_h = (TILES_Y * TILE_MAP_SIZE) as u32;
-    let tile_px = TILE_MAP_SIZE as u32;
+    let tiles_x = tile_grid.first().map_or(0, |r| r.len());
+    let tiles_y = tile_grid.len();
+    // Infer tile pixel size from the first non-None BiomeMap in the grid.
+    let tile_px = tile_grid
+        .iter()
+        .flatten()
+        .find_map(|opt| opt.map(|bm| bm.width))
+        .unwrap_or(TILE_MAP_SIZE);
+    stitch_rgba_grid(layer, tile_grid, norm_hints, tiles_x, tiles_y, tile_px)
+}
+
+/// Core stitching + 2x box-filter downscale, parameterised by grid and tile
+/// dimensions so unit tests can exercise the same logic on tiny grids without
+/// allocating 128 MB buffers.
+///
+/// Returns `(half_w, half_h, rgba_bytes)`.
+pub(crate) fn stitch_rgba_grid(
+    layer: NoiseLayer,
+    tile_grid: &[Vec<Option<&BiomeMap>>],
+    norm_hints: &NormalizationHints,
+    tiles_x: usize,
+    tiles_y: usize,
+    tile_px: usize,
+) -> (u32, u32, Vec<u8>) {
+    let full_w = (tiles_x * tile_px) as u32;
+    let full_h = (tiles_y * tile_px) as u32;
 
     // Full-resolution buffer (tight RGBA row-major).
     let stride_px = full_w as usize;
     let mut full: Vec<u8> = vec![0u8; (full_w as usize) * (full_h as usize) * 4];
 
-    for cy in 0..TILES_Y {
-        for cx in 0..TILES_X {
+    for cy in 0..tiles_y {
+        for cx in 0..tiles_x {
             let Some(bm) = tile_grid[cy][cx] else { continue };
             let rgba = bm.to_layer_image_with_hints(layer, Some(norm_hints));
-            if rgba.len() != (tile_px as usize) * (tile_px as usize) * 4 {
+            if rgba.len() != tile_px * tile_px * 4 {
                 // Skip malformed tiles rather than panicking — this matches
                 // the behaviour of `save_stitched_debug_layers` in main.rs.
                 continue;
             }
-            let ox = cx * TILE_MAP_SIZE;
-            let oy = cy * TILE_MAP_SIZE;
-            for py in 0..TILE_MAP_SIZE {
-                let src_row = py * TILE_MAP_SIZE * 4;
+            let ox = cx * tile_px;
+            let oy = cy * tile_px;
+            for py in 0..tile_px {
+                let src_row = py * tile_px * 4;
                 let dst_row = ((oy + py) * stride_px + ox) * 4;
-                let row_bytes = TILE_MAP_SIZE * 4;
+                let row_bytes = tile_px * 4;
                 full[dst_row..dst_row + row_bytes]
                     .copy_from_slice(&rgba[src_row..src_row + row_bytes]);
             }
@@ -388,6 +397,37 @@ pub(crate) fn layer_file_name(layer: NoiseLayer) -> String {
     format!("{base}.png")
 }
 
+// ─── Arc Extraction ─────────────────────────────────────────────────────────
+
+/// Extract an owned `RiverNetwork` from an `Option<Arc<RiverNetwork>>`.
+///
+/// Happy path: the Arc has a strong count of 1, so `Arc::try_unwrap` succeeds
+/// and we avoid any copies.
+///
+/// Fallback: if there are outstanding references (unexpected), we fall back to
+/// a bincode serialize → deserialize round-trip. `RiverNetwork` doesn't derive
+/// `Clone` (the spatial index is `#[serde(skip)]`), so bincode is the supported
+/// deep-copy path.
+///
+/// If `None`, returns an empty RiverNetwork via RON deserialization.
+pub(crate) fn extract_river_network(
+    arc_opt: Option<Arc<RiverNetwork>>,
+) -> Result<RiverNetwork, String> {
+    match arc_opt {
+        Some(arc) => match Arc::try_unwrap(arc) {
+            Ok(net) => Ok(net),
+            Err(arc) => {
+                let bytes = bincode::serialize(&*arc)
+                    .map_err(|e| format!("failed to clone RiverNetwork for saving: {e}"))?;
+                bincode::deserialize(&bytes)
+                    .map_err(|e| format!("failed to clone RiverNetwork for saving: {e}"))
+            }
+        },
+        None => ron::de::from_str("(segments: [], lakes: [])")
+            .map_err(|e| format!("failed to build empty RiverNetwork: {e}")),
+    }
+}
+
 // ─── Progress Helpers ───────────────────────────────────────────────────────
 
 fn stage_spinner(msg: &str) -> ProgressBar {
@@ -412,4 +452,327 @@ fn tile_progress_bar(total: u64, prefix: &str) -> ProgressBar {
     );
     pb.set_prefix(prefix.to_string());
     pb
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rb_core::biome::TileType;
+
+    /// Build a tiny BiomeMap of `size x size` pixels with every f64 layer
+    /// filled with `fill_value` and biomes set to `TileType::Sea`.
+    ///
+    /// This is NOT a valid simulation output — it's the minimum structure
+    /// needed to exercise `to_layer_image_with_hints` for the Continentalness
+    /// layer (which maps the `continentalness` vector via `grayscale_to_rgba`).
+    fn make_tiny_biome(size: usize, fill_value: f64) -> BiomeMap {
+        let n = size * size;
+        BiomeMap {
+            width: size,
+            height: size,
+            continentalness: vec![fill_value; n],
+            tectonic: vec![0.0; n],
+            tectonic_plate_ids: vec![0.0; n],
+            humidity: vec![0.0; n],
+            rock_hardness: vec![0.0; n],
+            light_level: vec![0.0; n],
+            peaks_valleys: vec![0.0; n],
+            volcanism: vec![0.0; n],
+            heightmap: vec![0.0; n],
+            temperature: vec![0.0; n],
+            erosion: vec![0.0; n],
+            rivers: vec![0.0; n],
+            aridity: vec![0.0; n],
+            precipitation_type: vec![0.0; n],
+            water_table: vec![0.0; n],
+            wind_speed: vec![0.0; n],
+            resource_richness: vec![0.0; n],
+            snowpack: vec![0.0; n],
+            biomes: vec![TileType::Sea; n],
+            vegetation_density: vec![0.0; n],
+            soil_type: vec![0.0; n],
+            resource_map: None,
+            river_network: None,
+            drainage_area: vec![0; n],
+            sediment: vec![0.0; n],
+            world_width: 1024.0,
+            world_height: 512.0,
+        }
+    }
+
+    // ── Stitching tests ─────────────────────────────────────────────────────
+
+    /// Place two tiles with distinct fill values in a 2x2 grid (4px tile),
+    /// stitch them, and verify:
+    ///   - the full-res pixels land at the correct grid position
+    ///   - the 2x box-filter downscale averages correctly
+    ///   - empty slots remain zero (black transparent)
+    #[test]
+    fn stitch_places_tiles_and_downscales() {
+        let tile_px = 4;
+
+        // Tile at (0,0): continentalness = 1.0 → grayscale 255
+        let top_left = make_tiny_biome(tile_px, 1.0);
+        // Tile at (1,1): continentalness = -1.0 → grayscale 0
+        let bot_right = make_tiny_biome(tile_px, -1.0);
+
+        // Build a 2x2 tile grid: top_left at (0,0), bot_right at (1,1),
+        // (0,1) and (1,0) empty.
+        let tile_grid: Vec<Vec<Option<&BiomeMap>>> = vec![
+            vec![Some(&top_left), None],
+            vec![None, Some(&bot_right)],
+        ];
+        let hints = NormalizationHints {
+            heightmap_min: 0.0,
+            heightmap_max: 1.0,
+        };
+
+        let (half_w, half_h, small) = stitch_rgba_grid(
+            NoiseLayer::Continentalness,
+            &tile_grid,
+            &hints,
+            2,  // tiles_x
+            2,  // tiles_y
+            tile_px,
+        );
+
+        // Full image: 8x8 → downscaled 4x4
+        assert_eq!(half_w, 4);
+        assert_eq!(half_h, 4);
+        assert_eq!(small.len(), 4 * 4 * 4); // 4x4 RGBA
+
+        // Helper: read pixel (px, py) from the downscaled image.
+        let pixel = |px: usize, py: usize| -> [u8; 4] {
+            let base = (py * half_w as usize + px) * 4;
+            [small[base], small[base + 1], small[base + 2], small[base + 3]]
+        };
+
+        // Top-left quadrant (0..2, 0..2 in downscaled) came from the tile
+        // at grid (0,0) which had continentalness = 1.0.
+        // grayscale_to_rgba(1.0, -1.0, 1.0) → normalized 1.0 → gray 255
+        // Box filter of four identical pixels = same value.
+        let tl = pixel(0, 0);
+        assert_eq!(tl, [255, 255, 255, 255], "top-left should be white (cont=1.0)");
+        let tl2 = pixel(1, 1);
+        assert_eq!(tl2, [255, 255, 255, 255], "still in top-left tile quadrant");
+
+        // Bottom-right quadrant (2..4, 2..4 in downscaled) came from the tile
+        // at grid (1,1) which had continentalness = -1.0.
+        // grayscale_to_rgba(-1.0, -1.0, 1.0) → normalized 0.0 → gray 0
+        let br = pixel(2, 2);
+        assert_eq!(br, [0, 0, 0, 255], "bottom-right should be black (cont=-1.0)");
+        let br2 = pixel(3, 3);
+        assert_eq!(br2, [0, 0, 0, 255], "still in bottom-right tile quadrant");
+
+        // Top-right quadrant (2..4, 0..2) had no tile → all zeros (black transparent).
+        let empty = pixel(2, 0);
+        assert_eq!(empty, [0, 0, 0, 0], "empty tile slot should be transparent black");
+    }
+
+    /// A completely empty grid (all None) produces a fully black-transparent
+    /// downscaled image.
+    #[test]
+    fn stitch_empty_grid_is_transparent() {
+        let tile_px = 4;
+        let tile_grid: Vec<Vec<Option<&BiomeMap>>> = vec![vec![None; 2]; 2];
+        let hints = NormalizationHints {
+            heightmap_min: 0.0,
+            heightmap_max: 1.0,
+        };
+
+        let (half_w, half_h, small) = stitch_rgba_grid(
+            NoiseLayer::Continentalness,
+            &tile_grid,
+            &hints,
+            2,
+            2,
+            tile_px,
+        );
+
+        assert_eq!(half_w, 4);
+        assert_eq!(half_h, 4);
+        assert!(small.iter().all(|&b| b == 0), "all bytes should be zero for empty grid");
+    }
+
+    /// A single tile filling the entire 1x1 grid still round-trips through
+    /// stitch + downscale correctly.
+    #[test]
+    fn stitch_single_tile_grid() {
+        let tile_px = 4;
+        // Fill with a mid-range value: continentalness 0.0 → grayscale 127
+        let tile = make_tiny_biome(tile_px, 0.0);
+        let tile_grid: Vec<Vec<Option<&BiomeMap>>> = vec![vec![Some(&tile)]];
+        let hints = NormalizationHints {
+            heightmap_min: 0.0,
+            heightmap_max: 1.0,
+        };
+
+        let (half_w, half_h, small) = stitch_rgba_grid(
+            NoiseLayer::Continentalness,
+            &tile_grid,
+            &hints,
+            1,
+            1,
+            tile_px,
+        );
+
+        // 4x4 → downscaled 2x2
+        assert_eq!(half_w, 2);
+        assert_eq!(half_h, 2);
+
+        // Every downscaled pixel should be the same gray value.
+        // grayscale_to_rgba(0.0, -1.0, 1.0) → normalized 0.5 → gray 127
+        for py in 0..2 {
+            for px in 0..2 {
+                let base = (py * 2 + px) * 4;
+                assert_eq!(small[base], 127, "R at ({px},{py})");
+                assert_eq!(small[base + 1], 127, "G at ({px},{py})");
+                assert_eq!(small[base + 2], 127, "B at ({px},{py})");
+                assert_eq!(small[base + 3], 255, "A at ({px},{py})");
+            }
+        }
+    }
+
+    /// Verify the box-filter averages two different adjacent tiles correctly.
+    /// Tile (0,0) = gray 255, tile (1,0) = gray 0. Along the boundary, the
+    /// downscale should produce a clean average where tiles meet (within a
+    /// single tile the average is just the fill value).
+    #[test]
+    fn stitch_downscale_averages_correctly() {
+        let tile_px = 2; // minimum even size for a 2x downscale
+
+        let bright = make_tiny_biome(tile_px, 1.0);  // gray 255
+        let dark = make_tiny_biome(tile_px, -1.0);    // gray 0
+
+        // 2x1 grid: [bright, dark]
+        let tile_grid: Vec<Vec<Option<&BiomeMap>>> = vec![
+            vec![Some(&bright), Some(&dark)],
+        ];
+        let hints = NormalizationHints {
+            heightmap_min: 0.0,
+            heightmap_max: 1.0,
+        };
+
+        let (half_w, half_h, small) = stitch_rgba_grid(
+            NoiseLayer::Continentalness,
+            &tile_grid,
+            &hints,
+            2,
+            1,
+            tile_px,
+        );
+
+        // Full: 4x2, downscaled: 2x1
+        assert_eq!(half_w, 2);
+        assert_eq!(half_h, 1);
+
+        // Pixel (0,0): average of four full-res pixels in the bright tile.
+        // All four are 255 → avg = 255.
+        assert_eq!(small[0], 255, "bright tile downscale R");
+        assert_eq!(small[3], 255, "bright tile downscale A");
+
+        // Pixel (1,0): average of four full-res pixels in the dark tile.
+        // All four are 0 → avg = 0.
+        assert_eq!(small[4], 0, "dark tile downscale R");
+        assert_eq!(small[7], 255, "dark tile downscale A");
+    }
+
+    // ── Arc extraction tests ────────────────────────────────────────────────
+
+    /// Happy path: the Arc has a strong count of 1, so `try_unwrap` succeeds
+    /// and returns the RiverNetwork without any serialization overhead.
+    #[test]
+    fn arc_extraction_unique_ref_succeeds() {
+        let net: RiverNetwork = ron::de::from_str("(segments: [], lakes: [])").unwrap();
+        let arc = Arc::new(net);
+        // Strong count is exactly 1 — try_unwrap should succeed.
+        assert_eq!(Arc::strong_count(&arc), 1);
+
+        let result = extract_river_network(Some(arc));
+        assert!(result.is_ok(), "unique Arc should unwrap cleanly");
+        let owned = result.unwrap();
+        assert_eq!(owned.segments.len(), 0);
+        assert_eq!(owned.lakes.len(), 0);
+    }
+
+    /// Fallback path: an outstanding Arc reference prevents `try_unwrap`, so
+    /// the function falls back to a bincode serialize → deserialize roundtrip.
+    /// The result must still be a valid RiverNetwork with the same data.
+    #[test]
+    fn arc_extraction_fallback_roundtrip() {
+        let net: RiverNetwork = ron::de::from_str("(segments: [], lakes: [])").unwrap();
+        let arc = Arc::new(net);
+        // Create a second reference so try_unwrap will fail.
+        let _extra_ref = Arc::clone(&arc);
+        assert_eq!(Arc::strong_count(&arc), 2);
+
+        let result = extract_river_network(Some(arc));
+        assert!(result.is_ok(), "fallback bincode roundtrip should succeed");
+        let owned = result.unwrap();
+        assert_eq!(owned.segments.len(), 0);
+        assert_eq!(owned.lakes.len(), 0);
+    }
+
+    /// Fallback path with non-trivial data: a RiverNetwork with real segments
+    /// survives the bincode roundtrip.
+    #[test]
+    fn arc_extraction_fallback_preserves_segments() {
+        let ron_str = r#"(
+            segments: [(
+                id: 42,
+                path: [(10.0, 20.0), (30.0, 40.0)],
+                drainage_area: 500,
+                downstream: None,
+                upstream: [],
+                character: Permanent,
+                meander_offsets: [0.1, -0.2],
+                strahler_order: 3,
+            )],
+            lakes: [],
+        )"#;
+        let net: RiverNetwork = ron::de::from_str(ron_str).unwrap();
+        // Force the fallback by holding two Arcs.
+        let arc = Arc::new(net);
+        let _extra = Arc::clone(&arc);
+
+        let result = extract_river_network(Some(arc));
+        assert!(result.is_ok());
+        let owned = result.unwrap();
+        assert_eq!(owned.segments.len(), 1);
+        assert_eq!(owned.segments[0].id, 42);
+        assert_eq!(owned.segments[0].drainage_area, 500);
+        assert_eq!(owned.segments[0].path.len(), 2);
+        assert_eq!(owned.segments[0].strahler_order, 3);
+    }
+
+    /// When `None` is passed (no river network was generated), the function
+    /// returns a valid empty RiverNetwork via RON deserialization.
+    #[test]
+    fn arc_extraction_none_returns_empty() {
+        let result = extract_river_network(None);
+        assert!(result.is_ok(), "None should produce empty RiverNetwork");
+        let owned = result.unwrap();
+        assert_eq!(owned.segments.len(), 0);
+        assert_eq!(owned.lakes.len(), 0);
+    }
+
+    // ── layer_file_name tests ───────────────────────────────────────────────
+
+    /// Every noise layer maps to a unique `.png` filename.
+    #[test]
+    fn layer_file_names_are_unique_and_end_with_png() {
+        let mut seen = std::collections::HashSet::new();
+        for layer in NoiseLayer::all() {
+            let name = layer_file_name(*layer);
+            assert!(name.ends_with(".png"), "{name} should end with .png");
+            assert!(
+                seen.insert(name.clone()),
+                "duplicate filename: {name}"
+            );
+        }
+        // Should cover all 20 layers.
+        assert_eq!(seen.len(), NoiseLayer::all().len());
+    }
 }
