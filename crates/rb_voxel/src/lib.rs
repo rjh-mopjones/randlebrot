@@ -389,6 +389,143 @@ pub fn terrain_height_at(
     sample_heightmap(heightmap, map_width, map_height, x, y) * height_scale + offset
 }
 
+/// Draw a simple 3D player placeholder (vertical capsule/pillar) at a world
+/// position onto the already-rendered output buffer. Call this AFTER `render_frame`.
+///
+/// The player is rendered as a colored vertical bar projected into the scene
+/// using the same perspective math as the terrain. In third-person mode, the
+/// player appears at `(player_x, player_y)` — the camera's logical position.
+pub fn draw_player_marker(
+    heightmap: &[f64],
+    map_width: usize,
+    map_height: usize,
+    player_x: f64,
+    player_y: f64,
+    camera: &Camera,
+    config: &RenderConfig,
+    output: &mut [u8],
+    screen_width: usize,
+    screen_height: usize,
+    player_color: [u8; 3],
+    player_height: f64, // world units tall (e.g., 3.0)
+) {
+    // Only draw in third-person (in first-person you ARE the player)
+    if matches!(camera.mode, CameraMode::FirstPerson) {
+        return;
+    }
+
+    let (cam_x, cam_y, cam_height, cam_yaw, cam_pitch) = effective_camera(camera);
+    let half_fov = camera.fov / 2.0;
+    let half_screen_h = screen_height as f64 / 2.0;
+    let pitch_offset = cam_pitch.tan() * half_screen_h;
+
+    // Vector from camera to player
+    let dx = player_x - cam_x;
+    let dy = player_y - cam_y;
+    let distance = (dx * dx + dy * dy).sqrt();
+    if distance < 1.0 {
+        return; // Too close, skip
+    }
+
+    // Angle from camera to player
+    let angle_to_player = dy.atan2(dx);
+
+    // Relative angle within the FOV
+    let mut rel_angle = angle_to_player - cam_yaw;
+    // Normalize to [-PI, PI]
+    while rel_angle > std::f64::consts::PI {
+        rel_angle -= 2.0 * std::f64::consts::PI;
+    }
+    while rel_angle < -std::f64::consts::PI {
+        rel_angle += 2.0 * std::f64::consts::PI;
+    }
+
+    // Check if player is within FOV
+    if rel_angle.abs() > half_fov {
+        return;
+    }
+
+    // Screen X column
+    let screen_x = ((rel_angle + half_fov) / camera.fov * screen_width as f64) as isize;
+    if screen_x < 0 || screen_x >= screen_width as isize {
+        return;
+    }
+    let col = screen_x as usize;
+
+    // Perpendicular distance (for correct projection, avoiding fisheye)
+    let cos_correction = rel_angle.cos();
+    let perp_dist = distance * cos_correction;
+    if perp_dist <= 0.0 {
+        return;
+    }
+
+    // Terrain height at player position
+    let terrain_h = sample_heightmap(heightmap, map_width, map_height, player_x, player_y)
+        * config.height_scale;
+
+    // Project feet (terrain surface) and head (terrain + player_height)
+    let feet_diff = terrain_h - cam_height;
+    let head_diff = (terrain_h + player_height) - cam_height;
+
+    let feet_screen_y =
+        (half_screen_h - (feet_diff * half_screen_h) / perp_dist - pitch_offset) as isize;
+    let head_screen_y =
+        (half_screen_h - (head_diff * half_screen_h) / perp_dist - pitch_offset) as isize;
+
+    let top = head_screen_y.max(0) as usize;
+    let bottom = feet_screen_y.min(screen_height as isize).max(0) as usize;
+    if top >= bottom {
+        return;
+    }
+
+    // Apply distance fog to player color
+    let fogged = apply_fog(
+        [player_color[0], player_color[1], player_color[2], 255],
+        config.fog_color,
+        distance,
+        camera.draw_distance,
+    );
+
+    // Draw a 3-pixel-wide vertical bar (the "player") with a brighter center column
+    let col_start = if col >= 1 { col - 1 } else { 0 };
+    let col_end = (col + 2).min(screen_width);
+
+    for row in top..bottom {
+        for c in col_start..col_end {
+            let offset = (row * screen_width + c) * 4;
+            if offset + 3 < output.len() {
+                // Center column is full brightness, sides are slightly darker
+                let brightness = if c == col { 1.0 } else { 0.7 };
+                output[offset] = (fogged[0] as f64 * brightness) as u8;
+                output[offset + 1] = (fogged[1] as f64 * brightness) as u8;
+                output[offset + 2] = (fogged[2] as f64 * brightness) as u8;
+                output[offset + 3] = 255;
+            }
+        }
+    }
+
+    // Draw a small "head" circle (5x5 pixels) at the top
+    let head_center_y = top;
+    let head_radius: isize = 2;
+    for dy_px in -head_radius..=head_radius {
+        for dx_px in -head_radius..=head_radius {
+            if dx_px * dx_px + dy_px * dy_px <= head_radius * head_radius {
+                let px = col as isize + dx_px;
+                let py = head_center_y as isize + dy_px;
+                if px >= 0 && px < screen_width as isize && py >= 0 && py < screen_height as isize {
+                    let offset = (py as usize * screen_width + px as usize) * 4;
+                    if offset + 3 < output.len() {
+                        output[offset] = fogged[0];
+                        output[offset + 1] = fogged[1];
+                        output[offset + 2] = fogged[2];
+                        output[offset + 3] = 255;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

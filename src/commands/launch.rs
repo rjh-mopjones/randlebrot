@@ -28,7 +28,7 @@ use bevy_egui::{egui, EguiContexts};
 use rb_artifacts::ArtifactStore;
 use rb_core::{PlayableLevel, WorldPos};
 use rb_noise::{BiomeMap, NoiseBackend, NoiseLayer};
-use rb_voxel::{Camera as VoxelCamera, CameraMode as VoxelCameraMode, RenderConfig, render_frame, terrain_height_at};
+use rb_voxel::{Camera as VoxelCamera, CameraMode as VoxelCameraMode, RenderConfig, render_frame, draw_player_marker, terrain_height_at};
 
 use crate::cli::coords::{
     chunk_coord_to_world_pos, CHUNK_WORLD_SIZE, WORLD_HEIGHT, WORLD_WIDTH,
@@ -947,6 +947,8 @@ fn voxel_render_system(
     mut render_buf: ResMut<RenderOutputBuffer>,
     mut images: ResMut<Assets<Image>>,
     sprite_query: Query<&Sprite, With<VoxelDisplaySprite>>,
+    player_pos: Res<PlayerWorldPos>,
+    buf_origin: Res<BufferOrigin>,
 ) {
     let Ok(sprite) = sprite_query.single() else {
         return;
@@ -963,6 +965,25 @@ fn voxel_render_system(
         &mut render_buf.0,
         SCREEN_WIDTH,
         SCREEN_HEIGHT,
+    );
+
+    // Draw the player placeholder in third-person mode
+    let pixels_per_world = TILE_MAP_SIZE as f64 / CHUNK_WORLD_SIZE;
+    let player_buf_x = (player_pos.x - buf_origin.world_x) * pixels_per_world;
+    let player_buf_y = (player_pos.y - buf_origin.world_y) * pixels_per_world;
+    draw_player_marker(
+        &terrain_buf.heightmap,
+        terrain_buf.size,
+        terrain_buf.size,
+        player_buf_x,
+        player_buf_y,
+        &camera_state.camera,
+        &RENDER_CONFIG,
+        &mut render_buf.0,
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT,
+        [50, 180, 255], // bright blue player
+        8.0,            // player height in world units
     );
 
     // Copy into the existing image data buffer (preserves Bevy's allocation)
