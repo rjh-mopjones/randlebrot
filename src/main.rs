@@ -5,7 +5,7 @@ use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use rb_core::{AppMode, ModeTransitionEvent, PlayableLevel, SelectedChunk, SelectedMesoTile, SelectedMicroTile, TerrainQuery, WorldPos, handle_mode_shortcuts};
-use rb_editor::{CurrentLayer, CurrentLifeGenLayer, GenerateMesoRequest, GeneratorUiState, LaunchLevelRequest, LauncherPhase, LifeGenLayer, RegenerateLifeGenRequest, RegenerationRequest, SaveLevelRequest, SaveLevelUiState, StartPlayRequest};
+use rb_editor::{CurrentLayer, CurrentLifeGenLayer, GenerateMesoRequest, GeneratorUiState, LaunchLevelRequest, LauncherPhase, LifeGenLayer, OpenArtifactRequest, RegenerateLifeGenRequest, RegenerationRequest, SaveAsArtifactRequest, SaveLevelRequest, SaveLevelUiState, StartPlayRequest};
 use rb_noise::{BiomeMap, MesoTerrainView, NoiseBackend, NormalizationHints};
 use rb_player::Player;
 use rb_tilemap::{LevelChunk, LoadedChunks};
@@ -745,7 +745,20 @@ fn launch_gui(layers_tag: Option<String>) {
         .add_systems(Update,
             artifact_load_system
                 .run_if(in_state(AppPhase::LoadingArtifact)),
-        );
+        )
+        // Open Artifact request (from editor UI) — transition to LoadingArtifact
+        .add_systems(Update,
+            handle_open_artifact_request
+                .run_if(resource_exists::<OpenArtifactRequest>),
+        )
+        // Save As Artifact request (from editor UI) — save current state
+        .add_systems(Update,
+            handle_save_as_artifact_request
+                .run_if(in_state(AppPhase::Ready)
+                    .and(resource_exists::<SaveAsArtifactRequest>)),
+        )
+        // Sync world_ready flag on GeneratorUiState
+        .add_systems(Update, sync_world_ready_flag);
 
     // If a layers tag was provided, insert it as a resource so the
     // LoadingArtifact system can read it.
@@ -2246,6 +2259,78 @@ fn artifact_load_system(
     println!("Artifact loaded. Pre-generating {} macro tile textures...", total);
 }
 
+// ─── Open / Save As Artifact (editor UI) ───────────────────────────────────
+
+/// Handle the OpenArtifactRequest signal from the editor UI.
+/// Inserts `LoadLayersTag` and transitions to `LoadingArtifact` phase.
+fn handle_open_artifact_request(
+    mut commands: Commands,
+    mut next_phase: ResMut<NextState<AppPhase>>,
+    request: Res<OpenArtifactRequest>,
+) {
+    let tag = request.tag.clone();
+    println!("Opening artifact '{tag}' from editor UI...");
+    commands.insert_resource(LoadLayersTag(tag));
+    commands.remove_resource::<OpenArtifactRequest>();
+    next_phase.set(AppPhase::LoadingArtifact);
+}
+
+/// Handle the SaveAsArtifactRequest signal from the editor UI.
+/// Performs the save synchronously reusing `perform_artifact_save`.
+fn handle_save_as_artifact_request(
+    mut commands: Commands,
+    request: Res<SaveAsArtifactRequest>,
+    macro_biome: Option<Res<MacroBiomeData>>,
+    global_rivers: Option<Res<GlobalRiverNetwork>>,
+    lifegen: Option<Res<LifeGenData>>,
+    tile_cache: Option<Res<TileCache>>,
+    norm_hints: Option<Res<GlobalNormHints>>,
+    world_def: Res<WorldDefinition>,
+    mut ui_state: ResMut<GeneratorUiState>,
+) {
+    let tag = request.tag.clone();
+    commands.remove_resource::<SaveAsArtifactRequest>();
+
+    let save_result = perform_artifact_save(
+        &tag,
+        macro_biome.as_deref(),
+        global_rivers.as_deref(),
+        lifegen.as_deref(),
+        tile_cache.as_deref(),
+        norm_hints.as_deref(),
+        &world_def,
+        &ui_state,
+    );
+
+    match save_result {
+        Ok(path) => {
+            println!("Artifact saved to {path}");
+            ui_state.show_save_as_dialog = false;
+            ui_state.save_as_in_progress = false;
+            ui_state.save_as_error = None;
+            ui_state.save_as_confirm_overwrite = false;
+            ui_state.status_message = Some((format!("Saved artifact '{tag}'"), 3.0));
+        }
+        Err(err) => {
+            eprintln!("Save As failed: {err}");
+            ui_state.save_as_in_progress = false;
+            ui_state.save_as_error = Some(err);
+        }
+    }
+}
+
+/// Sync the `world_ready` flag on `GeneratorUiState` based on whether
+/// the app is in `AppPhase::Ready` (i.e. a generated world exists).
+fn sync_world_ready_flag(
+    phase: Res<State<AppPhase>>,
+    mut ui_state: ResMut<GeneratorUiState>,
+) {
+    let ready = *phase.get() == AppPhase::Ready;
+    if ui_state.world_ready != ready {
+        ui_state.world_ready = ready;
+    }
+}
+
 /// Show progress bar during meso tile pre-generation.
 fn meso_pregen_progress_ui(
     mut contexts: EguiContexts,
@@ -3548,7 +3633,7 @@ fn poll_meso_pregen(
             let image = create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, image_data);
             let texture = images.add(image);
 
-            meso_cache.tiles.insert(coord, MesoCachedTile { biome_map: biome_map, texture });
+            meso_cache.tiles.insert(coord, MesoCachedTile { biome_map, texture });
             pregen.completed += 1;
         } else {
             i += 1;
@@ -3826,7 +3911,7 @@ fn poll_micro_pregen(
             let image = create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, image_data);
             let texture = images.add(image);
 
-            micro_cache.tiles.insert(coord, MicroCachedTile { biome_map: biome_map, texture });
+            micro_cache.tiles.insert(coord, MicroCachedTile { biome_map, texture });
             pregen.completed += 1;
         } else {
             i += 1;

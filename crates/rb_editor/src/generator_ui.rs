@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
+use rb_artifacts::LayerManifest;
 use rb_core::AppMode;
 use rb_noise::{NoiseBackend, NoiseLayer};
 use rb_persistence::{list_worlds, load_world, save_world, world_path};
@@ -34,6 +35,24 @@ pub struct GeneratorUiState {
     pub layer_changed: Option<NoiseLayer>,
     /// Whether to use GPU for noise generation (defaults to true).
     pub use_gpu: bool,
+    /// Whether the Open Artifact dialog is shown.
+    pub show_open_artifact_dialog: bool,
+    /// Cached list of available layer artifacts (fetched on dialog open).
+    pub available_artifacts: Vec<(String, LayerManifest)>,
+    /// Error message from listing artifacts.
+    pub artifact_list_error: Option<String>,
+    /// Whether the Save As Artifact dialog is shown.
+    pub show_save_as_dialog: bool,
+    /// Tag input for Save As dialog.
+    pub save_as_tag_input: String,
+    /// Error message for Save As dialog.
+    pub save_as_error: Option<String>,
+    /// Whether a Save As operation is in progress.
+    pub save_as_in_progress: bool,
+    /// Whether to confirm overwriting an existing artifact.
+    pub save_as_confirm_overwrite: bool,
+    /// Whether a generated world is available (AppPhase::Ready). Set by main.rs.
+    pub world_ready: bool,
 }
 
 impl Default for GeneratorUiState {
@@ -47,8 +66,33 @@ impl Default for GeneratorUiState {
             current_layer: None,
             layer_changed: None,
             use_gpu: true,
+            show_open_artifact_dialog: false,
+            available_artifacts: Vec::new(),
+            artifact_list_error: None,
+            show_save_as_dialog: false,
+            save_as_tag_input: String::new(),
+            save_as_error: None,
+            save_as_in_progress: false,
+            save_as_confirm_overwrite: false,
+            world_ready: false,
         }
     }
+}
+
+/// Signal resource: user selected an artifact to load from the Open dialog.
+/// main.rs consumes this and transitions to LoadingArtifact phase.
+#[derive(Resource)]
+pub struct OpenArtifactRequest {
+    /// Tag of the artifact to load.
+    pub tag: String,
+}
+
+/// Signal resource: user confirmed Save As with a tag name.
+/// main.rs consumes this and performs the save.
+#[derive(Resource)]
+pub struct SaveAsArtifactRequest {
+    /// Tag to save under.
+    pub tag: String,
 }
 
 impl GeneratorUiState {
@@ -94,6 +138,7 @@ pub fn terrain_panel_system(
     mut world_def: ResMut<WorldDefinition>,
     mut ui_state: ResMut<GeneratorUiState>,
     mut regen_request: ResMut<RegenerationRequest>,
+    mut commands: Commands,
 ) {
     // Initialize seed text from world definition
     if !ui_state.initialized {
@@ -222,6 +267,50 @@ pub fn terrain_panel_system(
                 ui_state.available_worlds = list_worlds().unwrap_or_default();
             }
 
+            ui.add_space(16.0);
+            ui.separator();
+
+            // Artifact Open/Save As buttons
+            ui.heading("Artifacts");
+            ui.add_space(4.0);
+
+            if ui.button("Open Artifact...").clicked() {
+                ui_state.show_open_artifact_dialog = true;
+                ui_state.artifact_list_error = None;
+                // Fetch the artifact list from disk.
+                match rb_artifacts::ArtifactStore::new() {
+                    Ok(store) => match store.list_layers() {
+                        Ok(list) => ui_state.available_artifacts = list,
+                        Err(e) => {
+                            ui_state.artifact_list_error =
+                                Some(format!("Failed to list artifacts: {e}"));
+                            ui_state.available_artifacts = Vec::new();
+                        }
+                    },
+                    Err(e) => {
+                        ui_state.artifact_list_error =
+                            Some(format!("Failed to open artifact store: {e}"));
+                        ui_state.available_artifacts = Vec::new();
+                    }
+                }
+            }
+
+            let save_as_enabled = ui_state.world_ready;
+            ui.add_enabled_ui(save_as_enabled, |ui| {
+                if ui
+                    .button("Save As Artifact...")
+                    .on_disabled_hover_text("Generate a world first")
+                    .clicked()
+                {
+                    ui_state.show_save_as_dialog = true;
+                    ui_state.save_as_error = None;
+                    ui_state.save_as_in_progress = false;
+                    ui_state.save_as_confirm_overwrite = false;
+                    // Pre-fill with sanitised world name.
+                    ui_state.save_as_tag_input = sanitize_tag_for_ui(&world_def.name);
+                }
+            });
+
             // Status message
             if let Some((msg, _)) = &ui_state.status_message {
                 ui.add_space(8.0);
@@ -316,6 +405,217 @@ pub fn terrain_panel_system(
                 }
             }
         }
+    }
+
+    // Open Artifact dialog window
+    if ui_state.show_open_artifact_dialog {
+        let mut close_dialog = false;
+        let mut selected_tag: Option<String> = None;
+
+        egui::Window::new("Open Layer Artifact")
+            .collapsible(false)
+            .resizable(true)
+            .default_size([420.0, 300.0])
+            .show(contexts.ctx_mut().unwrap(), |ui| {
+                ui.label("Select a layer artifact to load:");
+                ui.add_space(4.0);
+
+                if let Some(ref err) = ui_state.artifact_list_error {
+                    ui.label(
+                        egui::RichText::new(err)
+                            .color(egui::Color32::from_rgb(255, 100, 100))
+                            .size(12.0),
+                    );
+                    ui.add_space(8.0);
+                }
+
+                ui.separator();
+
+                egui::ScrollArea::vertical()
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        if ui_state.available_artifacts.is_empty()
+                            && ui_state.artifact_list_error.is_none()
+                        {
+                            ui.label("No layer artifacts found.");
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(
+                                    "Generate a world via CLI or editor to create one.",
+                                )
+                                .size(11.0)
+                                .color(egui::Color32::GRAY),
+                            );
+                        }
+
+                        for (tag, manifest) in &ui_state.available_artifacts {
+                            ui.horizontal(|ui| {
+                                let label = format!(
+                                    "{tag}  (seed: {}, {}x{}, {})",
+                                    manifest.seed,
+                                    manifest.world_width,
+                                    manifest.world_height,
+                                    &manifest.created[..10.min(manifest.created.len())],
+                                );
+                                if ui.selectable_label(false, label).clicked() {
+                                    selected_tag = Some(tag.clone());
+                                    close_dialog = true;
+                                }
+                            });
+                        }
+                    });
+
+                ui.separator();
+                if ui.button("Cancel").clicked() {
+                    close_dialog = true;
+                }
+            });
+
+        if close_dialog {
+            ui_state.show_open_artifact_dialog = false;
+        }
+
+        if let Some(tag) = selected_tag {
+            commands.insert_resource(OpenArtifactRequest { tag });
+            ui_state.show_open_artifact_dialog = false;
+        }
+    }
+
+    // Save As Artifact dialog window
+    if ui_state.show_save_as_dialog {
+        let mut close_dialog = false;
+        let mut do_save = false;
+
+        egui::Window::new("Save As Layer Artifact")
+            .collapsible(false)
+            .resizable(false)
+            .default_size([380.0, 160.0])
+            .show(contexts.ctx_mut().unwrap(), |ui| {
+                ui.vertical(|ui| {
+                    ui.label("Save the current world as a layer artifact.");
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Tag:");
+                        ui.text_edit_singleline(&mut ui_state.save_as_tag_input);
+                    });
+                    ui.add_space(4.0);
+
+                    ui.label(
+                        egui::RichText::new(
+                            "Letters, numbers, hyphens, and underscores only.",
+                        )
+                        .size(11.0)
+                        .color(egui::Color32::GRAY),
+                    );
+
+                    if let Some(ref err) = ui_state.save_as_error {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(err)
+                                .color(egui::Color32::from_rgb(255, 100, 100))
+                                .size(12.0),
+                        );
+                    }
+
+                    if ui_state.save_as_confirm_overwrite {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Artifact '{}' already exists. Overwrite?",
+                                ui_state.save_as_tag_input.trim()
+                            ))
+                            .color(egui::Color32::from_rgb(255, 200, 80))
+                            .size(12.0),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button("Overwrite").clicked() {
+                                do_save = true;
+                                ui_state.save_as_confirm_overwrite = false;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                ui_state.save_as_confirm_overwrite = false;
+                            }
+                        });
+                    } else {
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            let can_save = !ui_state.save_as_in_progress;
+                            ui.add_enabled_ui(can_save, |ui| {
+                                if ui.button("Save").clicked() {
+                                    let tag = ui_state.save_as_tag_input.trim().to_string();
+                                    // Validate tag
+                                    if tag.is_empty() {
+                                        ui_state.save_as_error =
+                                            Some("Tag must not be empty.".to_string());
+                                    } else if !tag.chars().all(|c| {
+                                        c.is_ascii_alphanumeric() || c == '-' || c == '_'
+                                    }) {
+                                        ui_state.save_as_error = Some(
+                                            "Tag must contain only letters, numbers, hyphens, and underscores.".to_string(),
+                                        );
+                                    } else {
+                                        // Check if it already exists
+                                        let exists = rb_artifacts::ArtifactStore::new()
+                                            .map(|s| {
+                                                s.exists(rb_artifacts::ArtifactKind::Layers, &tag)
+                                            })
+                                            .unwrap_or(false);
+                                        if exists {
+                                            ui_state.save_as_confirm_overwrite = true;
+                                            ui_state.save_as_error = None;
+                                        } else {
+                                            do_save = true;
+                                        }
+                                    }
+                                }
+                            });
+                            if ui.button("Cancel").clicked() {
+                                close_dialog = true;
+                            }
+                        });
+                    }
+
+                    if ui_state.save_as_in_progress {
+                        ui.add_space(4.0);
+                        ui.label("Saving...");
+                    }
+                });
+            });
+
+        if close_dialog {
+            ui_state.show_save_as_dialog = false;
+            ui_state.save_as_error = None;
+            ui_state.save_as_confirm_overwrite = false;
+        }
+
+        if do_save {
+            let tag = ui_state.save_as_tag_input.trim().to_string();
+            ui_state.save_as_in_progress = true;
+            ui_state.save_as_error = None;
+            commands.insert_resource(SaveAsArtifactRequest { tag });
+        }
+    }
+}
+
+/// Sanitise a string into a valid artifact tag for the UI.
+fn sanitize_tag_for_ui(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else if c == ' ' {
+                '-'
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "world".to_string()
+    } else {
+        sanitized
     }
 }
 
