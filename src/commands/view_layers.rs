@@ -101,7 +101,7 @@ pub fn run(tag: String) -> Result<(), String> {
         ..default()
     }));
 
-    // Egui is only used for the minimal HUD overlay.
+    // Egui is used for the side panel (layer selection + HUD info).
     app.add_plugins(EguiPlugin {
         enable_multipass_for_primary_context: false,
         ..Default::default()
