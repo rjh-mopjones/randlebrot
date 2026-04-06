@@ -1,0 +1,14 @@
+[package]
+name = "rb_voxel"
+version = "0.1.0"
+edition = "2021"
+description = "Comanche-style voxel space terrain raycaster"
+
+[dependencies]
+rayon = "1.10"
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[lints]
+workspace = true
