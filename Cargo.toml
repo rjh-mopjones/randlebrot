@@ -64,6 +64,7 @@ rb_editor.workspace = true
 rb_player.workspace = true
 rb_persistence.workspace = true
 rb_artifacts.workspace = true
+rb_voxel.workspace = true
 
 [workspace.lints.clippy]
 # TODO: fix these and remove the allows
