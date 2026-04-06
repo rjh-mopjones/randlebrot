@@ -153,7 +153,6 @@ pub fn run(level_tag: String) -> Result<(), String> {
     // Pre-render the initial micro tile sprite from the loaded level artifact
     let initial_tile_data = micro_biome.to_layer_image(NoiseLayer::Biome);
     app.insert_resource(InitialMicroTile {
-        biome_map: Arc::new(micro_biome),
         image_data: initial_tile_data,
     });
 
@@ -303,7 +302,6 @@ struct LaunchLevelChunkTask {
 /// The pre-generated micro tile from the level artifact, displayed immediately.
 #[derive(Resource)]
 struct InitialMicroTile {
-    biome_map: Arc<BiomeMap>,
     image_data: Vec<u8>,
 }
 
@@ -634,15 +632,14 @@ fn update_map_player_marker(
     state: Res<MapOverlayState>,
     level: Res<PlayableLevel>,
     player_query: Query<&Transform, With<Player>>,
-    camera_query: Query<&Transform, (With<PlayerCamera>, Without<Player>, Without<MapOverlaySprite>, Without<MapPlayerMarker>)>,
     map_data: Option<Res<MapImageData>>,
     mut marker_query: Query<
         &mut Transform,
-        (With<MapPlayerMarker>, Without<Player>, Without<PlayerCamera>, Without<MapOverlaySprite>),
+        (With<MapPlayerMarker>, Without<Player>, Without<MapOverlaySprite>),
     >,
     overlay_query: Query<
         &Transform,
-        (With<MapOverlaySprite>, Without<Player>, Without<PlayerCamera>, Without<MapPlayerMarker>),
+        (With<MapOverlaySprite>, Without<Player>, Without<MapPlayerMarker>),
     >,
 ) {
     if !state.visible {
@@ -650,7 +647,6 @@ fn update_map_player_marker(
     }
     let Some(map_data) = map_data else { return };
     let Ok(player_transform) = player_query.single() else { return };
-    let Ok(camera_transform) = camera_query.single() else { return };
     let Ok(overlay_transform) = overlay_query.single() else { return };
     let Ok(mut marker_transform) = marker_query.single_mut() else { return };
 
