@@ -4685,6 +4685,7 @@ dependencies = [
  "rb_persistence",
  "rb_player",
  "rb_tilemap",
+ "rb_voxel",
  "rb_world",
  "ron 0.8.1",
 ]

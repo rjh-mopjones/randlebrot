@@ -115,8 +115,8 @@ cargo run -- view layers my-tag                  # interactive layer viewer (Bev
 cargo run -- view levels                         # list all level artifacts
 cargo run -- view levels level-tag               # inspect a specific level artifact
 
-# ─── Launch playable level ───
-cargo run -- launch level-tag                    # play a previously generated level
+# ─── Launch playable level (Comanche-style 3D terrain) ───
+cargo run -- launch level-tag                    # 3D terrain flyover via rb_voxel raycaster
 
 # ─── Tests & examples ───
 cargo test                                       # workspace tests
@@ -133,7 +133,7 @@ The CLI follows a **generate → view → launch** pipeline:
 
 3. **View** — `randlebrot view layers` and `randlebrot view levels` list and inspect generated artifacts. `view levels <tag>` prints detailed metadata; `view layers <tag>` opens the interactive layer viewer (see CLI Visual Tools below).
 
-4. **Launch** — `randlebrot launch <level-tag>` opens a playable Bevy window for a previously generated level artifact. Loads the parent layers artifact for macro context (streaming new chunks on the fly as the player moves). Press M to toggle a world map overlay with the player's position. ESC exits.
+4. **Launch** — `randlebrot launch <level-tag>` opens a Bevy window with Comanche-style 3D terrain rendering via `rb_voxel`. Loads the parent layers artifact for macro context (streaming chunks as the camera moves, stitching heightmap + colormap into a terrain buffer). WASD moves, mouse looks, V toggles camera mode, scroll adjusts draw distance. Press M to toggle a world map overlay with the player's position. ESC exits.
 
 5. **GUI** — `randlebrot gui [layers-tag]` (or just `randlebrot` with no args) launches the full Bevy editor. Two artifact integration paths:
    - **Auto-save after generation**: When "Generate World" completes, the user is prompted for a tag name and the result is saved via `rb_artifacts::save_layers()`. The user can skip saving.
@@ -196,29 +196,34 @@ Always use `--release` — debug builds are unacceptably slow (tile generation d
 
 ### Level Launcher (CLI)
 
-`randlebrot launch <level-tag>` opens a playable level from a previously generated level artifact. It is a minimal Bevy app: `DefaultPlugins` + `EguiPlugin` + `RbPlayerPlugin` + `RbTilemapPlugin`. No editor stack, no world generation pipeline — the macro `BiomeMap` and `RiverNetwork` are loaded from the parent layers artifact (or regenerated from seed if the parent is missing).
+`randlebrot launch <level-tag>` opens a playable level with Comanche-style 3D terrain rendering via `rb_voxel`. It is a minimal Bevy app: `DefaultPlugins` + `EguiPlugin`. No editor stack, no world generation pipeline, no `RbPlayerPlugin` or `RbTilemapPlugin` — the terrain is rendered as a fullscreen sprite updated each frame by `rb_voxel::render_frame()`. The macro `BiomeMap` and `RiverNetwork` are loaded from the parent layers artifact (or regenerated from seed if the parent is missing).
 
-**Purpose**: quick testing of a specific chunk without clicking through the GUI launcher drill-down (F4 → generate meso → select → generate chunks → select → play).
+**Purpose**: quick testing of a specific chunk without clicking through the GUI launcher drill-down (F4 -> generate meso -> select -> generate chunks -> select -> play). The 3D terrain view gives an intuitive sense of the heightmap, biome colors, and terrain structure.
 
 **Controls**:
 
 | Control | Action |
 |---------|--------|
-| WASD | Move player |
+| WASD | Move forward/back/strafe relative to camera yaw |
+| Mouse | Look (yaw + pitch, clamped to +/-60 degrees) |
+| V | Toggle first-person / third-person camera |
+| Scroll wheel | Adjust draw distance (100-800, default 400) |
 | M | Toggle world map overlay |
-| Scroll wheel | Zoom map overlay (when visible) |
+| Scroll wheel (map) | Zoom map overlay (when visible) |
 | ESC | Exit |
 
 **Behaviour**:
 
-- Player spawns at the level's chunk coordinate with chunks streaming around them.
-- The initial chunk (from the level artifact) is displayed immediately; surrounding chunks generate asynchronously.
+- Camera spawns at the level's chunk coordinate looking along the positive-X axis.
+- Surrounding chunks generate asynchronously; their heightmap + colormap data is stitched into a 2048x2048 terrain buffer that `rb_voxel::render_frame()` consumes each frame.
+- Camera height auto-follows terrain (heightmap value * height_scale + offset).
+- First-person mode: eye-level view, direct forward. Third-person mode: elevated behind the camera target, looking down.
 - Press M to toggle a semi-transparent world map overlay showing the biome layer with a red dot marking the player's current position.
 - Parent layers artifact is loaded for macro context (fast path); if missing, macro data is regenerated from seed (slow path with a console message).
 - Window title is `Randlebrot - Playing: <tag>`.
-- Egui HUD shows level tag, coordinate, seed, and player position.
+- Egui HUD (non-interactive, top-left) shows level tag, coordinate, seed, player world position, camera mode, draw distance, and FPS.
 
-**Implementation**: `src/commands/launch.rs`. Follows the same pattern as `view_layers.rs` — standalone Bevy app with isolated resources (no shared state with the GUI editor). Level chunk streaming replicates the load/poll/unload pattern from `main.rs` (`level_chunk_load_system` / `level_chunk_poll_system` / `level_chunk_unload_system`).
+**Implementation**: `src/commands/launch.rs`. Follows the same pattern as `view_layers.rs` — standalone Bevy app with isolated resources (no shared state with the GUI editor). Level chunk streaming uses the same async load/poll/unload pattern, but instead of spawning tile sprites, completed chunks are blitted into a contiguous `TerrainBuffer` (heightmap + colormap). The `voxel_render_system` calls `rb_voxel::render_frame()` each frame, writing the output RGBA buffer to a Bevy `Image` on a fullscreen `Sprite`.
 
 ## Workspace Crate Map
 
@@ -572,10 +577,13 @@ The `rb_artifacts` crate manages `~/.randlebrot/` for persistent layer and level
 | **ESC** | Launcher (Playing) | Return to MesoView |
 | **Side panel** | Layer Viewer | Select base/overlay layer, adjust opacity |
 | **ESC** | Layer Viewer | Exit |
-| **WASD** | Launch (Playing) | Move player |
-| **M** | Launch (Playing) | Toggle world map overlay |
+| **WASD** | Launch (3D terrain) | Move forward/back/strafe relative to camera yaw |
+| **Mouse** | Launch (3D terrain) | Look (yaw + pitch) |
+| **V** | Launch (3D terrain) | Toggle first-person / third-person camera |
+| **Scroll wheel** | Launch (3D terrain) | Adjust draw distance (100-800) |
+| **M** | Launch (3D terrain) | Toggle world map overlay |
 | **Scroll wheel** | Launch (Map overlay) | Zoom map overlay |
-| **ESC** | Launch (Playing) | Exit |
+| **ESC** | Launch (3D terrain) | Exit |
 
 ### World Map View
 

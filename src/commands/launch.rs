@@ -1,19 +1,16 @@
-//! Launch a playable level from a previously generated level artifact.
+//! Launch a playable level with Comanche-style 3D terrain rendering.
 //!
-//! `randlebrot launch <level-tag>` opens a minimal Bevy window with the player
-//! spawned at the level's chunk coordinate. Surrounding chunks stream in
-//! as the player moves, using the parent layers artifact (macro `BiomeMap` +
-//! `RiverNetwork`) for on-the-fly generation. If the parent layers artifact is
-//! missing but the level manifest has a seed, the macro data is regenerated at
-//! startup.
-//!
-//! A world map overlay is available (press M to toggle) showing the full biome
-//! layer from the parent artifact with the player's position marked.
+//! `randlebrot launch <level-tag>` opens a Bevy window using `rb_voxel` to
+//! render the heightmap + colormap as a 2.5D terrain flyover. Surrounding
+//! chunks stream in as the player moves, stitching into a contiguous terrain
+//! buffer consumed by the raycaster each frame.
 //!
 //! Controls:
-//!   WASD            — move player
+//!   WASD            — move (forward/back/strafe relative to camera yaw)
+//!   Mouse           — look (yaw + pitch)
+//!   V               — toggle first-person / third-person camera
+//!   Scroll wheel    — adjust draw distance
 //!   M               — toggle world map overlay
-//!   Scroll wheel    — zoom (in map overlay mode)
 //!   ESC             — exit
 
 use std::collections::HashSet;
@@ -21,18 +18,17 @@ use std::sync::Arc;
 
 use bevy::app::AppExit;
 use bevy::image::{ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
-use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
+use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use bevy::window::PrimaryWindow;
-use bevy_egui::{egui, EguiContexts, EguiPlugin};
+use bevy_egui::{egui, EguiContexts};
 
 use rb_artifacts::ArtifactStore;
 use rb_core::{PlayableLevel, WorldPos};
 use rb_noise::{BiomeMap, NoiseBackend, NoiseLayer};
-use rb_player::{Player, PlayerCamera, RbPlayerPlugin};
-use rb_tilemap::{LevelChunk, LoadedChunks, RbTilemapPlugin};
+use rb_voxel::{Camera as VoxelCamera, CameraMode as VoxelCameraMode, RenderConfig, render_frame, terrain_height_at};
 
 use crate::cli::coords::{
     chunk_coord_to_world_pos, CHUNK_WORLD_SIZE, WORLD_HEIGHT, WORLD_WIDTH,
@@ -40,36 +36,58 @@ use crate::cli::coords::{
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
-/// Output resolution per chunk (512x512).
+/// Output resolution per chunk BiomeMap (512x512 pixels).
 const TILE_MAP_SIZE: usize = 512;
 
-/// Level chunk load radius (in level chunks around the player).
-const LEVEL_LOAD_RADIUS: i32 = 5;
+/// Screen width for the voxel renderer.
+const SCREEN_WIDTH: usize = 1280;
+
+/// Screen height for the voxel renderer.
+const SCREEN_HEIGHT: usize = 720;
+
+/// Terrain buffer size (square). Each loaded chunk contributes a 512x512 region.
+/// A 2048x2048 buffer holds 4x4 = 16 chunks worth of terrain data.
+const TERRAIN_BUF_SIZE: usize = 2048;
+
+/// Level chunk load radius (in chunks around the camera).
+const LEVEL_LOAD_RADIUS: i32 = 3;
 
 /// Level chunk unload radius.
-const LEVEL_UNLOAD_RADIUS: i32 = 7;
-
-/// Each level chunk occupies this many pixels in screen space.
-const LEVEL_CHUNK_TILES: f32 = 64.0;
+const LEVEL_UNLOAD_RADIUS: i32 = 5;
 
 /// Max concurrent async tile generation tasks.
-const MAX_CONCURRENT_TILES: usize = 16;
+const MAX_CONCURRENT_TILES: usize = 8;
 
 /// Max tile completions to process per frame.
-const POLL_BUDGET: usize = 16;
+const POLL_BUDGET: usize = 8;
+
+/// Player movement speed in world units per second.
+const MOVE_SPEED: f64 = 5.0;
+
+/// Mouse look sensitivity.
+const MOUSE_SENSITIVITY: f64 = 0.002;
+
+/// Minimum draw distance.
+const MIN_DRAW_DISTANCE: f64 = 100.0;
+
+/// Maximum draw distance.
+const MAX_DRAW_DISTANCE: f64 = 800.0;
+
+/// Default draw distance.
+const DEFAULT_DRAW_DISTANCE: f64 = 400.0;
+
+/// Pitch clamp (±60 degrees in radians).
+const MAX_PITCH: f64 = std::f64::consts::FRAC_PI_3;
 
 // ─── Entry Point ───────────────────────────────────────────────────────────
 
-/// Launch a playable level from a previously generated level artifact.
-///
-/// Validates the tag, loads the level manifest + chunk BiomeMap, loads
-/// (or regenerates) the parent layers artifact, and runs a minimal Bevy app.
+/// Launch a playable level using the Comanche-style 3D terrain renderer.
 pub fn run(level_tag: String) -> Result<(), String> {
     // ─── 1. Load the level artifact ────────────────────────────────────
     let store = ArtifactStore::new()
         .map_err(|e| format!("failed to initialise artifact store at ~/.randlebrot: {e}"))?;
 
-    let (micro_biome, level_manifest) = store.load_level(&level_tag).map_err(|e| match e {
+    let (_micro_biome, level_manifest) = store.load_level(&level_tag).map_err(|e| match e {
         rb_artifacts::ArtifactError::NotFound { .. } => {
             match store.list_levels() {
                 Ok(entries) if !entries.is_empty() => {
@@ -103,14 +121,11 @@ pub fn run(level_tag: String) -> Result<(), String> {
     let macro_biome_arc = Arc::new(macro_biome);
     let river_network_arc = river_network;
 
-    // ─── 3. Load the biome map image for the map overlay ───────────────
-    // Try to load the pre-rendered biome.png from the parent layers artifact.
-    // If not available, render one from the macro BiomeMap.
+    // ─── 3. Load map overlay image ─────────────────────────────────────
     let map_image_data = load_or_render_map_image(&store, &level_manifest, &macro_biome_arc);
 
     // ─── 4. Build and run the Bevy app ─────────────────────────────────
     let origin = WorldPos::new(world_x, world_y);
-    // Compute the macro chunk that contains this chunk coordinate.
     let chunk_x = (world_x / 64.0).floor() as i32;
     let chunk_y = (world_y / 64.0).floor() as i32;
 
@@ -118,20 +133,16 @@ pub fn run(level_tag: String) -> Result<(), String> {
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: format!("Randlebrot - Playing: {level_tag}"),
-            resolution: (1280u32, 720u32).into(),
+            resolution: (SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32).into(),
             ..default()
         }),
         ..default()
     }));
 
-    app.add_plugins(EguiPlugin {
+    app.add_plugins(bevy_egui::EguiPlugin {
         enable_multipass_for_primary_context: false,
         ..Default::default()
     });
-
-    // Player + tilemap plugins
-    app.add_plugins(RbPlayerPlugin);
-    app.add_plugins(RbTilemapPlugin);
 
     // Insert resources
     app.insert_resource(PlayableLevel {
@@ -140,7 +151,6 @@ pub fn run(level_tag: String) -> Result<(), String> {
         seed,
         world_height: WORLD_HEIGHT as f64,
     });
-    app.init_resource::<LoadedChunks>();
     app.insert_resource(LaunchMacroBiomeData {
         biome_map: macro_biome_arc,
     });
@@ -149,14 +159,44 @@ pub fn run(level_tag: String) -> Result<(), String> {
     }
     app.insert_resource(LaunchLevelChunkQueue::default());
     app.insert_resource(MapOverlayState::default());
+    app.insert_resource(LaunchState {
+        level_tag,
+        chunk_coord: level_manifest.chunk_coord,
+    });
+    app.insert_resource(FpsCounter::default());
 
-    // Pre-render the initial chunk sprite from the loaded level artifact
-    let initial_tile_data = micro_biome.to_layer_image(NoiseLayer::Biome);
-    app.insert_resource(InitialChunkTile {
-        image_data: initial_tile_data,
+    // Terrain buffer for the voxel renderer
+    app.insert_resource(TerrainBuffer::new(TERRAIN_BUF_SIZE));
+
+    // Voxel camera state
+    let voxel_camera = VoxelCamera {
+        x: (TERRAIN_BUF_SIZE / 2) as f64,
+        y: (TERRAIN_BUF_SIZE / 2) as f64,
+        height: 100.0,
+        yaw: 0.0,
+        pitch: 0.0,
+        fov: std::f64::consts::FRAC_PI_3,
+        draw_distance: DEFAULT_DRAW_DISTANCE,
+        mode: VoxelCameraMode::FirstPerson,
+    };
+    app.insert_resource(VoxelCameraState { camera: voxel_camera });
+
+    // Player world position (tracks world coordinates, separate from buffer coords)
+    app.insert_resource(PlayerWorldPos {
+        x: world_x,
+        y: world_y,
     });
 
-    // Store the map image for the overlay
+    // Buffer origin tracker (which world coordinate maps to buffer (0,0))
+    app.insert_resource(BufferOrigin {
+        world_x: world_x - (TERRAIN_BUF_SIZE as f64 / (2.0 * TILE_MAP_SIZE as f64)) * CHUNK_WORLD_SIZE,
+        world_y: world_y - (TERRAIN_BUF_SIZE as f64 / (2.0 * TILE_MAP_SIZE as f64)) * CHUNK_WORLD_SIZE,
+    });
+
+    // Loaded chunk tracking (separate from rb_tilemap -- we just track coords + data)
+    app.insert_resource(LoadedTerrainChunks::default());
+
+    // Store the map overlay image
     if let Some((width, height, rgba_data)) = map_image_data {
         app.insert_resource(MapImageData {
             width,
@@ -167,22 +207,20 @@ pub fn run(level_tag: String) -> Result<(), String> {
         });
     }
 
-    app.insert_resource(LaunchState {
-        level_tag,
-        chunk_coord: level_manifest.chunk_coord,
-    });
-
     app.add_systems(Startup, launch_setup);
     app.add_systems(
         Update,
         (
-            launch_chunk_load_system,
-            launch_chunk_poll_system,
-            launch_chunk_unload_system,
+            camera_input_system,
+            chunk_streaming_system,
+            chunk_poll_system,
+            chunk_unload_system,
+            voxel_render_system,
             toggle_map_overlay,
             update_map_player_marker,
             map_overlay_zoom,
             launch_hud_system,
+            fps_update_system,
             exit_on_esc,
             exit_on_window_close,
         ),
@@ -195,21 +233,14 @@ pub fn run(level_tag: String) -> Result<(), String> {
 // ─── Parent Layers Loading ─────────────────────────────────────────────────
 
 /// Load the parent layers artifact (macro BiomeMap + RiverNetwork) for context.
-///
-/// Three paths:
-/// 1. Parent layers tag exists and loads successfully -> use it
-/// 2. Parent layers tag missing/broken but seed available -> regenerate macro data
-/// 3. No parent and no seed -> return error
 fn load_parent_layers(
     store: &ArtifactStore,
     manifest: &rb_artifacts::LevelManifest,
     seed: u32,
 ) -> Result<(BiomeMap, Option<Arc<rb_noise::RiverNetwork>>), String> {
-    // Try loading parent layers artifact
     if let Some(ref parent_tag) = manifest.parent_layers_tag {
         match store.load_layers_data(parent_tag) {
             Ok((mut biome_map, river_network, _lifegen)) => {
-                // Wrap the river network in an Arc and reconnect to BiomeMap
                 let river_arc = Arc::new(river_network);
                 biome_map.river_network = Some(river_arc.clone());
                 println!("Loaded parent layers artifact '{parent_tag}'");
@@ -224,7 +255,6 @@ fn load_parent_layers(
         }
     }
 
-    // Fallback: regenerate macro BiomeMap from seed
     println!("Generating macro BiomeMap from seed {seed} (this may take a moment)...");
     let biome_map = BiomeMap::generate_with_backend(
         seed,
@@ -243,7 +273,6 @@ fn load_or_render_map_image(
     manifest: &rb_artifacts::LevelManifest,
     macro_biome: &Arc<BiomeMap>,
 ) -> Option<(u32, u32, Vec<u8>)> {
-    // Try loading pre-rendered biome.png from parent layers
     if let Some(ref parent_tag) = manifest.parent_layers_tag {
         let biome_path = store.layer_image_path(parent_tag, "biome.png");
         if biome_path.exists() {
@@ -261,7 +290,6 @@ fn load_or_render_map_image(
         }
     }
 
-    // Fallback: render from the macro BiomeMap
     let image_data = macro_biome.to_layer_image(NoiseLayer::Biome);
     let w = macro_biome.width as u32;
     let h = macro_biome.height as u32;
@@ -296,19 +324,103 @@ struct LaunchLevelChunkQueue {
 /// An in-flight level chunk generation task.
 struct LaunchLevelChunkTask {
     coord: (i32, i32),
-    task: Task<((i32, i32), Arc<BiomeMap>)>,
+    task: Task<((i32, i32), ChunkTerrainData)>,
 }
 
-/// The pre-generated chunk from the level artifact, displayed immediately.
+/// Extracted terrain data from a generated chunk: heightmap + colormap.
+struct ChunkTerrainData {
+    heightmap: Vec<f64>,
+    colormap: Vec<u8>,
+    width: usize,
+    height: usize,
+}
+
+/// The contiguous terrain buffer fed to rb_voxel each frame.
 #[derive(Resource)]
-struct InitialChunkTile {
-    image_data: Vec<u8>,
+struct TerrainBuffer {
+    /// Heightmap values (f64), size x size.
+    heightmap: Vec<f64>,
+    /// RGBA colormap, size x size x 4.
+    colormap: Vec<u8>,
+    /// Side length of the square buffer.
+    size: usize,
+}
+
+impl TerrainBuffer {
+    fn new(size: usize) -> Self {
+        Self {
+            heightmap: vec![0.0; size * size],
+            colormap: vec![0u8; size * size * 4],
+            size,
+        }
+    }
+
+    /// Copy a chunk's terrain data into the buffer at the given pixel offset.
+    fn blit_chunk(
+        &mut self,
+        chunk_data: &ChunkTerrainData,
+        buf_x: usize,
+        buf_y: usize,
+    ) {
+        let cw = chunk_data.width;
+        let ch = chunk_data.height;
+        let bs = self.size;
+
+        for row in 0..ch {
+            let dst_y = buf_y + row;
+            if dst_y >= bs {
+                break;
+            }
+            for col in 0..cw {
+                let dst_x = buf_x + col;
+                if dst_x >= bs {
+                    break;
+                }
+
+                let src_idx = row * cw + col;
+                let dst_idx = dst_y * bs + dst_x;
+
+                self.heightmap[dst_idx] = chunk_data.heightmap[src_idx];
+
+                let src_rgba = src_idx * 4;
+                let dst_rgba = dst_idx * 4;
+                self.colormap[dst_rgba..dst_rgba + 4]
+                    .copy_from_slice(&chunk_data.colormap[src_rgba..src_rgba + 4]);
+            }
+        }
+    }
+}
+
+/// Voxel camera state (wraps rb_voxel::Camera).
+#[derive(Resource)]
+struct VoxelCameraState {
+    camera: VoxelCamera,
+}
+
+/// Player's position in world coordinates.
+#[derive(Resource)]
+struct PlayerWorldPos {
+    x: f64,
+    y: f64,
+}
+
+/// World coordinate that maps to buffer pixel (0,0).
+#[derive(Resource)]
+struct BufferOrigin {
+    world_x: f64,
+    world_y: f64,
+}
+
+/// Tracks which chunks are loaded (by chunk coord) and their buffer-pixel offsets.
+#[derive(Resource, Default)]
+struct LoadedTerrainChunks {
+    /// Maps chunk coord -> buffer pixel offset (bx, by) where the chunk was blitted.
+    chunks: std::collections::HashMap<(i32, i32), (usize, usize)>,
 }
 
 /// Map overlay state (toggled with M key).
 #[derive(Resource)]
 struct MapOverlayState {
-    /// Whether the map overlay is currently visible.
     visible: bool,
 }
 
@@ -335,6 +447,28 @@ struct LaunchState {
     chunk_coord: (i32, i32),
 }
 
+/// FPS counter.
+#[derive(Resource)]
+struct FpsCounter {
+    frame_count: u32,
+    elapsed: f64,
+    fps: f64,
+}
+
+impl Default for FpsCounter {
+    fn default() -> Self {
+        Self {
+            frame_count: 0,
+            elapsed: 0.0,
+            fps: 0.0,
+        }
+    }
+}
+
+/// Marker for the fullscreen sprite that displays the voxel-rendered frame.
+#[derive(Component)]
+struct VoxelDisplaySprite;
+
 /// Marker for the map overlay sprite.
 #[derive(Component)]
 struct MapOverlaySprite;
@@ -343,48 +477,43 @@ struct MapOverlaySprite;
 #[derive(Component)]
 struct MapPlayerMarker;
 
-/// Marker for the map overlay camera (separate from the main play camera).
-/// The map overlay is rendered using UI-space sprites at a fixed z-level
-/// above the game world, so it doesn't need a separate camera. But we
-/// track map overlay entities to despawn them cleanly.
+/// Marker for map overlay entities.
 #[derive(Component)]
 struct MapOverlayEntity;
 
 // ─── Startup ───────────────────────────────────────────────────────────────
 
-/// Set up the camera and spawn the initial chunk tile.
 fn launch_setup(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
-    initial_tile: Option<Res<InitialChunkTile>>,
     map_image_data: Option<Res<MapImageData>>,
 ) {
-    // Camera is already spawned by RbPlayerPlugin when PlayableLevel is inserted.
-    // But we need to ensure Camera2d exists for the player plugin to work.
-    // The player plugin's `spawn_player` runs on `resource_added::<PlayableLevel>`,
-    // but since PlayableLevel is already inserted before App::run(), it will
-    // trigger on the first frame. We just need the Camera2d to exist.
+    // Spawn a 2D camera for the fullscreen sprite
     commands.spawn(Camera2d);
 
-    // Spawn the initial chunk tile (pre-generated from the level artifact)
-    if let Some(tile) = initial_tile {
-        let image = create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, tile.image_data.clone());
-        let texture = images.add(image);
-
-        // The initial tile is at level chunk (0,0) — the player spawn point
-        let sprite_x = 0.0 * LEVEL_CHUNK_TILES + LEVEL_CHUNK_TILES / 2.0;
-        let sprite_y = -(0.0 * LEVEL_CHUNK_TILES + LEVEL_CHUNK_TILES / 2.0);
-
-        commands.spawn((
-            Sprite {
-                image: texture,
-                custom_size: Some(Vec2::splat(LEVEL_CHUNK_TILES)),
-                ..default()
-            },
-            Transform::from_xyz(sprite_x, sprite_y, 0.0),
-            LevelChunk { coord: (0, 0) },
-        ));
+    // Create the fullscreen sprite for voxel rendering output.
+    // Initial image is filled with fog color.
+    let config = RenderConfig::default();
+    let mut initial_data = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
+    for pixel in initial_data.chunks_exact_mut(4) {
+        pixel[0] = config.fog_color[0];
+        pixel[1] = config.fog_color[1];
+        pixel[2] = config.fog_color[2];
+        pixel[3] = 255;
     }
+
+    let image = create_image(SCREEN_WIDTH, SCREEN_HEIGHT, initial_data);
+    let texture = images.add(image);
+
+    commands.spawn((
+        Sprite {
+            image: texture,
+            custom_size: Some(Vec2::new(SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32)),
+            ..default()
+        },
+        Transform::from_xyz(0.0, 0.0, 0.0),
+        VoxelDisplaySprite,
+    ));
 
     // Create the map overlay sprite (initially hidden)
     if let Some(map_data) = map_image_data {
@@ -395,8 +524,6 @@ fn launch_setup(
         );
         let map_texture = images.add(map_image);
 
-        // Map overlay is rendered at a high z-level, centered on screen.
-        // It follows the camera via a system.
         commands.spawn((
             Sprite {
                 image: map_texture,
@@ -425,26 +552,147 @@ fn launch_setup(
     }
 }
 
-// ─── Level Chunk Streaming ─────────────────────────────────────────────────
+// ─── Camera Input ──────────────────────────────────────────────────────────
 
-/// Load level chunks around the player's position.
-fn launch_chunk_load_system(
+/// Process WASD + mouse look + V toggle + scroll wheel.
+fn camera_input_system(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut motion_events: MessageReader<MouseMotion>,
+    mut scroll_events: MessageReader<MouseWheel>,
+    time: Res<Time>,
+    mut camera_state: ResMut<VoxelCameraState>,
+    mut player_pos: ResMut<PlayerWorldPos>,
+    buf_origin: Res<BufferOrigin>,
+    terrain_buf: Res<TerrainBuffer>,
+    map_state: Res<MapOverlayState>,
+    mut contexts: EguiContexts,
+) {
+    let dt = time.delta_secs() as f64;
+    let cam = &mut camera_state.camera;
+
+    // Check if egui wants input (it shouldn't with interactable(false), but be safe)
+    let egui_wants_kb = contexts
+        .ctx_mut()
+        .map(|ctx| ctx.wants_keyboard_input())
+        .unwrap_or(false);
+
+    // ─── Mouse look ────────────────────────────────────────────────
+    if !map_state.visible {
+        let mut dx = 0.0_f64;
+        let mut dy = 0.0_f64;
+        for event in motion_events.read() {
+            dx += event.delta.x as f64;
+            dy += event.delta.y as f64;
+        }
+
+        cam.yaw -= dx * MOUSE_SENSITIVITY;
+        cam.pitch = (cam.pitch - dy * MOUSE_SENSITIVITY).clamp(-MAX_PITCH, MAX_PITCH);
+    } else {
+        // Drain motion events so they don't accumulate
+        motion_events.clear();
+    }
+
+    // ─── WASD movement ─────────────────────────────────────────────
+    if !egui_wants_kb {
+        let mut forward = 0.0_f64;
+        let mut strafe = 0.0_f64;
+
+        if keyboard.pressed(KeyCode::KeyW) {
+            forward += 1.0;
+        }
+        if keyboard.pressed(KeyCode::KeyS) {
+            forward -= 1.0;
+        }
+        if keyboard.pressed(KeyCode::KeyA) {
+            strafe -= 1.0;
+        }
+        if keyboard.pressed(KeyCode::KeyD) {
+            strafe += 1.0;
+        }
+
+        if forward != 0.0 || strafe != 0.0 {
+            // Normalize diagonal movement
+            let len = (forward * forward + strafe * strafe).sqrt();
+            forward /= len;
+            strafe /= len;
+
+            let speed = MOVE_SPEED * dt;
+
+            // Move in world space relative to yaw
+            let dx = cam.yaw.cos() * forward - cam.yaw.sin() * strafe;
+            let dy = cam.yaw.sin() * forward + cam.yaw.cos() * strafe;
+
+            player_pos.x += dx * speed;
+            player_pos.y += dy * speed;
+        }
+    }
+
+    // ─── V key: toggle camera mode ─────────────────────────────────
+    if keyboard.just_pressed(KeyCode::KeyV) {
+        cam.mode = match cam.mode {
+            VoxelCameraMode::FirstPerson => VoxelCameraMode::ThirdPerson {
+                distance: 30.0,
+                pitch: 0.5,
+            },
+            VoxelCameraMode::ThirdPerson { .. } => VoxelCameraMode::FirstPerson,
+        };
+    }
+
+    // ─── Scroll wheel: adjust draw distance ────────────────────────
+    if !map_state.visible {
+        for event in scroll_events.read() {
+            let delta = match event.unit {
+                MouseScrollUnit::Line => event.y as f64 * 20.0,
+                MouseScrollUnit::Pixel => event.y as f64 * 2.0,
+            };
+            cam.draw_distance = (cam.draw_distance + delta).clamp(MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE);
+        }
+    } else {
+        // Don't consume scroll events here when map is visible --
+        // they are handled by map_overlay_zoom
+    }
+
+    // ─── Update camera buffer position from world position ─────────
+    let pixels_per_world = TILE_MAP_SIZE as f64 / CHUNK_WORLD_SIZE;
+    cam.x = (player_pos.x - buf_origin.world_x) * pixels_per_world;
+    cam.y = (player_pos.y - buf_origin.world_y) * pixels_per_world;
+
+    // ─── Auto-follow terrain height ────────────────────────────────
+    let config = RenderConfig {
+        height_scale: 200.0,
+        fog_color: [135, 180, 220],
+        camera_height_offset: 2.0,
+        ..Default::default()
+    };
+    cam.height = terrain_height_at(
+        &terrain_buf.heightmap,
+        terrain_buf.size,
+        terrain_buf.size,
+        cam.x,
+        cam.y,
+        config.height_scale,
+        config.camera_height_offset,
+    );
+}
+
+// ─── Chunk Streaming ───────────────────────────────────────────────────────
+
+/// Queue generation for chunks around the camera.
+fn chunk_streaming_system(
     level: Res<PlayableLevel>,
-    player_query: Query<&Transform, With<Player>>,
-    loaded_chunks: Res<LoadedChunks>,
+    player_pos: Res<PlayerWorldPos>,
+    loaded_chunks: Res<LoadedTerrainChunks>,
     mut queue: ResMut<LaunchLevelChunkQueue>,
     world_textures: Res<LaunchMacroBiomeData>,
     global_rivers: Option<Res<LaunchRiverNetwork>>,
 ) {
-    let Ok(player_transform) = player_query.single() else { return };
-
-    let player_pos = player_transform.translation;
-    let player_chunk_x = (player_pos.x / LEVEL_CHUNK_TILES).floor() as i32;
-    let player_chunk_y = ((-player_pos.y) / LEVEL_CHUNK_TILES).floor() as i32;
-
     let seed = level.seed;
     let height = level.world_height;
     let river_net = global_rivers.map(|r| r.network.clone());
+
+    // Determine which chunk the camera is in
+    let cam_chunk_x = (player_pos.x / CHUNK_WORLD_SIZE).floor() as i32;
+    let cam_chunk_y = (player_pos.y / CHUNK_WORLD_SIZE).floor() as i32;
 
     let in_flight_coords: HashSet<(i32, i32)> = queue
         .in_flight
@@ -454,9 +702,14 @@ fn launch_chunk_load_system(
 
     for dy in -LEVEL_LOAD_RADIUS..=LEVEL_LOAD_RADIUS {
         for dx in -LEVEL_LOAD_RADIUS..=LEVEL_LOAD_RADIUS {
-            let cx = player_chunk_x + dx;
-            let cy = player_chunk_y + dy;
+            let cx = cam_chunk_x + dx;
+            let cy = cam_chunk_y + dy;
             let coord = (cx, cy);
+
+            // Skip out-of-bounds chunks
+            if cx < 0 || cy < 0 || cx >= (WORLD_WIDTH as i32) || cy >= (WORLD_HEIGHT as i32) {
+                continue;
+            }
 
             if loaded_chunks.chunks.contains_key(&coord) || in_flight_coords.contains(&coord) {
                 continue;
@@ -466,9 +719,8 @@ fn launch_chunk_load_system(
                 return;
             }
 
-            // Map level chunk to world coordinates
-            let world_x = level.origin.x + cx as f64 * CHUNK_WORLD_SIZE;
-            let world_y = level.origin.y + cy as f64 * CHUNK_WORLD_SIZE;
+            let world_x = cx as f64 * CHUNK_WORLD_SIZE;
+            let world_y = cy as f64 * CHUNK_WORLD_SIZE;
 
             let macro_map = world_textures.biome_map.clone();
             let river_net_clone = river_net.clone();
@@ -487,7 +739,18 @@ fn launch_chunk_load_system(
                     Some(&macro_map),
                     river_ref,
                 );
-                (coord, Arc::new(biome_map))
+
+                // Extract heightmap and colormap from the generated BiomeMap
+                let heightmap = biome_map.heightmap.clone();
+                let colormap = biome_map.to_layer_image(NoiseLayer::Biome);
+
+                let data = ChunkTerrainData {
+                    heightmap,
+                    colormap,
+                    width: biome_map.width,
+                    height: biome_map.height,
+                };
+                (coord, data)
             });
 
             queue
@@ -497,40 +760,39 @@ fn launch_chunk_load_system(
     }
 }
 
-/// Poll completed level chunk tasks and spawn sprites.
-fn launch_chunk_poll_system(
-    mut commands: Commands,
+/// Poll completed chunk tasks and blit terrain data into the buffer.
+fn chunk_poll_system(
     mut queue: ResMut<LaunchLevelChunkQueue>,
-    mut loaded_chunks: ResMut<LoadedChunks>,
-    mut images: ResMut<Assets<Image>>,
+    mut loaded_chunks: ResMut<LoadedTerrainChunks>,
+    mut terrain_buf: ResMut<TerrainBuffer>,
+    buf_origin: Res<BufferOrigin>,
 ) {
     let mut completed = 0;
     let mut i = 0;
     while i < queue.in_flight.len() && completed < POLL_BUDGET {
         if let Some(result) = block_on(poll_once(&mut queue.in_flight[i].task)) {
             queue.in_flight.swap_remove(i);
-            let (coord, biome_map) = result;
+            let (coord, chunk_data) = result;
 
-            let image_data = biome_map.to_layer_image(NoiseLayer::Biome);
-            let image = create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, image_data);
-            let texture = images.add(image);
+            // Convert chunk world position to buffer pixel position
+            let world_x = coord.0 as f64 * CHUNK_WORLD_SIZE;
+            let world_y = coord.1 as f64 * CHUNK_WORLD_SIZE;
+            let pixels_per_world = TILE_MAP_SIZE as f64 / CHUNK_WORLD_SIZE;
+            let buf_x = ((world_x - buf_origin.world_x) * pixels_per_world) as isize;
+            let buf_y = ((world_y - buf_origin.world_y) * pixels_per_world) as isize;
 
-            let sprite_x = coord.0 as f32 * LEVEL_CHUNK_TILES + LEVEL_CHUNK_TILES / 2.0;
-            let sprite_y = -(coord.1 as f32 * LEVEL_CHUNK_TILES + LEVEL_CHUNK_TILES / 2.0);
+            // Only blit if within buffer bounds
+            if buf_x >= 0
+                && buf_y >= 0
+                && (buf_x as usize) < terrain_buf.size
+                && (buf_y as usize) < terrain_buf.size
+            {
+                terrain_buf.blit_chunk(&chunk_data, buf_x as usize, buf_y as usize);
+                loaded_chunks
+                    .chunks
+                    .insert(coord, (buf_x as usize, buf_y as usize));
+            }
 
-            let entity = commands
-                .spawn((
-                    Sprite {
-                        image: texture,
-                        custom_size: Some(Vec2::splat(LEVEL_CHUNK_TILES)),
-                        ..default()
-                    },
-                    Transform::from_xyz(sprite_x, sprite_y, 0.0),
-                    LevelChunk { coord },
-                ))
-                .id();
-
-            loaded_chunks.chunks.insert(coord, entity);
             completed += 1;
         } else {
             i += 1;
@@ -538,33 +800,69 @@ fn launch_chunk_poll_system(
     }
 }
 
-/// Unload level chunks beyond the unload radius.
-fn launch_chunk_unload_system(
-    mut commands: Commands,
-    mut loaded_chunks: ResMut<LoadedChunks>,
-    player_query: Query<&Transform, With<Player>>,
+/// Unload chunks beyond the unload radius.
+fn chunk_unload_system(
+    player_pos: Res<PlayerWorldPos>,
+    mut loaded_chunks: ResMut<LoadedTerrainChunks>,
 ) {
-    let Ok(player_transform) = player_query.single() else { return };
-
-    let player_pos = player_transform.translation;
-    let player_chunk_x = (player_pos.x / LEVEL_CHUNK_TILES).floor() as i32;
-    let player_chunk_y = ((-player_pos.y) / LEVEL_CHUNK_TILES).floor() as i32;
+    let cam_chunk_x = (player_pos.x / CHUNK_WORLD_SIZE).floor() as i32;
+    let cam_chunk_y = (player_pos.y / CHUNK_WORLD_SIZE).floor() as i32;
 
     let to_remove: Vec<(i32, i32)> = loaded_chunks
         .chunks
         .keys()
         .filter(|(cx, cy)| {
-            let dx = (cx - player_chunk_x).abs();
-            let dy = (cy - player_chunk_y).abs();
+            let dx = (cx - cam_chunk_x).abs();
+            let dy = (cy - cam_chunk_y).abs();
             dx > LEVEL_UNLOAD_RADIUS || dy > LEVEL_UNLOAD_RADIUS
         })
         .copied()
         .collect();
 
     for coord in to_remove {
-        if let Some(entity) = loaded_chunks.chunks.remove(&coord) {
-            commands.entity(entity).despawn();
-        }
+        loaded_chunks.chunks.remove(&coord);
+    }
+}
+
+// ─── Voxel Rendering ──────────────────────────────────────────────────────
+
+/// Render the voxel frame and update the fullscreen sprite texture.
+fn voxel_render_system(
+    camera_state: Res<VoxelCameraState>,
+    terrain_buf: Res<TerrainBuffer>,
+    mut images: ResMut<Assets<Image>>,
+    sprite_query: Query<&Sprite, With<VoxelDisplaySprite>>,
+) {
+    let Ok(sprite) = sprite_query.single() else {
+        return;
+    };
+
+    let config = RenderConfig {
+        height_scale: 200.0,
+        fog_color: [135, 180, 220],
+        camera_height_offset: 2.0,
+        ..Default::default()
+    };
+
+    // Allocate output buffer
+    let mut output = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
+
+    render_frame(
+        &terrain_buf.heightmap,
+        &terrain_buf.colormap,
+        terrain_buf.size,
+        terrain_buf.size,
+        &camera_state.camera,
+        &config,
+        &mut output,
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT,
+    );
+
+    // Update the sprite's image texture
+    let handle = &sprite.image;
+    if let Some(image) = images.get_mut(handle) {
+        image.data = Some(output);
     }
 }
 
@@ -579,10 +877,9 @@ fn toggle_map_overlay(
         &mut Visibility,
         (With<MapPlayerMarker>, Without<MapOverlaySprite>),
     >,
-    camera_query: Query<&Transform, With<PlayerCamera>>,
     mut map_sprite_query: Query<
         &mut Transform,
-        (With<MapOverlaySprite>, Without<PlayerCamera>, Without<MapPlayerMarker>),
+        (With<MapOverlaySprite>, Without<MapPlayerMarker>),
     >,
     map_data: Option<Res<MapImageData>>,
 ) {
@@ -605,23 +902,15 @@ fn toggle_map_overlay(
         *vis = new_vis;
     }
 
-    // When showing the map, position it at the camera center
+    // Center the map overlay and scale it
     if state.visible {
-        if let Ok(camera_transform) = camera_query.single() {
-            let cam_pos = camera_transform.translation;
-            // Scale the map to fit roughly 80% of the screen
-            // The map is at a high z-level, positioned at camera center
-            if let Some(map_data) = map_data {
-                for mut transform in &mut map_sprite_query {
-                    transform.translation.x = cam_pos.x;
-                    transform.translation.y = cam_pos.y;
-                    // Scale the map to a reasonable display size relative to
-                    // the camera's view. The map image can be 4096x2048 or
-                    // 1024x512; we scale it down to a displayable overlay size.
-                    let display_width = 800.0;
-                    let scale = display_width / map_data.width as f32;
-                    transform.scale = Vec3::splat(scale);
-                }
+        if let Some(map_data) = map_data {
+            for mut transform in &mut map_sprite_query {
+                transform.translation.x = 0.0;
+                transform.translation.y = 0.0;
+                let display_width = 800.0;
+                let scale = display_width / map_data.width as f32;
+                transform.scale = Vec3::splat(scale);
             }
         }
     }
@@ -630,36 +919,28 @@ fn toggle_map_overlay(
 /// Update the player position marker on the map overlay.
 fn update_map_player_marker(
     state: Res<MapOverlayState>,
-    level: Res<PlayableLevel>,
-    player_query: Query<&Transform, With<Player>>,
+    player_pos: Res<PlayerWorldPos>,
     map_data: Option<Res<MapImageData>>,
     mut marker_query: Query<
         &mut Transform,
-        (With<MapPlayerMarker>, Without<Player>, Without<MapOverlaySprite>),
+        (With<MapPlayerMarker>, Without<MapOverlaySprite>),
     >,
     overlay_query: Query<
         &Transform,
-        (With<MapOverlaySprite>, Without<Player>, Without<MapPlayerMarker>),
+        (With<MapOverlaySprite>, Without<MapPlayerMarker>),
     >,
 ) {
     if !state.visible {
         return;
     }
     let Some(map_data) = map_data else { return };
-    let Ok(player_transform) = player_query.single() else { return };
     let Ok(overlay_transform) = overlay_query.single() else { return };
     let Ok(mut marker_transform) = marker_query.single_mut() else { return };
 
-    // Convert player's level-space position to world coordinates
-    let player_pos = player_transform.translation;
-    let world_x = level.origin.x + (player_pos.x as f64 / LEVEL_CHUNK_TILES as f64) * CHUNK_WORLD_SIZE;
-    let world_y = level.origin.y + ((-player_pos.y) as f64 / LEVEL_CHUNK_TILES as f64) * CHUNK_WORLD_SIZE;
+    // Normalize player world position to [0,1]
+    let norm_x = (player_pos.x / map_data.world_width as f64) as f32;
+    let norm_y = (player_pos.y / map_data.world_height as f64) as f32;
 
-    // Normalize to [0,1] in world space
-    let norm_x = (world_x / map_data.world_width as f64) as f32;
-    let norm_y = (world_y / map_data.world_height as f64) as f32;
-
-    // Map to overlay sprite position (overlay is centered at overlay_transform.translation)
     let overlay_scale = overlay_transform.scale.x;
     let map_pixel_x = (norm_x - 0.5) * map_data.width as f32 * overlay_scale;
     let map_pixel_y = (0.5 - norm_y) * map_data.height as f32 * overlay_scale;
@@ -668,7 +949,6 @@ fn update_map_player_marker(
     marker_transform.translation.y = overlay_transform.translation.y + map_pixel_y;
     marker_transform.translation.z = 51.0;
 
-    // Scale the marker relative to the overlay so it stays visible
     let marker_scale = overlay_scale * 1.5;
     marker_transform.scale = Vec3::splat(marker_scale);
 }
@@ -713,39 +993,59 @@ fn map_overlay_zoom(
 fn launch_hud_system(
     mut contexts: EguiContexts,
     launch_state: Res<LaunchState>,
-    state: Res<MapOverlayState>,
-    player_query: Query<&Transform, With<Player>>,
+    map_state: Res<MapOverlayState>,
+    camera_state: Res<VoxelCameraState>,
+    player_pos: Res<PlayerWorldPos>,
     level: Res<PlayableLevel>,
+    fps: Res<FpsCounter>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else { return };
 
-    let player_info = if let Ok(pt) = player_query.single() {
-        format!(
-            "Pos: ({:.1}, {:.1})",
-            pt.translation.x, pt.translation.y,
-        )
-    } else {
-        "Pos: —".to_string()
+    let cam = &camera_state.camera;
+    let mode_str = match cam.mode {
+        VoxelCameraMode::FirstPerson => "FP",
+        VoxelCameraMode::ThirdPerson { .. } => "TP",
     };
 
-    egui::Window::new("Randlebrot")
+    egui::Area::new(egui::Id::new("launch_hud"))
         .anchor(egui::Align2::LEFT_TOP, [8.0, 8.0])
-        .resizable(false)
-        .collapsible(false)
+        .interactable(false)
         .show(ctx, |ui| {
-            ui.label(format!("Level: {}", launch_state.level_tag));
-            ui.label(format!(
-                "Coord: ({}, {})",
-                launch_state.chunk_coord.0, launch_state.chunk_coord.1
-            ));
-            ui.label(format!("Seed: {}", level.seed));
-            ui.label(player_info);
-            if state.visible {
-                ui.label("Map: ON");
-            }
-            ui.separator();
-            ui.small("WASD: move  M: map  ESC: exit");
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(format!("Level: {}", launch_state.level_tag));
+                ui.label(format!(
+                    "Coord: ({}, {})",
+                    launch_state.chunk_coord.0, launch_state.chunk_coord.1
+                ));
+                ui.label(format!("Seed: {}", level.seed));
+                ui.label(format!(
+                    "Pos: ({:.1}, {:.1})",
+                    player_pos.x, player_pos.y
+                ));
+                ui.label(format!("Camera: {}  Draw: {:.0}", mode_str, cam.draw_distance));
+                ui.label(format!("FPS: {:.0}", fps.fps));
+                if map_state.visible {
+                    ui.label("Map: ON");
+                }
+                ui.separator();
+                ui.small("WASD: move  Mouse: look  V: camera  M: map  Scroll: distance  ESC: exit");
+            });
         });
+}
+
+/// Update FPS counter.
+fn fps_update_system(
+    time: Res<Time>,
+    mut fps: ResMut<FpsCounter>,
+) {
+    fps.frame_count += 1;
+    fps.elapsed += time.delta_secs() as f64;
+
+    if fps.elapsed >= 1.0 {
+        fps.fps = fps.frame_count as f64 / fps.elapsed;
+        fps.frame_count = 0;
+        fps.elapsed = 0.0;
+    }
 }
 
 // ─── Exit ──────────────────────────────────────────────────────────────────
