@@ -1053,7 +1053,7 @@ struct MesoTileCache {
 }
 
 struct MesoCachedTile {
-    _biome_map: Arc<BiomeMap>,
+    biome_map: Arc<BiomeMap>,
     texture: Handle<Image>,
 }
 
@@ -1088,7 +1088,7 @@ struct MicroTileCache {
 }
 
 struct MicroCachedTile {
-    _biome_map: Arc<BiomeMap>,
+    biome_map: Arc<BiomeMap>,
     texture: Handle<Image>,
 }
 
@@ -1457,14 +1457,14 @@ fn poll_macro_pregen(
             pregen.post_phase = MacroPostPhase::BuildingTerrain;
         }
         MacroPostPhase::BuildingTerrain => {
-            let tile_biome_maps: HashMap<(i32, i32), Arc<BiomeMap>> = tile_cache.macro_tiles.iter()
+            let tilebiome_maps: HashMap<(i32, i32), Arc<BiomeMap>> = tile_cache.macro_tiles.iter()
                 .map(|(&coord, cached)| (coord, cached.biome_map.clone()))
                 .collect();
             let chunks_x = (MAP_WIDTH as f32 / CHUNK_SIZE).ceil() as usize;
             let chunks_y = (MAP_HEIGHT as f32 / CHUNK_SIZE).ceil() as usize;
 
             commands.insert_resource(StoredTerrainView(
-                MesoTerrainView::from_tile_map(&tile_biome_maps, chunks_x, chunks_y, TILE_MAP_SIZE),
+                MesoTerrainView::from_tile_map(&tilebiome_maps, chunks_x, chunks_y, TILE_MAP_SIZE),
             ));
 
             commands.remove_resource::<MacroPregenState>();
@@ -1477,7 +1477,7 @@ fn poll_macro_pregen(
             } else {
                 // Spawn async LifeGen task
                 let terrain_view = Arc::new(MesoTerrainView::from_tile_map(
-                    &tile_biome_maps, chunks_x, chunks_y, TILE_MAP_SIZE,
+                    &tilebiome_maps, chunks_x, chunks_y, TILE_MAP_SIZE,
                 ));
                 let civ_seed = world_def.civ_seed;
                 let progress = rb_world::lifegen::new_progress();
@@ -3548,7 +3548,7 @@ fn poll_meso_pregen(
             let image = create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, image_data);
             let texture = images.add(image);
 
-            meso_cache.tiles.insert(coord, MesoCachedTile { _biome_map: biome_map, texture });
+            meso_cache.tiles.insert(coord, MesoCachedTile { biome_map: biome_map, texture });
             pregen.completed += 1;
         } else {
             i += 1;
@@ -3826,7 +3826,7 @@ fn poll_micro_pregen(
             let image = create_image(TILE_MAP_SIZE, TILE_MAP_SIZE, image_data);
             let texture = images.add(image);
 
-            micro_cache.tiles.insert(coord, MicroCachedTile { _biome_map: biome_map, texture });
+            micro_cache.tiles.insert(coord, MicroCachedTile { biome_map: biome_map, texture });
             pregen.completed += 1;
         } else {
             i += 1;
@@ -4109,7 +4109,7 @@ fn handle_save_level_request(
     // Save via rb_artifacts.
     match rb_artifacts::ArtifactStore::new() {
         Ok(store) => {
-            match store.save_level(&tag, &cached_tile._biome_map, &manifest) {
+            match store.save_level(&tag, &cached_tile.biome_map, &manifest) {
                 Ok(()) => {
                     println!(
                         "Saved level artifact '{}' at global micro ({}, {})",
