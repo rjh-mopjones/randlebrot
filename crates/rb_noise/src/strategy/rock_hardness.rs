@@ -100,6 +100,7 @@ mod tests {
         let v0 = strategy.generate(100.0, 100.0, 0);
         let v1 = strategy.generate(100.0, 100.0, 1);
         // Different detail levels should produce different values
-        assert!((v0 - v1).abs() > 0.0001 || true, "Detail levels may differ");
+        // Different detail levels may produce different values (not guaranteed).
+        let _ = (v0, v1);
     }
 }

@@ -544,10 +544,8 @@ mod tests {
         let (id2, _) = strat2.generate_voronoi(500.0, 500.0);
 
         // Different seeds should generally produce different plate IDs
-        assert!(
-            (id1 - id2).abs() > 0.001 || true,
-            "Seeds should produce different layouts"
-        );
+        // Different seeds should generally produce different layouts (not guaranteed).
+        let _ = (id1, id2);
     }
 
     #[test]
