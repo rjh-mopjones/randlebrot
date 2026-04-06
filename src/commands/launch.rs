@@ -46,14 +46,22 @@ const SCREEN_WIDTH: usize = 1280;
 const SCREEN_HEIGHT: usize = 720;
 
 /// Terrain buffer size (square). Each loaded chunk contributes a 512x512 region.
-/// A 2048x2048 buffer holds 4x4 = 16 chunks worth of terrain data.
-const TERRAIN_BUF_SIZE: usize = 2048;
+/// A 4096x4096 buffer holds 8x8 = 64 chunks worth of terrain data.
+const TERRAIN_BUF_SIZE: usize = 4096;
 
 /// Level chunk load radius (in chunks around the camera).
 const LEVEL_LOAD_RADIUS: i32 = 3;
 
 /// Level chunk unload radius.
 const LEVEL_UNLOAD_RADIUS: i32 = 5;
+
+/// Shared render config — single source of truth for height_scale, fog, etc.
+const RENDER_CONFIG: RenderConfig = RenderConfig {
+    height_scale: 200.0,
+    fog_color: [135, 180, 220],
+    camera_height_offset: 2.0,
+    ray_step: 1.0,
+};
 
 /// Max concurrent async tile generation tasks.
 const MAX_CONCURRENT_TILES: usize = 8;
@@ -87,7 +95,7 @@ pub fn run(level_tag: String) -> Result<(), String> {
     let store = ArtifactStore::new()
         .map_err(|e| format!("failed to initialise artifact store at ~/.randlebrot: {e}"))?;
 
-    let (_micro_biome, level_manifest) = store.load_level(&level_tag).map_err(|e| match e {
+    let (initial_biome, level_manifest) = store.load_level(&level_tag).map_err(|e| match e {
         rb_artifacts::ArtifactError::NotFound { .. } => {
             match store.list_levels() {
                 Ok(entries) if !entries.is_empty() => {
@@ -165,8 +173,25 @@ pub fn run(level_tag: String) -> Result<(), String> {
     });
     app.insert_resource(FpsCounter::default());
 
-    // Terrain buffer for the voxel renderer
-    app.insert_resource(TerrainBuffer::new(TERRAIN_BUF_SIZE));
+    // Terrain buffer for the voxel renderer — prime with the initial chunk
+    let mut terrain_buffer = TerrainBuffer::new(TERRAIN_BUF_SIZE);
+    {
+        let initial_heightmap = initial_biome.heightmap.clone();
+        let initial_colormap = initial_biome.to_layer_image(NoiseLayer::Biome);
+        let initial_data = ChunkTerrainData {
+            heightmap: initial_heightmap,
+            colormap: initial_colormap,
+            width: initial_biome.width,
+            height: initial_biome.height,
+        };
+        // Blit the spawn chunk into the center of the buffer
+        let center = TERRAIN_BUF_SIZE / 2 - TILE_MAP_SIZE / 2;
+        terrain_buffer.blit_chunk(&initial_data, center, center);
+    }
+    app.insert_resource(terrain_buffer);
+
+    // Pre-allocated render output buffer (avoids 3.5MB allocation per frame)
+    app.insert_resource(RenderOutputBuffer(vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4]));
 
     // Voxel camera state
     let voxel_camera = VoxelCamera {
@@ -465,6 +490,10 @@ impl Default for FpsCounter {
     }
 }
 
+/// Pre-allocated RGBA output buffer for the voxel renderer (reused each frame).
+#[derive(Resource)]
+struct RenderOutputBuffer(Vec<u8>);
+
 /// Marker for the fullscreen sprite that displays the voxel-rendered frame.
 #[derive(Component)]
 struct VoxelDisplaySprite;
@@ -493,12 +522,11 @@ fn launch_setup(
 
     // Create the fullscreen sprite for voxel rendering output.
     // Initial image is filled with fog color.
-    let config = RenderConfig::default();
     let mut initial_data = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
     for pixel in initial_data.chunks_exact_mut(4) {
-        pixel[0] = config.fog_color[0];
-        pixel[1] = config.fog_color[1];
-        pixel[2] = config.fog_color[2];
+        pixel[0] = RENDER_CONFIG.fog_color[0];
+        pixel[1] = RENDER_CONFIG.fog_color[1];
+        pixel[2] = RENDER_CONFIG.fog_color[2];
         pixel[3] = 255;
     }
 
@@ -658,20 +686,14 @@ fn camera_input_system(
     cam.y = (player_pos.y - buf_origin.world_y) * pixels_per_world;
 
     // ─── Auto-follow terrain height ────────────────────────────────
-    let config = RenderConfig {
-        height_scale: 200.0,
-        fog_color: [135, 180, 220],
-        camera_height_offset: 2.0,
-        ..Default::default()
-    };
     cam.height = terrain_height_at(
         &terrain_buf.heightmap,
         terrain_buf.size,
         terrain_buf.size,
         cam.x,
         cam.y,
-        config.height_scale,
-        config.camera_height_offset,
+        RENDER_CONFIG.height_scale,
+        RENDER_CONFIG.camera_height_offset,
     );
 }
 
@@ -830,6 +852,7 @@ fn chunk_unload_system(
 fn voxel_render_system(
     camera_state: Res<VoxelCameraState>,
     terrain_buf: Res<TerrainBuffer>,
+    mut render_buf: ResMut<RenderOutputBuffer>,
     mut images: ResMut<Assets<Image>>,
     sprite_query: Query<&Sprite, With<VoxelDisplaySprite>>,
 ) {
@@ -837,32 +860,25 @@ fn voxel_render_system(
         return;
     };
 
-    let config = RenderConfig {
-        height_scale: 200.0,
-        fog_color: [135, 180, 220],
-        camera_height_offset: 2.0,
-        ..Default::default()
-    };
-
-    // Allocate output buffer
-    let mut output = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
-
+    // Render into the pre-allocated buffer (no per-frame allocation)
     render_frame(
         &terrain_buf.heightmap,
         &terrain_buf.colormap,
         terrain_buf.size,
         terrain_buf.size,
         &camera_state.camera,
-        &config,
-        &mut output,
+        &RENDER_CONFIG,
+        &mut render_buf.0,
         SCREEN_WIDTH,
         SCREEN_HEIGHT,
     );
 
-    // Update the sprite's image texture
+    // Copy into the existing image data buffer (preserves Bevy's allocation)
     let handle = &sprite.image;
     if let Some(image) = images.get_mut(handle) {
-        image.data = Some(output);
+        if let Some(ref mut data) = image.data {
+            data.copy_from_slice(&render_buf.0);
+        }
     }
 }
 
