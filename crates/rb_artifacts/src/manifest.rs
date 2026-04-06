@@ -24,7 +24,7 @@ pub struct LayerManifest {
     pub layer_images: Vec<String>,
 }
 
-/// Metadata for a level artifact (micro-level BiomeMap).
+/// Metadata for a level artifact (chunk-level BiomeMap).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LevelManifest {
     /// Tag of the parent layers artifact this level was generated from, if any.
@@ -33,8 +33,12 @@ pub struct LevelManifest {
     pub seed: u32,
     /// Civilisation generation seed.
     pub civ_seed: u32,
-    /// Micro-level chunk coordinate (x, y).
-    pub micro_coord: (i32, i32),
+    /// Chunk-level coordinate (x, y).
+    ///
+    /// The `serde(alias)` accepts the old field name `micro_coord` for
+    /// backward compatibility with existing artifacts on disk.
+    #[serde(alias = "micro_coord")]
+    pub chunk_coord: (i32, i32),
     /// ISO 8601 timestamp of creation.
     pub created: String,
 }
