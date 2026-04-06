@@ -15,6 +15,27 @@ pub struct LaunchLevelRequest;
 #[derive(Resource)]
 pub struct StartPlayRequest;
 
+/// Signal requesting the current micro tile be saved as a level artifact.
+///
+/// Emitted by the launcher UI when the user confirms a level tag.
+/// Consumed by a system in `main.rs` that has access to `MicroTileCache`.
+#[derive(Resource)]
+pub struct SaveLevelRequest {
+    /// User-chosen tag for the level artifact.
+    pub tag: String,
+}
+
+/// UI state for the "Save Level" dialog in the launcher panel.
+#[derive(Resource, Default)]
+pub struct SaveLevelUiState {
+    /// Whether the save dialog is currently open.
+    pub show_dialog: bool,
+    /// Tag text being edited by the user.
+    pub tag_input: String,
+    /// Status message after save attempt (message, is_error).
+    pub status: Option<(String, bool)>,
+}
+
 /// Launcher phase — tracks progression through the multi-step workflow.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LauncherPhase {
@@ -41,6 +62,7 @@ pub fn launcher_ui_system(
     selected_micro: Option<Res<SelectedMicroTile>>,
     phase: Option<Res<LauncherPhase>>,
     playing: Option<Res<PlayableLevel>>,
+    mut save_state: ResMut<SaveLevelUiState>,
 ) {
     let ctx = contexts.ctx_mut().unwrap();
     let phase = phase.map(|p| *p).unwrap_or(LauncherPhase::MacroView);
@@ -117,14 +139,78 @@ pub fn launcher_ui_system(
                     } else {
                         ui.label("Click a micro tile to select it.");
                     }
+
+                    // Save Level button + dialog — visible when a micro tile is selected.
+                    if selected_micro.is_some() {
+                        save_level_ui(ui, &mut commands, &mut save_state);
+                    }
                 }
                 LauncherPhase::Playing => {
                     if playing.is_some() {
                         ui.label("Playing — press ESC to stop");
                     }
+
+                    // Save Level button + dialog — visible during play.
+                    if selected_micro.is_some() {
+                        save_level_ui(ui, &mut commands, &mut save_state);
+                    }
                 }
             }
         });
+}
+
+/// Shared "Save Level" UI rendered in both MicroView and Playing phases.
+fn save_level_ui(
+    ui: &mut egui::Ui,
+    commands: &mut Commands,
+    save_state: &mut SaveLevelUiState,
+) {
+    ui.separator();
+
+    // Show status message from previous save attempt.
+    if let Some((ref msg, is_error)) = save_state.status {
+        let color = if is_error {
+            egui::Color32::RED
+        } else {
+            egui::Color32::GREEN
+        };
+        ui.colored_label(color, msg.as_str());
+        ui.add_space(4.0);
+    }
+
+    if !save_state.show_dialog {
+        if ui.button("Save Level").clicked() {
+            save_state.show_dialog = true;
+            save_state.status = None;
+        }
+    } else {
+        ui.label("Level tag:");
+        ui.text_edit_singleline(&mut save_state.tag_input);
+
+        let tag_valid = !save_state.tag_input.is_empty()
+            && save_state.tag_input.chars().all(|c| {
+                c.is_ascii_alphanumeric() || c == '-' || c == '_'
+            });
+
+        ui.horizontal(|ui| {
+            if ui.add_enabled(tag_valid, egui::Button::new("Save")).clicked() {
+                commands.insert_resource(SaveLevelRequest {
+                    tag: save_state.tag_input.clone(),
+                });
+                save_state.show_dialog = false;
+            }
+            if ui.button("Cancel").clicked() {
+                save_state.show_dialog = false;
+            }
+        });
+
+        if !tag_valid && !save_state.tag_input.is_empty() {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "Tag: alphanumeric, hyphens, underscores only",
+            );
+        }
+    }
 }
 
 /// ESC exits play mode back to meso view (not all the way out).
@@ -182,6 +268,7 @@ pub fn cleanup_on_exit(
     commands.remove_resource::<GenerateMesoRequest>();
     commands.remove_resource::<LaunchLevelRequest>();
     commands.remove_resource::<StartPlayRequest>();
+    commands.remove_resource::<SaveLevelRequest>();
 
     for entity in &level_chunks {
         commands.entity(entity).despawn();
