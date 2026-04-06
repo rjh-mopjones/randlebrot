@@ -22,7 +22,7 @@ use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
-use bevy::window::PrimaryWindow;
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_egui::{egui, EguiContexts};
 
 use rb_artifacts::ArtifactStore;
@@ -89,59 +89,111 @@ const MAX_PITCH: f64 = std::f64::consts::FRAC_PI_3;
 
 // ─── Entry Point ───────────────────────────────────────────────────────────
 
+/// On macOS Sequoia, terminal-launched binaries cannot gain keyboard focus
+/// regardless of NSApplication activation calls. The only reliable fix is to
+/// run inside a .app bundle launched via `open`. This function creates a
+/// minimal bundle in /tmp, copies the current binary into it, and re-execs
+/// via `open --args`. The re-launched process detects the bundle env var and
+/// skips the trampoline.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_ensure_app_bundle(args: &[String]) {
+    let exe = std::env::current_exe().expect("current_exe");
+
+    // If we're already inside a .app bundle, do nothing
+    if exe.to_string_lossy().contains(".app/Contents/MacOS/") {
+        return;
+    }
+    let app_dir = std::path::PathBuf::from("/tmp/Randlebrot.app/Contents/MacOS");
+    let plist_path = std::path::PathBuf::from("/tmp/Randlebrot.app/Contents/Info.plist");
+
+    // Create bundle structure
+    std::fs::create_dir_all(&app_dir).expect("create .app dirs");
+
+    // Copy binary (only if changed)
+    let dest = app_dir.join("randlebrot");
+    let needs_copy = if dest.exists() {
+        let src_meta = std::fs::metadata(&exe).ok();
+        let dst_meta = std::fs::metadata(&dest).ok();
+        match (src_meta, dst_meta) {
+            (Some(s), Some(d)) => s.len() != d.len(),
+            _ => true,
+        }
+    } else {
+        true
+    };
+    if needs_copy {
+        std::fs::copy(&exe, &dest).expect("copy binary to .app bundle");
+    }
+
+    // Write Info.plist
+    if !plist_path.exists() {
+        std::fs::write(&plist_path, r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>randlebrot</string>
+    <key>CFBundleIdentifier</key><string>com.randlebrot.engine</string>
+    <key>CFBundleName</key><string>Randlebrot</string>
+    <key>CFBundleVersion</key><string>0.1.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>"#).expect("write Info.plist");
+    }
+
+    // Re-launch via `open` — skip argv[0] since the bundle provides its own binary
+    eprintln!("[macOS] Trampolining through .app bundle for keyboard focus...");
+    let mut cmd = std::process::Command::new("open");
+    cmd.arg("/tmp/Randlebrot.app")
+        .arg("--args");
+    for arg in args.iter().skip(1) {
+        cmd.arg(arg);
+    }
+    let status = cmd.status().expect("open .app bundle");
+    std::process::exit(status.code().unwrap_or(0));
+}
+
+/// Params passed into the Bevy app for deferred loading in the startup system.
+#[derive(Resource)]
+struct LaunchParams {
+    level_tag: String,
+}
+
 /// Launch a playable level using the Comanche-style 3D terrain renderer.
 pub fn run(level_tag: String) -> Result<(), String> {
-    // ─── 1. Load the level artifact ────────────────────────────────────
+    // On macOS: re-launch inside a .app bundle so we get proper GUI app status.
+    // Without this, macOS Sequoia refuses to give keyboard focus to terminal-launched binaries.
+    #[cfg(target_os = "macos")]
+    macos_ensure_app_bundle(&std::env::args().collect::<Vec<_>>());
+
+    // ─── Only validate the tag exists — keep this fast so app.run() starts immediately ───
     let store = ArtifactStore::new()
         .map_err(|e| format!("failed to initialise artifact store at ~/.randlebrot: {e}"))?;
 
-    let (initial_biome, level_manifest) = store.load_level(&level_tag).map_err(|e| match e {
-        rb_artifacts::ArtifactError::NotFound { .. } => {
-            match store.list_levels() {
-                Ok(entries) if !entries.is_empty() => {
-                    let available: Vec<&str> = entries.iter().map(|(t, _)| t.as_str()).collect();
-                    format!(
-                        "level artifact '{level_tag}' not found. Available: {}",
-                        available.join(", ")
-                    )
-                }
-                _ => format!(
+    if !store.exists(rb_artifacts::ArtifactKind::Levels, &level_tag) {
+        match store.list_levels() {
+            Ok(entries) if !entries.is_empty() => {
+                let available: Vec<&str> = entries.iter().map(|(t, _)| t.as_str()).collect();
+                return Err(format!(
+                    "level artifact '{level_tag}' not found. Available: {}",
+                    available.join(", ")
+                ));
+            }
+            _ => {
+                return Err(format!(
                     "level artifact '{level_tag}' not found. \
                      Run `randlebrot generate level <layers-tag|--seed N> <x,y> <tag>` to create one."
-                ),
+                ));
             }
         }
-        other => format!("failed to load level artifact '{level_tag}': {other}"),
-    })?;
+    }
 
-    let (world_x, world_y) = chunk_coord_to_world_pos(level_manifest.chunk_coord);
-    let seed = level_manifest.seed;
-
-    println!(
-        "Launching level '{level_tag}': seed={seed}, coord=({},{}), world=({world_x:.1},{world_y:.1})",
-        level_manifest.chunk_coord.0, level_manifest.chunk_coord.1,
-    );
-
-    // ─── 2. Load parent layers for macro context ───────────────────────
-    let (macro_biome, river_network) =
-        load_parent_layers(&store, &level_manifest, seed)?;
-
-    let macro_biome_arc = Arc::new(macro_biome);
-    let river_network_arc = river_network;
-
-    // ─── 3. Load map overlay image ─────────────────────────────────────
-    let map_image_data = load_or_render_map_image(&store, &level_manifest, &macro_biome_arc);
-
-    // ─── 4. Build and run the Bevy app ─────────────────────────────────
-    let origin = WorldPos::new(world_x, world_y);
-    let chunk_x = (world_x / 64.0).floor() as i32;
-    let chunk_y = (world_y / 64.0).floor() as i32;
-
+    // ─── Build Bevy app IMMEDIATELY — window must appear before heavy loading ───
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: format!("Randlebrot - Playing: {level_tag}"),
             resolution: (SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32).into(),
+            focused: true,
             ..default()
         }),
         ..default()
@@ -152,100 +204,25 @@ pub fn run(level_tag: String) -> Result<(), String> {
         ..Default::default()
     });
 
-    // Insert resources
-    app.insert_resource(PlayableLevel {
-        origin,
-        chunk_coord: (chunk_x, chunk_y),
-        seed,
-        world_height: WORLD_HEIGHT as f64,
-    });
-    app.insert_resource(LaunchMacroBiomeData {
-        biome_map: macro_biome_arc,
-    });
-    if let Some(net) = river_network_arc {
-        app.insert_resource(LaunchRiverNetwork { network: net });
-    }
-    app.insert_resource(LaunchLevelChunkQueue::default());
-    app.insert_resource(MapOverlayState::default());
-    app.insert_resource(LaunchState {
-        level_tag,
-        chunk_coord: level_manifest.chunk_coord,
-    });
-    app.insert_resource(FpsCounter::default());
+    // Only insert the tag — everything else loads in the startup system
+    app.insert_resource(LaunchParams { level_tag });
 
-    // Terrain buffer for the voxel renderer — prime with the initial chunk
-    let mut terrain_buffer = TerrainBuffer::new(TERRAIN_BUF_SIZE);
-    {
-        let initial_heightmap = initial_biome.heightmap.clone();
-        let initial_colormap = initial_biome.to_layer_image(NoiseLayer::Biome);
-        let initial_data = ChunkTerrainData {
-            heightmap: initial_heightmap,
-            colormap: initial_colormap,
-            width: initial_biome.width,
-            height: initial_biome.height,
-        };
-        // Blit the spawn chunk into the center of the buffer
-        let center = TERRAIN_BUF_SIZE / 2 - TILE_MAP_SIZE / 2;
-        terrain_buffer.blit_chunk(&initial_data, center, center);
-    }
-    app.insert_resource(terrain_buffer);
-
-    // Pre-allocated render output buffer (avoids 3.5MB allocation per frame)
-    app.insert_resource(RenderOutputBuffer(vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4]));
-
-    // Voxel camera state
-    let voxel_camera = VoxelCamera {
-        x: (TERRAIN_BUF_SIZE / 2) as f64,
-        y: (TERRAIN_BUF_SIZE / 2) as f64,
-        height: 100.0,
-        yaw: 0.0,
-        pitch: 0.0,
-        fov: std::f64::consts::FRAC_PI_3,
-        draw_distance: DEFAULT_DRAW_DISTANCE,
-        mode: VoxelCameraMode::ThirdPerson { distance: 30.0, pitch: 0.5 },
-    };
-    app.insert_resource(VoxelCameraState { camera: voxel_camera });
-
-    // Player world position (tracks world coordinates, separate from buffer coords)
-    app.insert_resource(PlayerWorldPos {
-        x: world_x,
-        y: world_y,
-    });
-
-    // Buffer origin tracker (which world coordinate maps to buffer (0,0))
-    app.insert_resource(BufferOrigin {
-        world_x: world_x - (TERRAIN_BUF_SIZE as f64 / (2.0 * TILE_MAP_SIZE as f64)) * CHUNK_WORLD_SIZE,
-        world_y: world_y - (TERRAIN_BUF_SIZE as f64 / (2.0 * TILE_MAP_SIZE as f64)) * CHUNK_WORLD_SIZE,
-    });
-
-    // Loaded chunk tracking (separate from rb_tilemap -- we just track coords + data)
-    app.insert_resource(LoadedTerrainChunks::default());
-
-    // Store the map overlay image
-    if let Some((width, height, rgba_data)) = map_image_data {
-        app.insert_resource(MapImageData {
-            width,
-            height,
-            rgba_data,
-            world_width: WORLD_WIDTH as f32,
-            world_height: WORLD_HEIGHT as f32,
-        });
-    }
-
-    app.add_systems(Startup, launch_setup);
+    app.add_systems(Startup, (deferred_load_and_setup, grab_cursor));
+    // Gameplay systems only run after deferred_load_and_setup has inserted resources
+    let loaded = resource_exists::<PlayableLevel>;
     app.add_systems(
         Update,
         (
-            camera_input_system,
-            chunk_streaming_system,
-            chunk_poll_system,
-            chunk_unload_system,
-            voxel_render_system,
-            toggle_map_overlay,
-            update_map_player_marker,
-            map_overlay_zoom,
-            launch_hud_system,
-            fps_update_system,
+            camera_input_system.run_if(loaded),
+            chunk_streaming_system.run_if(loaded),
+            chunk_poll_system.run_if(loaded),
+            chunk_unload_system.run_if(loaded),
+            voxel_render_system.run_if(loaded),
+            toggle_map_overlay.run_if(loaded),
+            update_map_player_marker.run_if(loaded),
+            map_overlay_zoom.run_if(loaded),
+            launch_hud_system.run_if(loaded),
+            fps_update_system.run_if(loaded),
             exit_on_esc,
             exit_on_window_close,
         ),
@@ -512,11 +489,100 @@ struct MapOverlayEntity;
 
 // ─── Startup ───────────────────────────────────────────────────────────────
 
-fn launch_setup(
+/// Deferred loading — runs as a startup system AFTER the window is created and focused.
+/// This is where all the heavy I/O (level artifact, parent layers, map image) happens.
+fn deferred_load_and_setup(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
-    map_image_data: Option<Res<MapImageData>>,
+    params: Res<LaunchParams>,
 ) {
+    let store = ArtifactStore::new().expect("artifact store should be available");
+    let (initial_biome, level_manifest) = store
+        .load_level(&params.level_tag)
+        .expect("level artifact should exist (validated before app.run)");
+
+    let (world_x, world_y) = chunk_coord_to_world_pos(level_manifest.chunk_coord);
+    let seed = level_manifest.seed;
+
+    eprintln!(
+        "Loading level '{}': seed={seed}, coord=({},{})",
+        params.level_tag, level_manifest.chunk_coord.0, level_manifest.chunk_coord.1,
+    );
+
+    // Load parent layers
+    let (macro_biome, river_network) =
+        load_parent_layers(&store, &level_manifest, seed)
+            .expect("parent layers should load");
+
+    let macro_biome_arc = Arc::new(macro_biome);
+    let river_network_arc = river_network;
+
+    // Load map overlay
+    let map_image_data = load_or_render_map_image(&store, &level_manifest, &macro_biome_arc);
+
+    let origin = WorldPos::new(world_x, world_y);
+    let chunk_x = (world_x / 64.0).floor() as i32;
+    let chunk_y = (world_y / 64.0).floor() as i32;
+
+    // Insert all resources
+    commands.insert_resource(PlayableLevel {
+        origin,
+        chunk_coord: (chunk_x, chunk_y),
+        seed,
+        world_height: WORLD_HEIGHT as f64,
+    });
+    commands.insert_resource(LaunchMacroBiomeData {
+        biome_map: macro_biome_arc,
+    });
+    if let Some(net) = river_network_arc {
+        commands.insert_resource(LaunchRiverNetwork { network: net });
+    }
+    commands.insert_resource(LaunchLevelChunkQueue::default());
+    commands.insert_resource(MapOverlayState::default());
+    commands.insert_resource(LaunchState {
+        level_tag: params.level_tag.clone(),
+        chunk_coord: level_manifest.chunk_coord,
+    });
+    commands.insert_resource(FpsCounter::default());
+
+    // Terrain buffer — prime with initial chunk
+    let mut terrain_buffer = TerrainBuffer::new(TERRAIN_BUF_SIZE);
+    {
+        let initial_data = ChunkTerrainData {
+            heightmap: initial_biome.heightmap.clone(),
+            colormap: initial_biome.to_layer_image(NoiseLayer::Biome),
+            width: initial_biome.width,
+            height: initial_biome.height,
+        };
+        let center = TERRAIN_BUF_SIZE / 2 - TILE_MAP_SIZE / 2;
+        terrain_buffer.blit_chunk(&initial_data, center, center);
+    }
+    commands.insert_resource(terrain_buffer);
+
+    commands.insert_resource(RenderOutputBuffer(vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4]));
+
+    let voxel_camera = VoxelCamera {
+        x: (TERRAIN_BUF_SIZE / 2) as f64,
+        y: (TERRAIN_BUF_SIZE / 2) as f64,
+        height: 100.0,
+        yaw: 0.0,
+        pitch: 0.0,
+        fov: std::f64::consts::FRAC_PI_3,
+        draw_distance: DEFAULT_DRAW_DISTANCE,
+        mode: VoxelCameraMode::ThirdPerson { distance: 30.0, pitch: 0.5 },
+    };
+    commands.insert_resource(VoxelCameraState { camera: voxel_camera });
+
+    commands.insert_resource(PlayerWorldPos { x: world_x, y: world_y });
+
+    commands.insert_resource(BufferOrigin {
+        world_x: world_x - (TERRAIN_BUF_SIZE as f64 / (2.0 * TILE_MAP_SIZE as f64)) * CHUNK_WORLD_SIZE,
+        world_y: world_y - (TERRAIN_BUF_SIZE as f64 / (2.0 * TILE_MAP_SIZE as f64)) * CHUNK_WORLD_SIZE,
+    });
+
+    commands.insert_resource(LoadedTerrainChunks::default());
+
+    // ─── Spawn visual entities ─────────────────────────────────────────
     // Spawn a 2D camera for the fullscreen sprite
     commands.spawn(Camera2d);
 
@@ -544,18 +610,23 @@ fn launch_setup(
     ));
 
     // Create the map overlay sprite (initially hidden)
-    if let Some(map_data) = map_image_data {
-        let map_image = create_image(
-            map_data.width as usize,
-            map_data.height as usize,
-            map_data.rgba_data.clone(),
-        );
+    if let Some((map_w, map_h, map_rgba)) = map_image_data {
+        // Insert MapImageData resource for other systems (overlay toggle, marker)
+        commands.insert_resource(MapImageData {
+            width: map_w,
+            height: map_h,
+            rgba_data: map_rgba.clone(),
+            world_width: WORLD_WIDTH as f32,
+            world_height: WORLD_HEIGHT as f32,
+        });
+
+        let map_image = create_image(map_w as usize, map_h as usize, map_rgba);
         let map_texture = images.add(map_image);
 
         commands.spawn((
             Sprite {
                 image: map_texture,
-                custom_size: Some(Vec2::new(map_data.width as f32, map_data.height as f32)),
+                custom_size: Some(Vec2::new(map_w as f32, map_h as f32)),
                 color: Color::srgba(1.0, 1.0, 1.0, 0.85),
                 ..default()
             },
@@ -623,6 +694,26 @@ fn camera_input_system(
 
     // ─── WASD movement ─────────────────────────────────────────────
     {
+        // DEBUG: log any key presses to diagnose input issues
+        let any_pressed = keyboard.pressed(KeyCode::KeyW)
+            || keyboard.pressed(KeyCode::KeyS)
+            || keyboard.pressed(KeyCode::KeyA)
+            || keyboard.pressed(KeyCode::KeyD);
+        if any_pressed {
+            eprintln!("[INPUT] WASD detected: W={} S={} A={} D={}",
+                keyboard.pressed(KeyCode::KeyW),
+                keyboard.pressed(KeyCode::KeyS),
+                keyboard.pressed(KeyCode::KeyA),
+                keyboard.pressed(KeyCode::KeyD),
+            );
+        }
+        if keyboard.just_pressed(KeyCode::KeyV) {
+            eprintln!("[INPUT] V pressed — toggling camera mode");
+        }
+        if keyboard.just_pressed(KeyCode::Escape) {
+            eprintln!("[INPUT] ESC pressed");
+        }
+
         let mut forward = 0.0_f64;
         let mut strafe = 0.0_f64;
 
@@ -1068,11 +1159,54 @@ fn fps_update_system(
 // ─── Exit ──────────────────────────────────────────────────────────────────
 
 /// Exit on ESC key.
+/// Grab the cursor AND force macOS to activate the app as a foreground GUI process.
+/// Called as a Startup system AFTER winit has created the NSApplication and window.
+fn grab_cursor(mut cursor_query: Query<&mut CursorOptions, With<PrimaryWindow>>) {
+    // On macOS: force the process to become a foreground app with keyboard focus.
+    // This MUST happen after winit creates the NSApplication (inside app.run()).
+    #[cfg(target_os = "macos")]
+    {
+        unsafe {
+            use std::ffi::CStr;
+            let cls = objc2::runtime::AnyClass::get(
+                CStr::from_bytes_with_nul(b"NSApplication\0").unwrap()
+            );
+            if let Some(cls) = cls {
+                let shared_app: *mut objc2::runtime::AnyObject =
+                    objc2::msg_send![cls, sharedApplication];
+                if !shared_app.is_null() {
+                    let _: () = objc2::msg_send![shared_app, setActivationPolicy: 0i64];
+                    let _: () = objc2::msg_send![shared_app, activateIgnoringOtherApps: true];
+                    eprintln!("[macOS] Activated as foreground app");
+                } else {
+                    eprintln!("[macOS] sharedApplication returned null!");
+                }
+            } else {
+                eprintln!("[macOS] NSApplication class not found!");
+            }
+        }
+    }
+
+    if let Ok(mut cursor) = cursor_query.single_mut() {
+        cursor.grab_mode = CursorGrabMode::Locked;
+        cursor.visible = false;
+        eprintln!("[cursor] Locked cursor grab mode");
+    } else {
+        eprintln!("[cursor] No PrimaryWindow found for cursor grab!");
+    }
+}
+
 fn exit_on_esc(
     keyboard: Res<ButtonInput<KeyCode>>,
     mut exit_events: MessageWriter<AppExit>,
+    mut cursor_query: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     if keyboard.just_pressed(KeyCode::Escape) {
+        // Release cursor before exiting so the OS doesn't get confused
+        if let Ok(mut cursor) = cursor_query.single_mut() {
+            cursor.grab_mode = CursorGrabMode::None;
+            cursor.visible = true;
+        }
         exit_events.write(AppExit::Success);
     }
 }

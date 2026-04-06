@@ -538,6 +538,27 @@ fn launch_gui(layers_tag: Option<String>) {
     }
 
     let loading_from_artifact = layers_tag.is_some();
+
+    // On macOS, force the process to register as a foreground GUI app.
+    // Without this, terminal-launched binaries don't get keyboard focus.
+    #[cfg(target_os = "macos")]
+    {
+        unsafe {
+            use std::ffi::CStr;
+            let cls = objc2::runtime::AnyClass::get(
+                CStr::from_bytes_with_nul(b"NSApplication\0").unwrap()
+            );
+            if let Some(cls) = cls {
+                let shared_app: *mut objc2::runtime::AnyObject =
+                    objc2::msg_send![cls, sharedApplication];
+                if !shared_app.is_null() {
+                    let _: () = objc2::msg_send![shared_app, setActivationPolicy: 0i64];
+                    let _: () = objc2::msg_send![shared_app, activateIgnoringOtherApps: true];
+                }
+            }
+        }
+    }
+
     let mut app = App::new();
 
     app
