@@ -441,7 +441,7 @@ The editor loads and saves through `rb_artifacts`. After generating a world in t
 
 ### Mode Transitions
 - **F1-F4** keys switch between modes instantly
-- **World Generator** (F1): Generate procedural world, adjust noise params, save/load world definitions
+- **World Generator** (F1): Generate procedural world, adjust noise params, save/load world definitions. "Open Artifact..." lists available layer artifacts and loads one (replacing the current world via the `LoadingArtifact` path). "Save As Artifact..." saves the current world under a new tag via `rb_artifacts` (available only when a world is generated).
 - **World Map Editor** (F2): Place cities/landmarks, draw region polygons, view overlays
 - **Chunk Editor** (F3): Select chunk from map (Ctrl+Click), edit tiles and entities
 - **Level Launcher** (F4): Multi-step drill-down from macro chunk to playable level (see below)
