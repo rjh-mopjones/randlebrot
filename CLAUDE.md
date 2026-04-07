@@ -136,7 +136,7 @@ The CLI follows a **generate → view → launch** pipeline:
 
 3. **View** — `randlebrot view layers` and `randlebrot view levels` list and inspect generated artifacts. `view levels <tag>` prints detailed metadata; `view layers <tag>` opens the interactive layer viewer (see CLI Visual Tools below).
 
-4. **Launch** — `randlebrot launch <level-tag>` opens a Bevy 3D window with Minecraft-style block terrain. Each chunk's heightmap is converted to a Bevy `Mesh` of block faces (top faces bright, side faces dark). Local normalization stretches each chunk's height variation to 0-64 block levels. Loads the parent layers artifact for macro context. WASD moves, mouse looks, Tab releases cursor, ESC exits.
+4. **Launch** — `randlebrot launch <level-tag>` opens a Bevy 3D window with Minecraft-style block terrain. Each chunk's heightmap is converted to a Bevy `Mesh` of block faces using absolute height scaling (`HEIGHT_SCALE = 128`), so adjacent chunks share a consistent vertical reference (no seams). Top faces use greedy meshing (merging adjacent same-height/same-color blocks into larger quads). Side faces use depth-based color variation (biome color near the top, transitioning to dirt then stone). Camera auto-follows terrain height. Loads the parent layers artifact for macro context. WASD moves, mouse looks, Tab releases cursor, ESC exits.
 
 5. **GUI** — `randlebrot gui [layers-tag]` (or just `randlebrot` with no args) launches the full Bevy editor. Two artifact integration paths:
    - **Auto-save after generation**: When "Generate World" completes, the user is prompted for a tag name and the result is saved via `rb_artifacts::save_layers()`. The user can skip saving.
@@ -199,7 +199,7 @@ Always use `--release` — debug builds are unacceptably slow (tile generation d
 
 ### Level Launcher (CLI)
 
-`randlebrot launch <level-tag>` opens a playable level with Minecraft-style 3D block terrain. It is a minimal Bevy app: `DefaultPlugins` + `EguiPlugin` + `Camera3d`. Each chunk's heightmap (derived from base noise layers via `build_local_heightmap`) is converted to a Bevy `Mesh` of block face quads. Local normalization stretches each chunk's height variation to fill 0-64 block levels. The macro `BiomeMap` and `RiverNetwork` are loaded from the parent layers artifact (or regenerated from seed if the parent is missing).
+`randlebrot launch <level-tag>` opens a playable level with Minecraft-style 3D block terrain. It is a minimal Bevy app: `DefaultPlugins` + `EguiPlugin` + `Camera3d` + `Camera2d` (for egui HUD overlay). Each chunk's heightmap is converted to a Bevy `Mesh` of block face quads using absolute height scaling (`HEIGHT_SCALE = 128`). The macro `BiomeMap` and `RiverNetwork` are loaded from the parent layers artifact (or regenerated from seed if the parent is missing).
 
 **Purpose**: quick testing of a specific chunk without clicking through the GUI launcher drill-down (F4 -> generate meso -> select -> generate chunks -> select -> play). The 3D terrain view gives an intuitive sense of the heightmap, biome colors, and terrain structure.
 
@@ -226,7 +226,7 @@ Always use `--release` — debug builds are unacceptably slow (tile generation d
 - Window title is `Randlebrot - Playing: <tag>`.
 - Egui HUD (non-interactive, top-left) shows level tag, coordinate, seed, player world position, camera mode, draw distance, and FPS.
 
-**Implementation**: `src/commands/launch.rs`. Standalone Bevy app with `Camera3d`, directional light, ambient light, distance fog. Chunks stream via async `BiomeMap` generation → `build_local_heightmap()` (derives from base noise layers, not the flat derived heightmap) → `generate_chunk_mesh()` (local normalization + block face quad generation) → `Mesh3d` entity spawn. On macOS Sequoia, a `.app` bundle trampoline at `/tmp/Randlebrot.app` is used to acquire keyboard focus.
+**Implementation**: `src/commands/launch.rs`. Standalone Bevy app with `Camera3d` (order 0, terrain) + `Camera2d` (order 1, egui HUD), directional light, ambient light, distance fog. Chunks stream via async `BiomeMap` generation → `generate_chunk_mesh()` (absolute height scaling + greedy meshing for top faces + depth-based side face coloring) → `Mesh3d` entity spawn. Camera auto-follows terrain by sampling per-chunk `block_heights` grids stored in `LoadedChunks`. Movement speed is Minecraft-scale (`MOVE_SPEED = 0.067` world units/sec = ~4.3 blocks/sec). On macOS Sequoia, a `.app` bundle trampoline at `/tmp/Randlebrot.app` is used to acquire keyboard focus.
 
 **Flythrough mode**: `randlebrot launch <tag> --flythrough` runs an automated camera path through 10 waypoints (spawn view, rotations, movement, elevation changes), captures a screenshot at each waypoint via Bevy's `Screenshot` API, saves them to `/tmp/randlebrot_flythrough/frame_NNN.png`, and auto-exits. No cursor grab, no HUD, no manual input. The macOS `.app` trampoline is skipped in flythrough mode. Total duration is approximately 8 seconds. **Visual changes to the launcher MUST be verified via flythrough** — run `cargo run --release -- launch <tag> --flythrough` and inspect the output frames.
 
@@ -639,9 +639,11 @@ The level launcher (`randlebrot launch`) uses **Bevy 3D mesh rendering** to disp
 
 **Block mesh generation** (`generate_chunk_mesh` in `src/commands/launch.rs`):
 1. Uses the derived `heightmap` field from `BiomeMap` directly. At micro scale (detail_level=3), this includes independently-normalized high-frequency detail from `derive_micro_heightmap` (octaves 12-17 with terrain-type amplitude budgets 0.05-0.25).
-2. **Local normalization**: find min/max across the chunk, stretch to [0, `MAX_BLOCK_HEIGHT`] (64 blocks). This makes fractal variation visible regardless of the raw noise amplitude.
-3. For each of 64×64 blocks: emit a TOP face quad (biome color) + SIDE face quads where neighbors are shorter (darker color).
-4. Vertex colors encode biome + face shading. `StandardMaterial` with vertex colors, directional + ambient light.
+2. **Absolute height scaling**: `block_y = floor(raw_height * HEIGHT_SCALE)` where `HEIGHT_SCALE = 128`. All chunks share a consistent vertical reference, eliminating seams at chunk boundaries.
+3. **Greedy meshing** for top faces: adjacent blocks with the same height and biome color are merged into larger quads (scan rows along X, then extend along Z). Typically 5-10x vertex reduction.
+4. **Depth-based side face coloring**: top of the cliff face uses darkened biome color, transitioning to dirt color at 1 block depth, then stone at 3+ blocks. This replaces the old uniform dark shading.
+5. **Terrain height following**: each chunk stores a `block_heights` grid (64x64 f32 values). The camera samples this grid each frame to set Y = ground + `EYE_HEIGHT`.
+6. Vertex colors encode biome + face shading. `StandardMaterial` with vertex colors, directional + ambient light.
 
 **The `rb_voxel` crate** still contains the Comanche-style column raycaster and player marker utilities. These are no longer used by `launch.rs` but remain available for other use cases (e.g., world-map flyover preview).
 
