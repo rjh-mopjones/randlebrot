@@ -302,6 +302,9 @@ pub fn render_frame(
     let output_ptr = output.as_mut_ptr() as usize;
     let output_len = output.len();
 
+    // Block size = 1.0 — each heightmap coordinate is one block
+    let block_size = 1.0_f64;
+
     (0..screen_width).into_par_iter().for_each(|col| {
         let ptr = output_ptr as *mut u8;
 
@@ -315,62 +318,104 @@ pub fn render_frame(
         let cos_correction = (ray_angle - cam_yaw).cos();
 
         let mut max_drawn_y = screen_height; // bottom of the screen (we draw upward)
+        let mut prev_block_height = f64::MIN;
 
         let mut distance = 1.0_f64;
         while distance < draw_distance {
             let sample_x = cam_x + ray_dx * distance;
             let sample_y = cam_y + ray_dy * distance;
 
-            // Sample terrain height
+            // Sample terrain height and quantize to blocks
             let raw_height = sample_heightmap(heightmap, map_width, map_height, sample_x, sample_y);
-            let world_height = raw_height * height_scale;
+            let block_height = (raw_height * height_scale / block_size).floor() * block_size;
 
-            // Project to screen Y.
-            // Perpendicular distance to avoid fisheye distortion.
+            // Perpendicular distance to avoid fisheye distortion
             let perp_dist = distance * cos_correction;
             if perp_dist <= 0.0 {
                 distance += step;
                 continue;
             }
 
-            let height_diff = world_height - cam_height;
+            let height_diff = block_height - cam_height;
             let screen_y_f =
                 half_screen_h - (height_diff * half_screen_h) / perp_dist - pitch_offset;
             let screen_y = screen_y_f as isize;
-
-            // Clamp to valid screen range
             let draw_top = screen_y.max(0) as usize;
 
             if draw_top < max_drawn_y {
-                // Sample color
+                // Sample base color from colormap
                 let base_color =
                     sample_colormap(colormap, map_width, map_height, sample_x, sample_y);
-                let fogged = apply_fog(base_color, fog_color, distance, draw_distance);
 
-                // Draw the vertical strip from draw_top to max_drawn_y
-                for row in draw_top..max_drawn_y {
-                    let offset = (row * screen_width + col) * 4;
-                    // Safety: col is unique per parallel iteration, row is in range,
-                    // and offset + 3 < output_len.
-                    debug_assert!(offset + 3 < output_len);
-                    unsafe {
-                        *ptr.add(offset) = fogged[0];
-                        *ptr.add(offset + 1) = fogged[1];
-                        *ptr.add(offset + 2) = fogged[2];
-                        *ptr.add(offset + 3) = fogged[3];
+                // Minecraft-style face shading with top/side color distinction
+                let is_side_face = block_height > prev_block_height + 0.5;
+
+                // Fog factor for this distance (applied to all pixels in the strip)
+                let fog_t = (distance / draw_distance).clamp(0.0, 1.0);
+                let fog_t2 = fog_t * fog_t; // quadratic falloff
+
+                if is_side_face {
+                    // SIDE FACE: draw individual block layers within the cliff.
+                    // Each block_size unit of height gets its own row with a visible edge.
+                    // Walk from draw_top to max_drawn_y, computing which block layer
+                    // each screen row belongs to, and shade accordingly.
+                    for row in draw_top..max_drawn_y {
+                        // Reverse-project screen row to world height at this distance
+                        let row_height = cam_height + (half_screen_h - row as f64 - pitch_offset) * perp_dist / half_screen_h;
+                        let block_layer = (row_height / block_size).floor() as i64;
+
+                        // Alternate block layers between two shades for visibility
+                        let layer_bright = if block_layer % 2 == 0 { 0.6 } else { 0.7 };
+
+                        // Edge between block layers: dark line at the boundary
+                        let frac_in_block = ((row_height / block_size) - (row_height / block_size).floor()).abs();
+                        let on_edge = frac_in_block < 0.08 || frac_in_block > 0.92;
+                        let edge_mult = if on_edge { 0.4 } else { 1.0 };
+
+                        // Side color: darken the biome color
+                        let shade = layer_bright * edge_mult;
+                        let r = lerp_u8(base_color[0], fog_color[0], fog_t2);
+                        let g = lerp_u8(base_color[1], fog_color[1], fog_t2);
+                        let b = lerp_u8(base_color[2], fog_color[2], fog_t2);
+
+                        let offset = (row * screen_width + col) * 4;
+                        debug_assert!(offset + 3 < output_len);
+                        unsafe {
+                            *ptr.add(offset) = (r as f64 * shade) as u8;
+                            *ptr.add(offset + 1) = (g as f64 * shade) as u8;
+                            *ptr.add(offset + 2) = (b as f64 * shade) as u8;
+                            *ptr.add(offset + 3) = 255;
+                        }
                     }
-                }
+                } else {
+                    // TOP FACE: biome color with fog
+                    let r = lerp_u8(base_color[0], fog_color[0], fog_t2);
+                    let g = lerp_u8(base_color[1], fog_color[1], fog_t2);
+                    let b = lerp_u8(base_color[2], fog_color[2], fog_t2);
+
+                    for row in draw_top..max_drawn_y {
+                        let offset = (row * screen_width + col) * 4;
+                        debug_assert!(offset + 3 < output_len);
+                        unsafe {
+                            *ptr.add(offset) = r;
+                            *ptr.add(offset + 1) = g;
+                            *ptr.add(offset + 2) = b;
+                            *ptr.add(offset + 3) = 255;
+                        }
+                    }
+                };
                 max_drawn_y = draw_top;
             }
+
+            prev_block_height = block_height;
 
             // If the entire column is filled, stop marching
             if max_drawn_y == 0 {
                 break;
             }
 
-            // Adaptive step: increase step with distance for efficiency
-            // Close terrain needs fine detail; far terrain can be coarser.
-            distance += step + distance * 0.002;
+            // Adaptive step: coarser at distance for performance
+            distance += step + distance * 0.005;
         }
     });
 }
