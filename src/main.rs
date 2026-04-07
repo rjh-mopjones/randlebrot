@@ -53,6 +53,13 @@ enum Command {
         /// Tag of the level artifact to launch
         level_tag: String,
     },
+
+    /// Debug: inspect layer data for a level artifact
+    #[command(hide = true)]
+    DebugLevel {
+        /// Tag of the level artifact to inspect
+        level_tag: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -497,6 +504,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
+
+        Some(Command::DebugLevel { level_tag }) => {
+            if let Err(e) = commands::debug_level::run(&level_tag) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -538,6 +552,26 @@ fn launch_gui(layers_tag: Option<String>) {
     }
 
     let loading_from_artifact = layers_tag.is_some();
+
+    // On macOS, force the process to register as a foreground GUI app.
+    // Without this, terminal-launched binaries don't get keyboard focus.
+    #[cfg(target_os = "macos")]
+    {
+        unsafe {
+            let cls = objc2::runtime::AnyClass::get(
+                c"NSApplication"
+            );
+            if let Some(cls) = cls {
+                let shared_app: *mut objc2::runtime::AnyObject =
+                    objc2::msg_send![cls, sharedApplication];
+                if !shared_app.is_null() {
+                    let _: () = objc2::msg_send![shared_app, setActivationPolicy: 0i64];
+                    let _: () = objc2::msg_send![shared_app, activateIgnoringOtherApps: true];
+                }
+            }
+        }
+    }
+
     let mut app = App::new();
 
     app
