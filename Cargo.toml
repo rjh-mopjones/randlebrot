@@ -65,6 +65,8 @@ rb_player.workspace = true
 rb_persistence.workspace = true
 rb_artifacts.workspace = true
 rb_voxel.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 
 [workspace.lints.clippy]
