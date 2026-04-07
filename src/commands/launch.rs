@@ -14,12 +14,14 @@
 //!   ESC             — exit
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use bevy::app::AppExit;
 use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::mesh::Indices;
+use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_egui::{egui, EguiContexts};
@@ -119,9 +121,11 @@ pub(crate) fn macos_ensure_app_bundle(args: &[String]) {
 
 // ─── Entry Point ───────────────────────────────────────────────────────────
 
-pub fn run(level_tag: String) -> Result<(), String> {
+pub fn run(level_tag: String, flythrough: bool) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    macos_ensure_app_bundle(&std::env::args().collect::<Vec<_>>());
+    if !flythrough {
+        macos_ensure_app_bundle(&std::env::args().collect::<Vec<_>>());
+    }
 
     // Validate tag exists
     let store = ArtifactStore::new()
@@ -155,17 +159,30 @@ pub fn run(level_tag: String) -> Result<(), String> {
 
     app.insert_resource(LaunchParams { level_tag });
 
-    app.add_systems(Startup, (setup_scene, grab_cursor));
-
     let loaded = resource_exists::<PlayerState>;
-    app.add_systems(Update, (
-        camera_input.run_if(loaded),
-        chunk_stream.run_if(loaded),
-        chunk_poll.run_if(loaded),
-        chunk_unload.run_if(loaded),
-        hud_system.run_if(loaded),
-        exit_on_esc,
-    ));
+
+    if flythrough {
+        // Flythrough mode: automated camera path, no cursor grab, no HUD, no manual input
+        app.add_systems(Startup, setup_scene);
+        app.insert_resource(FlyThroughState::new());
+        app.add_systems(Update, (
+            flythrough_system.run_if(loaded),
+            chunk_stream.run_if(loaded),
+            chunk_poll.run_if(loaded),
+            chunk_unload.run_if(loaded),
+        ));
+    } else {
+        // Normal interactive mode
+        app.add_systems(Startup, (setup_scene, grab_cursor));
+        app.add_systems(Update, (
+            camera_input.run_if(loaded),
+            chunk_stream.run_if(loaded),
+            chunk_poll.run_if(loaded),
+            chunk_unload.run_if(loaded),
+            hud_system.run_if(loaded),
+            exit_on_esc,
+        ));
+    }
 
     app.run();
     Ok(())
@@ -219,6 +236,119 @@ impl Default for FpsCounter {
 
 #[derive(Component)]
 struct ChunkEntity;
+
+// ─── Flythrough ───────────────────────────────────────────────────────────
+
+struct FlyWaypoint {
+    position_offset: Vec3,
+    look_dir: Vec3,
+    duration: f32,
+}
+
+#[derive(Resource)]
+struct FlyThroughState {
+    waypoints: Vec<FlyWaypoint>,
+    current: usize,
+    elapsed: f32,
+    frame_count: u32,
+    output_dir: PathBuf,
+    spawn_pos: Option<Vec3>,
+    screenshot_pending: bool,
+}
+
+impl FlyThroughState {
+    fn new() -> Self {
+        let output_dir = PathBuf::from("/tmp/randlebrot_flythrough");
+        std::fs::create_dir_all(&output_dir).expect("create flythrough output dir");
+        Self {
+            waypoints: vec![
+                // 1. Spawn view — looking forward
+                FlyWaypoint { position_offset: Vec3::ZERO, look_dir: Vec3::new(1.0, 0.0, 0.0), duration: 1.0 },
+                // 2. Turn left 90
+                FlyWaypoint { position_offset: Vec3::ZERO, look_dir: Vec3::new(0.0, 0.0, -1.0), duration: 0.5 },
+                // 3. Turn right 180
+                FlyWaypoint { position_offset: Vec3::ZERO, look_dir: Vec3::new(0.0, 0.0, 1.0), duration: 0.5 },
+                // 4. Look down at feet
+                FlyWaypoint { position_offset: Vec3::ZERO, look_dir: Vec3::new(1.0, -1.0, 0.0).normalize(), duration: 0.5 },
+                // 5. Look up at sky
+                FlyWaypoint { position_offset: Vec3::ZERO, look_dir: Vec3::new(1.0, 1.0, 0.0).normalize(), duration: 0.5 },
+                // 6. Move forward 30 blocks
+                FlyWaypoint { position_offset: Vec3::new(30.0, 0.0, 0.0), look_dir: Vec3::new(1.0, 0.0, 0.0), duration: 2.0 },
+                // 7. Move to high ground (up 20)
+                FlyWaypoint { position_offset: Vec3::new(30.0, 20.0, 0.0), look_dir: Vec3::new(1.0, -0.3, 0.0).normalize(), duration: 1.0 },
+                // 8. Panoramic spin
+                FlyWaypoint { position_offset: Vec3::new(30.0, 20.0, 0.0), look_dir: Vec3::new(-1.0, 0.0, 0.0), duration: 0.5 },
+                // 9. Back at ground
+                FlyWaypoint { position_offset: Vec3::new(30.0, 0.0, 0.0), look_dir: Vec3::new(1.0, 0.0, 0.0), duration: 0.5 },
+                // 10. Final forward view
+                FlyWaypoint { position_offset: Vec3::new(50.0, 0.0, 0.0), look_dir: Vec3::new(1.0, 0.0, 0.0), duration: 1.0 },
+            ],
+            current: 0,
+            elapsed: 0.0,
+            frame_count: 0,
+            output_dir,
+            spawn_pos: None,
+            screenshot_pending: false,
+        }
+    }
+}
+
+fn flythrough_system(
+    mut commands: Commands,
+    mut state: ResMut<FlyThroughState>,
+    time: Res<Time>,
+    mut camera_q: Query<&mut Transform, With<Camera3d>>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let Ok(mut cam_transform) = camera_q.single_mut() else { return };
+
+    // Record spawn position on first frame
+    if state.spawn_pos.is_none() {
+        state.spawn_pos = Some(cam_transform.translation);
+    }
+    let spawn_pos = state.spawn_pos.unwrap();
+
+    // If a screenshot was just taken, advance to next waypoint
+    if state.screenshot_pending {
+        state.screenshot_pending = false;
+        state.frame_count += 1;
+        state.current += 1;
+        state.elapsed = 0.0;
+
+        if state.current >= state.waypoints.len() {
+            eprintln!(
+                "Flythrough complete: {} frames saved to {:?}",
+                state.frame_count, state.output_dir
+            );
+            exit.write(AppExit::Success);
+            return;
+        }
+    }
+
+    if state.current >= state.waypoints.len() {
+        return;
+    }
+
+    state.elapsed += time.delta_secs();
+    let wp = &state.waypoints[state.current];
+
+    // Interpolate camera position toward current waypoint target
+    let target_pos = spawn_pos + wp.position_offset;
+    let t = (state.elapsed / wp.duration).min(1.0);
+    let smoothed = t * t * (3.0 - 2.0 * t); // smoothstep
+    cam_transform.translation = cam_transform.translation.lerp(target_pos, smoothed.min(1.0));
+    cam_transform.look_to(wp.look_dir, Vec3::Y);
+
+    // When duration is reached, take a screenshot
+    if state.elapsed >= wp.duration && !state.screenshot_pending {
+        state.screenshot_pending = true;
+        let path = state.output_dir.join(format!("frame_{:03}.png", state.frame_count + 1));
+        eprintln!("Capturing frame {} -> {:?}", state.frame_count + 1, path);
+        commands
+            .spawn(Screenshot::primary_window())
+            .observe(save_to_disk(path));
+    }
+}
 
 // ─── Startup ───────────────────────────────────────────────────────────────
 

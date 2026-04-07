@@ -52,6 +52,9 @@ enum Command {
     Launch {
         /// Tag of the level artifact to launch
         level_tag: String,
+        /// Run an automated flythrough, saving screenshots to /tmp/randlebrot_flythrough/
+        #[arg(long, default_value_t = false)]
+        flythrough: bool,
     },
 
     /// Debug: inspect layer data for a level artifact
@@ -498,8 +501,8 @@ fn main() {
             }
         },
 
-        Some(Command::Launch { level_tag }) => {
-            if let Err(e) = commands::launch::run(level_tag) {
+        Some(Command::Launch { level_tag, flythrough }) => {
+            if let Err(e) = commands::launch::run(level_tag, flythrough) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
