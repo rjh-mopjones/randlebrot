@@ -1414,7 +1414,14 @@ impl BiomeMap {
                     let above_sea = (macro_hm - SEA_LEVEL).max(0.0);
                     let mountain_intensity = (stress * above_sea * 3.0).min(1.0);
                     let mountain_detail = peaks_valleys[idx] * mountain_intensity * 0.2;
-                    heightmap_vec[idx] = macro_hm + mountain_detail;
+                    let base_hm = macro_hm + mountain_detail;
+                    // Apply micro-scale block detail on top of the macro-corrected height.
+                    // Without this, the macro override discards derive_micro_heightmap entirely.
+                    heightmap_vec[idx] = if detail_level >= 3 {
+                        derived::derive_micro_heightmap(base_hm, wx, wy, &detail_noise)
+                    } else {
+                        base_hm
+                    };
                     // Recompute derived layers with eroded heightmap
                     let hm = heightmap_vec[idx];
                     temperature[idx] = derived::derive_temperature(light_level[idx], hm, humidity[idx], continentalness[idx]);

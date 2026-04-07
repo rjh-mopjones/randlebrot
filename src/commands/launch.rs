@@ -42,14 +42,16 @@ use crate::cli::coords::{
 /// Output resolution per chunk BiomeMap.
 const TILE_MAP_SIZE: usize = 512;
 
-/// Blocks per chunk side. 64x64 = 4096 blocks = manageable mesh.
-/// Each block samples the heightmap at its center (512/64 = 8px region).
-const BLOCKS_PER_CHUNK: usize = 64;
+/// 128 blocks per chunk side — each block averages a 4×4 pixel region of the
+/// 512×512 BiomeMap. This smooths 1-pixel fBm noise into wider steps, eliminating
+/// the checkerboard staircase pattern without destroying terrain shape.
+const BLOCKS_PER_CHUNK: usize = 128;
 const BLOCK_WORLD_SIZE: f32 = 1.0;
 const CHUNK_BEVY_SIZE: f32 = BLOCKS_PER_CHUNK as f32 * BLOCK_WORLD_SIZE;
 
-/// Height scale: multiplier from raw heightmap values to block Y position.
-/// Absolute height so that all chunks share a consistent vertical reference.
+/// Height scale: raw heightmap → block Y.
+/// 128 gives ~10-60 blocks of relief depending on terrain type.
+/// Mountain areas can span 0.5+ heightmap range → 64+ blocks of cliffs.
 const HEIGHT_SCALE: f32 = 128.0;
 
 /// Dirt layer colors (RGB, 0-255).
@@ -57,19 +59,18 @@ const DIRT_COLOR: [u8; 3] = [101, 67, 33];
 /// Stone layer color (RGB, 0-255).
 const STONE_COLOR: [u8; 3] = [120, 120, 120];
 
-/// Chunk load radius.
-const LOAD_RADIUS: i32 = 8;
+/// Keep load radius tiny — a single 512×512 chunk is already 262K blocks.
+const LOAD_RADIUS: i32 = 2;
 
 /// Chunk unload radius (must be > LOAD_RADIUS to avoid load/unload thrashing).
-const UNLOAD_RADIUS: i32 = 10;
+const UNLOAD_RADIUS: i32 = 3;
 
 /// Max concurrent chunk generation tasks.
 const MAX_CONCURRENT: usize = 4;
 
-/// Player movement speed (world units per second).
-/// Minecraft walk speed is ~4.3 blocks/sec. With 64 blocks per chunk
-/// (1 world unit), that maps to 4.3/64 ~ 0.067 world units/sec.
-const MOVE_SPEED: f32 = 0.067;
+/// Player movement speed in Bevy units/sec. 1 Bevy unit = 1 block.
+/// Minecraft walk speed is ~4.3 blocks/sec; 10.0 gives snappy exploration.
+const MOVE_SPEED: f32 = 10.0;
 
 /// Mouse look sensitivity (tuned for natural feel at ~1280x720).
 const MOUSE_SENS: f32 = 0.003;
@@ -78,7 +79,9 @@ const MOUSE_SENS: f32 = 0.003;
 const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_3;
 
 /// Player eye height above terrain (in world units).
-const EYE_HEIGHT: f32 = 0.5;
+/// 1.7 blocks gives Minecraft-like eye position, and ensures we clear
+/// blocks that are 1 block taller than the sampled ground center.
+const EYE_HEIGHT: f32 = 1.7;
 
 // ─── macOS .app bundle trampoline ──────────────────────────────────────────
 
@@ -285,26 +288,24 @@ impl FlyThroughState {
         std::fs::create_dir_all(&output_dir).expect("create flythrough output dir");
         Self {
             waypoints: vec![
-                // 1. Spawn view — looking forward
-                FlyWaypoint { position_offset: Vec3::ZERO, look_dir: Vec3::new(1.0, 0.0, 0.0), duration: 1.0 },
-                // 2. Turn left 90
-                FlyWaypoint { position_offset: Vec3::ZERO, look_dir: Vec3::new(0.0, 0.0, -1.0), duration: 0.5 },
-                // 3. Turn right 180
-                FlyWaypoint { position_offset: Vec3::ZERO, look_dir: Vec3::new(0.0, 0.0, 1.0), duration: 0.5 },
-                // 4. Look down at feet
-                FlyWaypoint { position_offset: Vec3::ZERO, look_dir: Vec3::new(1.0, -1.0, 0.0).normalize(), duration: 0.5 },
-                // 5. Look up at sky
-                FlyWaypoint { position_offset: Vec3::ZERO, look_dir: Vec3::new(1.0, 1.0, 0.0).normalize(), duration: 0.5 },
-                // 6. Move forward 30 blocks
-                FlyWaypoint { position_offset: Vec3::new(30.0, 0.0, 0.0), look_dir: Vec3::new(1.0, 0.0, 0.0), duration: 2.0 },
-                // 7. Move to high ground (up 20)
-                FlyWaypoint { position_offset: Vec3::new(30.0, 20.0, 0.0), look_dir: Vec3::new(1.0, -0.3, 0.0).normalize(), duration: 1.0 },
-                // 8. Panoramic spin
-                FlyWaypoint { position_offset: Vec3::new(30.0, 20.0, 0.0), look_dir: Vec3::new(-1.0, 0.0, 0.0), duration: 0.5 },
-                // 9. Back at ground
-                FlyWaypoint { position_offset: Vec3::new(30.0, 0.0, 0.0), look_dir: Vec3::new(1.0, 0.0, 0.0), duration: 0.5 },
-                // 10. Final forward view
-                FlyWaypoint { position_offset: Vec3::new(50.0, 0.0, 0.0), look_dir: Vec3::new(1.0, 0.0, 0.0), duration: 1.0 },
+                // 1. Ground level looking forward along terrain
+                FlyWaypoint { position_offset: Vec3::new(0.0, 3.0, 0.0), look_dir: Vec3::new(1.0, -0.2, 0.0).normalize(), duration: 1.0 },
+                // 2. Step back, look at the terrain in front
+                FlyWaypoint { position_offset: Vec3::new(-20.0, 5.0, 0.0), look_dir: Vec3::new(1.0, -0.15, 0.0).normalize(), duration: 1.0 },
+                // 3. Side angle — look diagonally across terrain
+                FlyWaypoint { position_offset: Vec3::new(0.0, 4.0, -30.0), look_dir: Vec3::new(0.5, -0.15, 1.0).normalize(), duration: 1.0 },
+                // 4. Other direction strafe
+                FlyWaypoint { position_offset: Vec3::new(0.0, 4.0, 30.0), look_dir: Vec3::new(0.5, -0.15, -1.0).normalize(), duration: 1.0 },
+                // 5. Low aerial — 15 blocks up, looking down-forward
+                FlyWaypoint { position_offset: Vec3::new(30.0, 15.0, 0.0), look_dir: Vec3::new(0.6, -0.6, 0.0).normalize(), duration: 1.0 },
+                // 6. Aerial pan — 30 blocks up, wide horizon view
+                FlyWaypoint { position_offset: Vec3::new(50.0, 30.0, 0.0), look_dir: Vec3::new(1.0, -0.35, 0.0).normalize(), duration: 1.0 },
+                // 7. Aerial looking back at landscape
+                FlyWaypoint { position_offset: Vec3::new(50.0, 30.0, 0.0), look_dir: Vec3::new(-1.0, -0.25, 0.4).normalize(), duration: 1.0 },
+                // 8. Swoop toward ground
+                FlyWaypoint { position_offset: Vec3::new(80.0, 4.0, 0.0), look_dir: Vec3::new(1.0, -0.15, 0.0).normalize(), duration: 1.5 },
+                // 9. Final ground run
+                FlyWaypoint { position_offset: Vec3::new(120.0, 3.0, -10.0), look_dir: Vec3::new(1.0, -0.1, 0.1).normalize(), duration: 1.0 },
             ],
             current: 0,
             elapsed: 0.0,
@@ -451,7 +452,7 @@ fn setup_scene(
             .looking_to(look_dir, Vec3::Y),
         DistanceFog {
             color: Color::srgb(0.53, 0.71, 0.86),
-            falloff: FogFalloff::Linear { start: 2.0, end: 15.0 },
+            falloff: FogFalloff::Linear { start: 200.0, end: 800.0 },
             ..default()
         },
     ));
@@ -523,30 +524,36 @@ fn lerp_color(a: [u8; 3], b: [u8; 3], t: f32) -> [f32; 4] {
     ]
 }
 
-/// Compute the side face color for a given depth below the block top.
-/// depth=0 is right at the top (grass-tinted), deeper transitions to dirt, then stone.
-fn side_color_at_depth(biome_color: [u8; 3], depth: f32) -> [f32; 4] {
-    if depth < 1.0 {
-        // Top layer: biome color darkened, transitioning to dirt
-        let darkened = [
-            (biome_color[0] as f32 * 0.6) as u8,
-            (biome_color[1] as f32 * 0.6) as u8,
-            (biome_color[2] as f32 * 0.6) as u8,
-        ];
-        lerp_color(darkened, DIRT_COLOR, depth)
-    } else if depth < 3.0 {
-        // Dirt layer
-        let t = (depth - 1.0) / 2.0;
-        lerp_color(DIRT_COLOR, STONE_COLOR, t)
+/// Minecraft-style directional brightness multiplier for a face normal.
+/// Top=1.0, North/South=0.8, East=0.75, West=0.6 — baked into vertex colours
+/// since we use unlit materials. This is the core of the Minecraft "3D feel".
+fn face_brightness(normal: [f32; 3]) -> f32 {
+    if normal[1] > 0.5 { return 1.0; }   // top
+    if normal[1] < -0.5 { return 0.5; }  // bottom
+    if normal[0].abs() > 0.5 {
+        if normal[0] > 0.0 { 0.75 } else { 0.6 }  // east / west
     } else {
-        // Deep stone
+        0.8  // north / south
+    }
+}
+
+/// Compute side face colour for a given depth and face direction.
+/// Geological layers: rich dirt for top 2 blocks, stone below.
+/// Brightness is baked per face direction (Minecraft-style directional shading).
+fn side_color_at_depth(depth: f32, normal: [f32; 3]) -> [f32; 4] {
+    let brightness = face_brightness(normal);
+    let base = if depth < 2.0 {
+        lerp_color(DIRT_COLOR, STONE_COLOR, depth / 2.0 * 0.6)
+    } else {
+        let deep = ((depth - 2.0) / 15.0).min(0.35);
         [
-            STONE_COLOR[0] as f32 / 255.0 * 0.5,
-            STONE_COLOR[1] as f32 / 255.0 * 0.5,
-            STONE_COLOR[2] as f32 / 255.0 * 0.5,
+            STONE_COLOR[0] as f32 / 255.0 * (1.0 - deep),
+            STONE_COLOR[1] as f32 / 255.0 * (1.0 - deep),
+            STONE_COLOR[2] as f32 / 255.0 * (1.0 - deep),
             1.0,
         ]
-    }
+    };
+    [base[0] * brightness, base[1] * brightness, base[2] * brightness, 1.0]
 }
 
 /// Convert a chunk's BiomeMap into a Bevy Mesh of block faces.
@@ -557,10 +564,10 @@ fn generate_chunk_mesh(bm: &BiomeMap) -> ChunkMeshData {
     let step = bm.width / BLOCKS_PER_CHUNK;
     let step = if step == 0 { 1 } else { step };
 
-    // Sample heightmap at block resolution (absolute heights, no local normalization)
+    // Sample heightmap at block resolution (1 pixel per block).
+    // Color is derived purely from block height so we can read the terrain
+    // pipeline output clearly — biome colours are irrelevant for this test.
     let mut heights = vec![0i32; BLOCKS_PER_CHUNK * BLOCKS_PER_CHUNK];
-    let mut colors = vec![[0u8; 4]; BLOCKS_PER_CHUNK * BLOCKS_PER_CHUNK];
-    let color_data = bm.to_layer_image(NoiseLayer::Biome);
 
     for bz in 0..BLOCKS_PER_CHUNK {
         for bx in 0..BLOCKS_PER_CHUNK {
@@ -569,15 +576,28 @@ fn generate_chunk_mesh(bm: &BiomeMap) -> ChunkMeshData {
             let idx = pz * bm.width + px;
             let h = *bm.heightmap.get(idx).unwrap_or(&0.0) as f32;
             heights[bz * BLOCKS_PER_CHUNK + bx] = (h * HEIGHT_SCALE).floor() as i32;
+        }
+    }
 
-            // Sample biome color
-            let ci = idx * 4;
-            if ci + 3 < color_data.len() {
-                colors[bz * BLOCKS_PER_CHUNK + bx] = [
-                    color_data[ci], color_data[ci + 1], color_data[ci + 2], 255
-                ];
-            } else {
-                colors[bz * BLOCKS_PER_CHUNK + bx] = [100, 100, 80, 255]; // fallback
+    // 2-pass 3×3 box-blur to smooth pixel-scale fBm spikes.
+    let n = BLOCKS_PER_CHUNK;
+    for _ in 0..2 {
+        let orig = heights.clone();
+        for bz in 0..n {
+            for bx in 0..n {
+                let mut sum = 0i64;
+                let mut count = 0i64;
+                for dz in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        let nx = bx as i32 + dx;
+                        let nz = bz as i32 + dz;
+                        if nx >= 0 && nz >= 0 && nx < n as i32 && nz < n as i32 {
+                            sum += orig[nz as usize * n + nx as usize] as i64;
+                            count += 1;
+                        }
+                    }
+                }
+                heights[bz * n + bx] = (sum / count) as i32;
             }
         }
     }
@@ -600,8 +620,24 @@ fn generate_chunk_mesh(bm: &BiomeMap) -> ChunkMeshData {
         heights[bz as usize * BLOCKS_PER_CHUNK + bx as usize]
     };
 
+    // Height-to-colour mapping for top faces — Minecraft-style palette so the
+    // terrain pipeline output is easy to read (water/beach/grass/stone by height).
+    let top_color_for_height = |h: i32| -> [f32; 4] {
+        if h <= 0 {
+            [0.15, 0.40, 0.75, 1.0]  // water blue
+        } else if h <= 2 {
+            [0.82, 0.76, 0.50, 1.0]  // sand / beach
+        } else if h <= 20 {
+            [0.35, 0.62, 0.22, 1.0]  // grass green
+        } else if h <= 40 {
+            [0.28, 0.50, 0.18, 1.0]  // darker highland grass
+        } else {
+            [0.65, 0.65, 0.65, 1.0]  // stone / mountain
+        }
+    };
+
     // --- Greedy meshing for TOP faces ---
-    // visited[z][x] tracks whether a block's top face has been merged
+    // Merge runs of same height AND same colour (determined by height band).
     let n = BLOCKS_PER_CHUNK;
     let mut visited = vec![false; n * n];
 
@@ -610,47 +646,41 @@ fn generate_chunk_mesh(bm: &BiomeMap) -> ChunkMeshData {
             if visited[bz * n + bx] { continue; }
 
             let h = heights[bz * n + bx];
-            let ci = bz * n + bx;
-            let [r, g, b, _] = colors[ci];
+            let top_color = top_color_for_height(h);
 
-            // Extend the run along X (same height and same color)
+            // Extend the run along X (same height)
             let mut run_x = 1;
             while bx + run_x < n {
                 let ni = bz * n + bx + run_x;
                 if visited[ni] { break; }
                 if heights[ni] != h { break; }
-                let [nr, ng, nb, _] = colors[ni];
-                if nr != r || ng != g || nb != b { break; }
                 run_x += 1;
             }
 
-            // Extend the run along Z (all blocks in the wider row must match)
+            // Extend the run along Z
             let mut run_z = 1;
             'outer: while bz + run_z < n {
                 for dx in 0..run_x {
                     let ni = (bz + run_z) * n + bx + dx;
                     if visited[ni] { break 'outer; }
                     if heights[ni] != h { break 'outer; }
-                    let [nr, ng, nb, _] = colors[ni];
-                    if nr != r || ng != g || nb != b { break 'outer; }
                 }
                 run_z += 1;
             }
 
-            // Mark all blocks in the merged quad as visited
+            // Mark visited
             for dz in 0..run_z {
                 for dx in 0..run_x {
                     visited[(bz + dz) * n + bx + dx] = true;
                 }
             }
 
-            // Emit a single merged top face quad
+            // Emit merged top face quad
             let x0 = bx as f32 * bs;
             let z0 = bz as f32 * bs;
             let y = h as f32 * bs;
             let w = run_x as f32 * bs;
             let d = run_z as f32 * bs;
-            let top_color = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
 
             let vi = positions.len() as u32;
             positions.extend_from_slice(&[
@@ -672,16 +702,12 @@ fn generate_chunk_mesh(bm: &BiomeMap) -> ChunkMeshData {
             let x0 = bx as f32 * bs;
             let z0 = bz as f32 * bs;
             let y = h as f32 * bs;
-            let ci = bz as usize * n + bx as usize;
-            let biome_rgb = [colors[ci][0], colors[ci][1], colors[ci][2]];
-
-            // Helper: emit a side face with depth-based coloring
+            // Helper: emit a side face with directional + depth-based coloring
             let mut emit_side = |normal: [f32; 3], corners: [[f32; 3]; 4], y_top: f32, y_bottom: f32| {
                 let depth = (y_top - y_bottom).abs();
                 if depth < 0.001 { return; }
-                // Use the midpoint depth for color
                 let mid_depth = depth / 2.0;
-                let color = side_color_at_depth(biome_rgb, mid_depth);
+                let color = side_color_at_depth(mid_depth, normal);
 
                 let vi = positions.len() as u32;
                 positions.extend_from_slice(&corners);
@@ -790,7 +816,7 @@ fn camera_input(
     // Mouse look
     for ev in motion.read() {
         player.yaw += ev.delta.x * MOUSE_SENS;
-        player.pitch = (player.pitch + ev.delta.y * MOUSE_SENS).clamp(-MAX_PITCH, MAX_PITCH);
+        player.pitch = (player.pitch - ev.delta.y * MOUSE_SENS).clamp(-MAX_PITCH, MAX_PITCH);
     }
 
     // WASD
@@ -902,6 +928,7 @@ fn chunk_poll(
             let mesh_handle = meshes.add(data.mesh);
             let material = materials.add(StandardMaterial {
                 base_color: Color::WHITE,
+                unlit: true,  // vertex colours carry all shading; PBR shadows cause black faces
                 perceptual_roughness: 0.9,
                 ..default()
             });
