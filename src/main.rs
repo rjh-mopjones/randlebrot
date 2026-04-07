@@ -53,6 +53,13 @@ enum Command {
         /// Tag of the level artifact to launch
         level_tag: String,
     },
+
+    /// Debug: inspect layer data for a level artifact
+    #[command(hide = true)]
+    DebugLevel {
+        /// Tag of the level artifact to inspect
+        level_tag: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -493,6 +500,13 @@ fn main() {
 
         Some(Command::Launch { level_tag }) => {
             if let Err(e) = commands::launch::run(level_tag) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+
+        Some(Command::DebugLevel { level_tag }) => {
+            if let Err(e) = commands::debug_level::run(&level_tag) {
                 eprintln!("error: {e}");
                 std::process::exit(1);
             }
