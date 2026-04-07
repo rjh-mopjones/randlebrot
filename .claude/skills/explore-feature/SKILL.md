@@ -137,33 +137,52 @@ this feature to be considered done. Usually includes an end-to-end smoke test
 or debug layer spot-check.
 ```
 
-### Sub-issue template
+### Sub-issue template (GitHub issue body — kept SHORT)
 
 ```markdown
-# <concise imperative title, e.g. "Add wind derived layer to rb_noise">
-
 ## Summary
-2-3 sentences on what this sub-issue delivers.
+One sentence describing the work item.
 
-## Crate(s)
-Which crate(s) this touches.
+## Spec
+See [`specs/<NUMBER>-<slug>.md`](../specs/<NUMBER>-<slug>.md) for full implementation details.
+```
 
-## Acceptance Criteria
-- [ ] Concrete, testable items
-- [ ] Including tests that must pass
-- [ ] Including debug layer output if visual
-- [ ] World Rules compliance (list applicable rules)
+The issue body is minimal — all substance goes in the spec file.
 
-## Documentation Updates
-- [ ] CLAUDE.md section(s) to update
-- [ ] Obsidian vault section(s) to update (if any)
+### Spec file template (in `specs/<NUMBER>-<slug>.md`)
 
-## Technical Notes
-Gotchas, decisions, codebase pointers with file paths and line numbers from
-exploration.
+For each sub-issue, create a spec file following the format in `specs/README.md`:
 
-## Agent Prompt Hint
-One-liner a Claude Code agent could use as its starting instruction.
+```markdown
+---
+issue: <NUMBER>
+title: <concise imperative title>
+crates: [rb_noise, rb_world]
+modifies:
+  - exact/file/paths.rs
+removes:                          # optional
+  - file.rs::function_to_delete
+depends_on: [<other issue numbers>]   # optional
+---
+
+## Goal
+One paragraph: what this delivers and why.
+
+## Root Cause (for bugs)
+Technical explanation. Include data, math, diagnostic output.
+
+## Implementation
+Exact code to write. Exact file locations. No ambiguity.
+The agent copies this and adapts — no interpretation needed.
+
+## Verification
+Bash commands to run. Expected output. How to confirm the fix works.
+
+## Boundary Test (if applicable)
+A test that catches the most likely regression.
+
+## Constraints
+Non-negotiable rules from CLAUDE.md, World Rules, perf targets.
 ```
 
 ### Dependency graph
@@ -186,14 +205,23 @@ level (for the user's mental model — but this is NOT encoded as labels):
 | 1     | B, C                 | A           |
 | 2     | D                    | B, C        |
 
-### Output format — shell script that wires everything up
+### Output format — spec files + shell script
 
-At the very end, after the user confirms the design, output a bash script that:
+At the very end, after the user confirms the design:
+
+**First**, write each spec file to `specs/<NUMBER>-<slug>.md` using the Write tool.
+Since issue numbers aren't known yet, use a temporary slug and note that the
+number will be filled in after the script runs.
+
+**Then**, output a bash script that:
 1. Creates the parent issue
-2. Creates each sub-issue
+2. Creates each sub-issue (body is SHORT — one sentence + link to spec)
 3. Links each sub-issue as a child of the parent via the sub-issues API
 4. Encodes inter-sub-issue dependencies via the dependencies API
-5. Prints a summary of all created issues with their numbers + ids
+5. Renames spec files from `specs/tmp-<slug>.md` to `specs/<NUMBER>-<slug>.md`
+   using the actual issue numbers returned by `gh issue create`
+6. Updates the `issue:` field in each spec's frontmatter
+7. Prints a summary
 
 Use labels `randlebrot` and `feature`. **Do not create or use `wave-N` labels.**
 
