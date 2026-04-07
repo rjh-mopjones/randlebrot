@@ -133,7 +133,7 @@ The CLI follows a **generate → view → launch** pipeline:
 
 3. **View** — `randlebrot view layers` and `randlebrot view levels` list and inspect generated artifacts. `view levels <tag>` prints detailed metadata; `view layers <tag>` opens the interactive layer viewer (see CLI Visual Tools below).
 
-4. **Launch** — `randlebrot launch <level-tag>` opens a Bevy window with Comanche-style 3D terrain rendering via `rb_voxel`. Loads the parent layers artifact for macro context (streaming chunks as the camera moves, stitching heightmap + colormap into a terrain buffer). WASD moves, mouse looks, V toggles camera mode, scroll adjusts draw distance. Press M to toggle a world map overlay with the player's position. ESC exits.
+4. **Launch** — `randlebrot launch <level-tag>` opens a Bevy 3D window with Minecraft-style block terrain. Each chunk's heightmap is converted to a Bevy `Mesh` of block faces (top faces bright, side faces dark). Local normalization stretches each chunk's height variation to 0-64 block levels. Loads the parent layers artifact for macro context. WASD moves, mouse looks, Tab releases cursor, ESC exits.
 
 5. **GUI** — `randlebrot gui [layers-tag]` (or just `randlebrot` with no args) launches the full Bevy editor. Two artifact integration paths:
    - **Auto-save after generation**: When "Generate World" completes, the user is prompted for a tag name and the result is saved via `rb_artifacts::save_layers()`. The user can skip saving.
@@ -196,7 +196,7 @@ Always use `--release` — debug builds are unacceptably slow (tile generation d
 
 ### Level Launcher (CLI)
 
-`randlebrot launch <level-tag>` opens a playable level with Comanche-style 3D terrain rendering via `rb_voxel`. It is a minimal Bevy app: `DefaultPlugins` + `EguiPlugin`. No editor stack, no world generation pipeline, no `RbPlayerPlugin` or `RbTilemapPlugin` — the terrain is rendered as a fullscreen sprite updated each frame by `rb_voxel::render_frame()`. The macro `BiomeMap` and `RiverNetwork` are loaded from the parent layers artifact (or regenerated from seed if the parent is missing).
+`randlebrot launch <level-tag>` opens a playable level with Minecraft-style 3D block terrain. It is a minimal Bevy app: `DefaultPlugins` + `EguiPlugin` + `Camera3d`. Each chunk's heightmap (derived from base noise layers via `build_local_heightmap`) is converted to a Bevy `Mesh` of block face quads. Local normalization stretches each chunk's height variation to fill 0-64 block levels. The macro `BiomeMap` and `RiverNetwork` are loaded from the parent layers artifact (or regenerated from seed if the parent is missing).
 
 **Purpose**: quick testing of a specific chunk without clicking through the GUI launcher drill-down (F4 -> generate meso -> select -> generate chunks -> select -> play). The 3D terrain view gives an intuitive sense of the heightmap, biome colors, and terrain structure.
 
@@ -215,7 +215,7 @@ Always use `--release` — debug builds are unacceptably slow (tile generation d
 **Behaviour**:
 
 - Camera spawns at the level's chunk coordinate looking along the positive-X axis.
-- Surrounding chunks generate asynchronously; their heightmap + colormap data is stitched into a 2048x2048 terrain buffer that `rb_voxel::render_frame()` consumes each frame.
+- Surrounding chunks generate asynchronously; each completed chunk is converted to a Bevy `Mesh` and spawned as an entity with `Mesh3d` + `MeshMaterial3d`.
 - Camera height auto-follows terrain (heightmap value * height_scale + offset).
 - First-person mode: eye-level view, direct forward. Third-person mode: elevated behind the camera target, looking down.
 - Press M to toggle a semi-transparent world map overlay showing the biome layer with a red dot marking the player's current position.
@@ -223,7 +223,7 @@ Always use `--release` — debug builds are unacceptably slow (tile generation d
 - Window title is `Randlebrot - Playing: <tag>`.
 - Egui HUD (non-interactive, top-left) shows level tag, coordinate, seed, player world position, camera mode, draw distance, and FPS.
 
-**Implementation**: `src/commands/launch.rs`. Follows the same pattern as `view_layers.rs` — standalone Bevy app with isolated resources (no shared state with the GUI editor). Level chunk streaming uses the same async load/poll/unload pattern, but instead of spawning tile sprites, completed chunks are blitted into a contiguous `TerrainBuffer` (heightmap + colormap). The `voxel_render_system` calls `rb_voxel::render_frame()` each frame, writing the output RGBA buffer to a Bevy `Image` on a fullscreen `Sprite`.
+**Implementation**: `src/commands/launch.rs`. Standalone Bevy app with `Camera3d`, directional light, ambient light, distance fog. Chunks stream via async `BiomeMap` generation → `build_local_heightmap()` (derives from base noise layers, not the flat derived heightmap) → `generate_chunk_mesh()` (local normalization + block face quad generation) → `Mesh3d` entity spawn. On macOS Sequoia, a `.app` bundle trampoline at `/tmp/Randlebrot.app` is used to acquire keyboard focus.
 
 ## Workspace Crate Map
 
@@ -241,7 +241,7 @@ randlebrot/
 │   ├── rb_player/        # Player controller, camera, 2D top-down interaction
 │   ├── rb_persistence/   # Delta storage, save/load (RON format)
 │   ├── rb_artifacts/     # Artifact storage: ~/.randlebrot/ layer/level persistence, manifests
-│   └── rb_voxel/         # Comanche-style voxel space terrain raycaster (pure Rust + rayon, no Bevy)
+│   └── rb_voxel/         # Voxel terrain utilities (raycaster + player marker; launch.rs uses Bevy 3D mesh rendering)
 ├── assets/
 │   ├── tilesets/         # Tileset sprite sheets
 │   ├── authored/         # Hand-placed data: plates, landmarks, key NPCs (RON files)
@@ -628,26 +628,17 @@ Example: `randlebrot generate level my-world 512,256 terminus-village` samples t
 
 ### Voxel Rendering
 
-The `rb_voxel` crate implements Comanche-style voxel space raycasting -- a column-based heightmap renderer that produces a 2.5D terrain perspective view. This is NOT Minecraft-style block voxels; it renders a 2D heightmap as a 3D-looking terrain flyover.
+The level launcher (`randlebrot launch`) uses **Bevy 3D mesh rendering** to display Minecraft-style block terrain. Each chunk's heightmap is converted to a mesh of block-face quads.
 
-**Algorithm:** For each screen column, cast a ray from near to far over the heightmap, sampling terrain height and color at regular intervals. Project each sample to a screen Y coordinate based on height difference and distance. Draw vertical color slices with front-to-back occlusion (skip already-drawn pixels). Each column is independent, making the algorithm embarrassingly parallel.
+**Block mesh generation** (`generate_chunk_mesh` in `src/commands/launch.rs`):
+1. `build_local_heightmap()` derives height from base noise layers (continentalness, peaks_valleys, tectonic, erosion, rock_hardness) — NOT the derived `heightmap` field which is flat at micro scale.
+2. **Local normalization**: find min/max across the chunk, stretch to [0, `MAX_BLOCK_HEIGHT`] (64 blocks). This makes fractal variation visible regardless of the raw noise amplitude.
+3. For each of 64×64 blocks: emit a TOP face quad (biome color) + SIDE face quads where neighbors are shorter (darker color).
+4. Vertex colors encode biome + face shading. `StandardMaterial` with vertex colors, directional + ambient light.
 
-**Key design decisions:**
-- **Pure Rust + rayon** -- no Bevy dependency, no ECS. The crate takes raw `&[f64]` heightmap and `&[u8]` RGBA colormap slices, outputs to a `&mut [u8]` RGBA buffer. The caller (e.g., a Bevy system) handles data extraction and texture upload.
-- **Bilinear interpolation** on both heightmap and colormap sampling for smooth terrain between integer coordinates.
-- **Distance fog** with quadratic falloff toward a configurable fog color.
-- **Fisheye correction** using perpendicular distance (cosine of angle offset from center).
-- **Adaptive ray stepping** -- finer steps near the camera for detail, coarser steps at distance for performance.
-- **Camera modes**: `FirstPerson` (eye-level forward view) and `ThirdPerson { distance, pitch }` (elevated behind a target point, looking down).
+**Known issue — fractal amplitude**: The noise persistence (0.59) means octaves that vary at block scale have amplitude ~0.00005. Local normalization compensates but produces relative variation only — neighbouring chunks may have different absolute heights, causing visible seams. A proper fix requires either: (a) cross-chunk normalization, (b) higher persistence at micro detail levels, or (c) a separate block-frequency noise layer (like Minecraft's multi-layer approach).
 
-**Integration path:** The caller extracts heightmap data from `BiomeMap` (via the Heightmap derived layer) and color data from `BiomeMap::to_layer_image(NoiseLayer::Biome)`, then calls `render_frame()`. The output RGBA buffer can be uploaded to a Bevy `Image` for display. The `TerrainQuery` trait from `rb_core` provides the sampling interface at meso resolution.
-
-**Performance:** ~470 FPS at 1280x720 with rayon on a 1024x1024 heightmap (release build). Target is 60+ FPS.
-
-```bash
-cargo run --release -p rb_voxel --example voxel_preview  # render sine-wave hills to PNG
-cargo test -p rb_voxel                                    # unit tests
-```
+**The `rb_voxel` crate** still contains the Comanche-style column raycaster and player marker utilities. These are no longer used by `launch.rs` but remain available for other use cases (e.g., world-map flyover preview).
 
 ## Conventions
 
