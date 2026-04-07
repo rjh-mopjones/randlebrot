@@ -10,52 +10,14 @@ Randlebrot is the engine; Margin's Grip (mgrip) is the game. The engine handles 
 
 **The `docs/` folder** in this repo is the source of truth for implementation details and technical architecture.
 
-**The `specs/` folder** contains structured specification files for open work items. Each spec is the single source of truth for what an implementation agent should build. GitHub issues track STATUS (open/closed); specs contain CONTENT (exact code, file paths, verification commands). See `specs/README.md` for the format. When implementing an issue, check `specs/<issue-number>-*.md` first — if a spec exists, it takes priority over the issue body.
-
-**When they conflict:** the Obsidian vault wins for design intent; the repo docs win for how things are currently implemented.
-
-### Repo Design Documents
-
 | Document | Covers |
 |----------|--------|
 | `docs/TERRAIN_DESIGN.md` | Noise layer system, base/derived layer architecture, river system, chunk hierarchy, GPU acceleration, seeding conventions |
-| `docs/DOMAIN_ARCHITECTURE.md` | Three-domain split (TerrainGen/LifeGen/SceneGen), interface contracts (`TerrainQuery`, `LifeGenQuery`), `LifeGenData` schema, generation pipeline, coordinate systems |
+| `docs/DOMAIN_ARCHITECTURE.md` | Three-domain split (TerrainGen/LifeGen/SceneGen), interface contracts, `LifeGenData` schema, generation pipeline, coordinate systems |
 
-### Obsidian Vault Design Documents
+**The `specs/` folder** contains structured specification files for open work items. GitHub issues track STATUS; specs contain CONTENT (exact code, file paths, verification commands). When implementing an issue, check `specs/<issue-number>-*.md` first — if a spec exists, it takes priority over the issue body.
 
-| Document | Covers |
-|----------|--------|
-| **Game World Primer** | High-level overview: 2D survival RPG, tidally locked planet, three geographic zones |
-| **Geography** | The Wash / Terminus / The Black zone definitions, temperature model, wind system, ocean upwelling |
-| **Geology & Resources** | No fossil fuels, graphite/graphene abundance, wood scarcity, nuclear fuel accessibility, metal production |
-| **Energy** | Nuclear baseload, graphite moderators, hydropower, wind, graphene supercapacitors, Haber-Bosch via electrolysis |
-| **Agriculture** | Finite Terminus farmland, continuous photosynthesis, marine upwelling, fungiculture, nuclear greenhouses |
-| **Flora & Fauna** | No green on the planet (red giant spectrum), black/purple/burgundy photosynthesis, wind-sculpted trees, nightside troglomorphism, bioluminescence, underground biosphere |
-| **History** | Himaya era, bio-magnetic mutation, The Triad and Centuria, artificial magnetosphere, space elevator destruction (20 years ago), supernova clock (~500 years) |
-| **Cultures** | Five base culture types derived from terrain, cultural drift from sim fields, bio-magnetism in daily life, post-Himaya fractures |
-| **Religion** | Place-based theology (no day/night cycle), two observable apocalypse clocks, Zenites, Penumbra, Stillborn Dawn, etc. |
-| **Factions** | 50+ factions in three tiers (States, Orders, Nomadic), Terminus/Authoritarian/Isolationist/Nightside states, religious orders, nomadic pressure fields |
-| **Economy** | Gradient Runner currency, railway-backbone trade, no long-distance road freight, trade DAG, elevator destruction economic shock |
-| **Technology** | No plastics, no asphalt, graphene-on-diamond computing, no print age, nuclear foundation, permanent wind harvesting, mycelium as standard material, bio-magnetic interfaces |
-| **Transport** | Rail as freight spine, nuclear ships, no highway network, dense walkable cities, buggies rare, airships viable |
-| **Weapons & Warfare** | Gunpowder normal (non-fuel-dependent), nuclear threshold reachable, graphene composite armour, directed energy primary, no polymer components |
-| **Randlebrot Engine** | Engine architecture, chunk hierarchy, streaming, rendering resolution, editor modes, two-seed system |
-| **World Generation** | TerrainGen/LifeGen/SceneGen pipeline, biome zones by light level, river locked constraints, province/faction generation, settlement sizing |
-| **DeterSim** | Deterministic simulation: `f(world_seed, game_time)`, time axis frequencies, province/faction fields, NPC three-tier architecture, event log, archaeology |
-| **Save System** | Minimal save: seed + time + events (kilobytes), no world state stored |
-| **Combat & Resolution** | Three input modes into one resolver, limb-based injury (Healthy→Lost), morale cohesion, positioning emphasis |
-| **Items & Crafting** | Zone-dependent gear, quality spectrum 0.0–1.0, recipe discovery, tool quality caps output |
-| **Survival & Movement** | Geographic survival pressure (heat/cold from terrain), line-of-sight required for top-down camera |
-| **Companions** | Emergent acquisition, autonomous with overridable orders, permanent death viable |
-| **Base Building** | Late-game win condition, settlement in Unclaimed fringe province, visibility penalty in sim |
-| **Player & Progression** | Four skill tracks (use-based, 1-100), Notoriety tiers, bio-magnetism hidden progression (Tier 0-5), body as progression record, no quest log |
-| **Main Quest** | Space elevator mystery, supernova clock, ~20-30 AuthoredTension structs resolved via sim |
-| **Side Quests** | Emergent from sim field imbalances, five tension types, no authored quests, no quest log |
-| **Emergent Systems** | Append-only WorldEvent log, field-based NPC instantiation, ~1M inhabitants from seed+time+events |
-| **Game Loop** | Early (nobody, survival) → Mid (local factor, companions) → Late (meaningful choice, base, faction influence) |
-| **Art & Audio** | 2D first, then voxel space raycasting (Comanche-style) as isolated crate consuming TerrainQuery |
-| **Interface** | Top-down 2D camera mandate |
-| **Geopolitics** | (Empty — covered by Factions) |
+**When they conflict:** the Obsidian vault wins for design intent; the repo docs win for how things are currently implemented.
 
 ## World Rules (Never Violate)
 
@@ -78,157 +40,72 @@ These rules derive from the game design and are non-negotiable constraints on th
 
 ### Materials & Technology
 
-- **No fossil fuels.** Organic matter converts to graphite via rapid tectonic recycling. No coal, no oil, no natural gas.
+- **No fossil fuels.** No coal, no oil, no natural gas.
 - **No plastics.** Graphene, ceramic, glass, mycelium, and natural fibers substitute everywhere.
 - **No asphalt** (petrochemical product). Roads are stone-paved or maintained tracks.
-- **Graphite/graphene is the universal abundant material** — available from early development, substitutes for both steel and plastic.
-- **Nuclear power is civilisation's baseload.** Graphite moderators enable early reactor designs. Thorium cycle viable.
-- **Wood is scarce** — forests compete with agriculture on finite Terminus land. Every tree has strategic value.
-- **Railway is the transport backbone** — no long-distance road freight (energy density problem without portable fuel). Buggies are rare tools, not commuter vehicles.
+- **Graphite/graphene is the universal abundant material.**
+- **Nuclear power is civilisation's baseload.** Graphite moderators, thorium cycle viable.
+- **Wood is scarce** — every tree has strategic value.
+- **Railway is the transport backbone** — no long-distance road freight.
 
 ### Simulation Rules
 
 - **DeterSim is deterministic**: `state(T) = baseline(seed, T) + fold(events_up_to_T)`. No live ticks, no simulation loop.
 - **Save files are minimal**: seed + time + event log. Kilobytes regardless of world size.
 - **NPC instantiation**: `hash(tile_coord, time/30, world_seed)` for monthly stable windows. Dissolved on player exit.
-- **~970 provinces**, **50+ factions**, settlements from Metropolis to Outpost. Unclaimed provinces are always Village/Outpost tier (fringe Kenshi vibe).
-- **No quest log.** Player has "observed tensions" — field imbalances the sim produces. Side quests are emergent, not authored.
-- **Two apocalypse clocks**: magnetosphere decay (observable, ~20-100 years) and supernova (~500 years). The aurora visibly dims over time.
+- **~970 provinces**, **50+ factions**, settlements from Metropolis to Outpost. Unclaimed provinces are always Village/Outpost tier.
+- **No quest log.** Side quests are emergent from sim field imbalances.
+- **Two apocalypse clocks**: magnetosphere decay (~20-100 years) and supernova (~500 years).
 
 ## Build & Run
 
 ```bash
 # ─── GUI (default) ───
-cargo run                                        # editor mode (default, same as `cargo run -- gui`)
-cargo run -- gui                                 # explicit editor launch (auto-saves after generation)
-cargo run -- gui my-layers-tag                   # editor, loading an existing layer artifact (skips generation)
+cargo run                                        # editor mode
+cargo run -- gui my-layers-tag                   # load existing artifact (skips generation)
 
-# ─── Headless generation (primary workflow — no Bevy window) ───
-cargo run --release -- generate layers 42 my-tag                        # generate layers for seed 42
-cargo run --release -- generate layers 42 my-tag --civ-seed 99          # separate civ seed
-cargo run --release -- generate layers 42 my-tag --backend cpu          # force CPU backend (default: gpu)
-cargo run --release -- generate layers 42 my-tag --force                # overwrite existing tag
-cargo run --release -- generate level my-layers-tag 4,3 level-tag       # generate level from layers artifact
-cargo run --release -- generate level --seed 42 4,3 level-tag           # generate level from raw seed
+# ─── Headless generation ───
+cargo run --release -- generate layers 42 my-tag                  # full TerrainGen + LifeGen pipeline
+cargo run --release -- generate layers 42 my-tag --civ-seed 99    # separate civ seed
+cargo run --release -- generate layers 42 my-tag --force          # overwrite existing tag
+cargo run --release -- generate level my-layers-tag 4,3 level-tag # level from layers artifact
+cargo run --release -- generate level --seed 42 4,3 level-tag     # level from raw seed
 
-# ─── View artifacts ───
-cargo run -- view layers                         # list all layer artifacts
-cargo run -- view layers my-tag                  # interactive layer viewer (Bevy window)
-cargo run -- view levels                         # list all level artifacts
-cargo run -- view levels level-tag               # inspect a specific level artifact
-
-# ─── Launch playable level (Comanche-style 3D terrain) ───
-cargo run -- launch level-tag                    # 3D terrain flyover via rb_voxel raycaster
-cargo run --release -- launch level-tag --flythrough   # automated flythrough → screenshots in /tmp/randlebrot_flythrough/
+# ─── View & Launch ───
+cargo run -- view layers [my-tag]                # list artifacts or open interactive layer viewer
+cargo run -- view levels [level-tag]             # list artifacts or inspect a level
+cargo run --release -- launch level-tag          # 3D terrain flyover
+cargo run --release -- launch level-tag --flythrough  # automated screenshots → /tmp/randlebrot_flythrough/
 
 # ─── Tests & examples ───
-cargo test                                       # workspace tests
+cargo test
 cargo run --release -p rb_noise --example save_debug_layers  # regenerate debug_layers/ PNGs
 ```
 
+**Always use `--release`** — debug builds are unacceptably slow.
+
 ## CLI Workflow
 
-The CLI follows a **generate → view → launch** pipeline:
+The CLI follows a **generate → view → launch** pipeline. All generate/list commands are headless; `view layers <tag>`, `gui`, and `launch` open a Bevy window.
 
-1. **Generate layers** — `randlebrot generate layers <seed> <tag>` runs the full TerrainGen + LifeGen pipeline headlessly (no window) and writes the result to a tagged artifact. Use `--civ-seed` to iterate on civilisation without regenerating terrain. Use `--backend cpu|gpu` to select the compute backend (default: gpu).
+**Debug layer workflow** — primary way to verify terrain changes:
+1. `cargo run --release -- generate layers <seed> <tag>`
+2. Inspect PNGs in `~/.randlebrot/layers/<tag>/images/`
+3. Iterate until correct
 
-2. **Generate level** — `randlebrot generate level <layers-tag|--seed N> <x,y> <tag>` generates a playable chunk at the given **global chunk coordinate** (see `### Chunk Grid`). The source is either a previously generated layers artifact (by tag, fast — reuses the cached macro `BiomeMap` + `RiverNetwork`) or a raw seed (slow — regenerates the macro `BiomeMap` in memory, terrain-only, no LifeGen). Coordinate is a comma-separated `x,y` pair of i32 values in the 1024×512 global chunk grid. Use `--backend cpu|gpu` and `--force` as with `generate layers`.
+Artifacts are stored in `~/.randlebrot/`:
+- `layers/<tag>/` — `manifest.ron`, `macro_biome.bin`, `river_network.bin`, `lifegen.bin`, `images/*.png` (~20 layers, 4096×2048)
+- `levels/<tag>/` — `manifest.ron`, `micro_biome.bin`
 
-3. **View** — `randlebrot view layers` and `randlebrot view levels` list and inspect generated artifacts. `view levels <tag>` prints detailed metadata; `view layers <tag>` opens the interactive layer viewer (see CLI Visual Tools below).
-
-4. **Launch** — `randlebrot launch <level-tag>` opens a Bevy 3D window with Minecraft-style block terrain. Each chunk's heightmap is converted to a Bevy `Mesh` of block faces using absolute height scaling (`HEIGHT_SCALE = 128`), so adjacent chunks share a consistent vertical reference (no seams). Top faces use greedy meshing (merging adjacent same-height/same-color blocks into larger quads). Side faces use depth-based color variation (biome color near the top, transitioning to dirt then stone). Camera auto-follows terrain height. Loads the parent layers artifact for macro context. WASD moves, mouse looks, Tab releases cursor, ESC exits.
-
-5. **GUI** — `randlebrot gui [layers-tag]` (or just `randlebrot` with no args) launches the full Bevy editor. Two artifact integration paths:
-   - **Auto-save after generation**: When "Generate World" completes, the user is prompted for a tag name and the result is saved via `rb_artifacts::save_layers()`. The user can skip saving.
-   - **Load from artifact**: `randlebrot gui my-world` loads an existing layer artifact, skips the entire generation pipeline (Config, Generating, GeneratingMacro, GeneratingLifeGen), and goes straight to the editor with all resources populated.
-
-The `generate` subcommand and the list forms of `view` are headless (no window). `view layers <tag>`, `gui`, and `launch` open a Bevy window. CLI-generated worlds can be opened in the GUI and vice versa.
-
-### Debug Layer Workflow
-
-**Use `generate layers` as the primary workflow to verify terrain changes.** After modifying noise, erosion, or biome code:
-
-1. `cargo run --release -- generate layers <seed> <tag>` (e.g. `42 debug`)
-2. Inspect the PNGs in `~/.randlebrot/layers/<tag>/images/` (biome.png, heightmap.png, etc.)
-3. Iterate until the output looks correct
-
-`generate layers` runs the full headless pipeline — macro BiomeMap (with erosion and rivers), 128 rayon-parallel macro tiles, LifeGen — and persists everything via `rb_artifacts`:
-
-- `~/.randlebrot/layers/<tag>/manifest.ron` — seed, civ_seed, timestamp, dimensions, backend
-- `~/.randlebrot/layers/<tag>/macro_biome.bin` — bincode BiomeMap
-- `~/.randlebrot/layers/<tag>/river_network.bin` — bincode RiverNetwork
-- `~/.randlebrot/layers/<tag>/lifegen.bin` — bincode LifeGenData
-- `~/.randlebrot/layers/<tag>/images/*.png` — ~20 layer PNGs (4096x2048, downscaled 2x from 8192x4096)
-
-Pass `--civ-seed N` to iterate on civilisation without regenerating terrain, `--backend cpu` to force CPU, and `--force` to overwrite an existing tag.
-
-The older `cargo run --release -p rb_noise --example save_debug_layers` is still available as a lightweight alternative — it writes PNGs to `debug_layers/` but skips artifact persistence. Use it when you only need the images and don't care about the bincode data.
-
-Always use `--release` — debug builds are unacceptably slow (tile generation dominated by noise evaluation).
+Use `--civ-seed N` to iterate on civilisation without regenerating terrain. `--force` overwrites an existing tag.
 
 ## CLI Visual Tools
 
-### Layer Viewer
+**Layer Viewer** (`src/commands/view_layers.rs`): `randlebrot view layers <tag>` — Bevy window displaying any layer PNG from the artifact. Select base + overlay layers via egui combo boxes, adjust overlay opacity. Scroll to zoom, drag to pan. Nearest-neighbor sampling keeps debug pixels crisp. 4-entry LRU texture cache.
 
-`randlebrot view layers <tag>` opens an interactive Bevy window for inspecting layer artifacts generated by `generate layers`. It is deliberately minimal — only `DefaultPlugins` + `EguiPlugin`, no editor stack, no world generation. It reads PNGs directly from `~/.randlebrot/layers/<tag>/images/` and displays them as sprites.
+**Level Launcher** (`src/commands/launch.rs`): `randlebrot launch <level-tag>` — Minecraft-style 3D block terrain. `Camera3d` (terrain) + `Camera2d` (egui HUD). Chunks stream asynchronously. `HEIGHT_SCALE = 128` (absolute, cross-chunk consistent). Greedy meshing for top faces, depth-based side shading. Press M for world map overlay. macOS Sequoia: `.app` trampoline at `/tmp/Randlebrot.app` for keyboard focus (skipped in `--flythrough` mode).
 
-**Purpose**: visually compare any layer against any other layer to understand how derived layers emerge from base layers (e.g. overlay "Rivers" on "Heightmap" to sanity-check drainage, or "Biome" on "Temperature" to spot climate bugs).
-
-**Controls**:
-
-| Control | Action |
-|---------|--------|
-| Side panel combo box | Select base layer |
-| Side panel combo box | Select overlay layer (includes "None") |
-| Side panel slider | Adjust overlay opacity (0.0-1.0) |
-| Scroll wheel | Zoom in/out |
-| Left-click drag | Pan |
-| ESC | Exit |
-
-**Behaviour**:
-
-- Default base layer is `biome.png` (falls back to first layer in manifest if absent).
-- Overlay starts at "None"; any layer can be selected as overlay from the combo box.
-- Overlay is composited at z=1 with adjustable alpha (default 0.5) on top of the base sprite at z=0, so any of the ~20 layers can be any-on-any (full combinatorial).
-- Textures are lazy-loaded and kept in a 4-entry LRU cache — only the currently displayed base + overlay consume GPU memory, with room for smooth back-and-forth cycling.
-- Egui side panel (left, ~250px) shows the tag, zoom percentage, base/overlay layer combo boxes, and overlay opacity slider.
-- Window title is `Randlebrot - Layers: <tag>`.
-- If `<tag>` does not exist, prints a clear error and exits non-zero without opening a window.
-
-**Implementation**: `src/commands/view_layers.rs`. Uses `Sprite { image, custom_size, .. }` entities rather than `AssetServer` — images are loaded via the `image` crate and converted to Bevy `Image` in-memory with nearest-neighbor sampling (so debug pixels stay crisp at high zoom).
-
-### Level Launcher (CLI)
-
-`randlebrot launch <level-tag>` opens a playable level with Minecraft-style 3D block terrain. It is a minimal Bevy app: `DefaultPlugins` + `EguiPlugin` + `Camera3d` + `Camera2d` (for egui HUD overlay). Each chunk's heightmap is converted to a Bevy `Mesh` of block face quads using absolute height scaling (`HEIGHT_SCALE = 128`). The macro `BiomeMap` and `RiverNetwork` are loaded from the parent layers artifact (or regenerated from seed if the parent is missing).
-
-**Purpose**: quick testing of a specific chunk without clicking through the GUI launcher drill-down (F4 -> generate meso -> select -> generate chunks -> select -> play). The 3D terrain view gives an intuitive sense of the heightmap, biome colors, and terrain structure.
-
-**Controls**:
-
-| Control | Action |
-|---------|--------|
-| WASD | Move forward/back/strafe relative to camera yaw |
-| Mouse | Look (yaw + pitch, clamped to +/-60 degrees) |
-| V | Toggle first-person / third-person camera |
-| Scroll wheel | Adjust draw distance (100-800, default 400) |
-| M | Toggle world map overlay |
-| Scroll wheel (map) | Zoom map overlay (when visible) |
-| ESC | Exit |
-
-**Behaviour**:
-
-- Camera spawns at the level's chunk coordinate looking along the positive-X axis.
-- Surrounding chunks generate asynchronously; each completed chunk is converted to a Bevy `Mesh` and spawned as an entity with `Mesh3d` + `MeshMaterial3d`.
-- Camera height auto-follows terrain (heightmap value * height_scale + offset).
-- First-person mode: eye-level view, direct forward. Third-person mode: elevated behind the camera target, looking down.
-- Press M to toggle a semi-transparent world map overlay showing the biome layer with a red dot marking the player's current position.
-- Parent layers artifact is loaded for macro context (fast path); if missing, macro data is regenerated from seed (slow path with a console message).
-- Window title is `Randlebrot - Playing: <tag>`.
-- Egui HUD (non-interactive, top-left) shows level tag, coordinate, seed, player world position, camera mode, draw distance, and FPS.
-
-**Implementation**: `src/commands/launch.rs`. Standalone Bevy app with `Camera3d` (order 0, terrain) + `Camera2d` (order 1, egui HUD), directional light, ambient light, distance fog. Chunks stream via async `BiomeMap` generation → `generate_chunk_mesh()` (absolute height scaling + greedy meshing for top faces + depth-based side face coloring) → `Mesh3d` entity spawn. Camera auto-follows terrain by sampling per-chunk `block_heights` grids stored in `LoadedChunks`. Movement speed is Minecraft-scale (`MOVE_SPEED = 0.067` world units/sec = ~4.3 blocks/sec). On macOS Sequoia, a `.app` bundle trampoline at `/tmp/Randlebrot.app` is used to acquire keyboard focus.
-
-**Flythrough mode**: `randlebrot launch <tag> --flythrough` runs an automated camera path through 10 waypoints (spawn view, rotations, movement, elevation changes), captures a screenshot at each waypoint via Bevy's `Screenshot` API, saves them to `/tmp/randlebrot_flythrough/frame_NNN.png`, and auto-exits. No cursor grab, no HUD, no manual input. The macOS `.app` trampoline is skipped in flythrough mode. Total duration is approximately 8 seconds. **Visual changes to the launcher MUST be verified via flythrough** — run `cargo run --release -- launch <tag> --flythrough` and inspect the output frames.
+**Visual changes to the launcher MUST be verified via flythrough** — `cargo run --release -- launch <tag> --flythrough` saves 10 waypoint frames to `/tmp/randlebrot_flythrough/frame_NNN.png`.
 
 ## Workspace Crate Map
 
@@ -277,19 +154,10 @@ rb_voxel         → rayon (no Bevy, no rb_core)
 Author the skeleton (plates, landmarks, key NPCs), let noise elaborate the detail, store only seed + player deltas.
 
 ### Narrative Gravity
-Authored content density follows a hierarchy:
 - **Capital cities**: heavily designed, full tile-by-tile authored data
 - **Towns**: light parameters (population, wealth, industry type), procedural fills the rest
 - **Villages**: just a pin + seed offset, everything generated
 - **Wilderness**: pure procedural from noise
-
-### World Orientation (Tidally Locked)
-- Temperature radiates as angular distance from the **sub-stellar point** (configurable, default: bottom-center of map)
-- **Near sub-stellar**: Scorching heat, extreme dryness
-- **Terminator ring**: Habitable crescent where civilization thrives
-- **Far from sub-stellar**: Frozen darkness, impassable wastes
-- The `sub_stellar` field in `WorldDefinition` controls the heat source position (normalized 0-1 coordinates, default `(0.5, 1.0)`)
-- Temperature is a **derived layer** computed from light level + elevation + humidity, not an independent noise strategy
 
 ### Authoring Pipeline
 1. Draw tectonic plates and coastlines (editor polygon/polyline tools)
@@ -314,113 +182,44 @@ PlayerMoved
 **DO NOT regress these.** The terrain must show:
 
 1. **Mountains at plate boundaries ONLY** — `derive_peaks_valleys` uses a cubic stress envelope (`stress³`) so plate interiors are nearly flat (amplitude 0.02) while boundaries get full amplitude. Never change this to a gentler curve.
-2. **Dendritic ridge/valley texture** — The stream power erosion sim (`erosion_sim.rs`) iterates implicit fluvial erosion vs tectonic uplift over ~120 iterations. The competition between these forces creates branching drainage patterns like real mountain ranges (reference: Arunachal Pradesh satellite imagery).
+2. **Dendritic ridge/valley texture** — The stream power erosion sim (`erosion_sim.rs`) iterates implicit fluvial erosion vs tectonic uplift over ~120 iterations. The competition creates branching drainage patterns like real mountain ranges.
 3. **Coherent river drainage** — Rivers flow from eroded mountain valleys to coast. The `RiverNetwork` uses the eroded heightmap which has proper valleys for D8 flow.
-4. **Macro erosion, meso detail** — Erosion runs once at macro level (1024×512). Meso tiles sample the eroded heightmap via nearest-neighbor and add fine-grained ridge/valley noise (`peaks * mountain_intensity * 0.2`) in high-stress zones.
-5. **45°C hard temperature gate** — Above 45°C, NO vegetation. `BiomeSplines::evaluate_with_light` forces `MoistureClass::Arid`. Tested by `nothing_green_above_45c` (90 combinations). Lapse rate in `derive_temperature` is capped at 25% of base temp so mountains can't cheat. No double lapse rate — `adjust_temperature` is a no-op.
-6. **No vegetation in bottom 25% of map** — The sun side is constant direct sunlight, ~100°C, evaporated oceans. The simulation must naturally produce no green biomes there through correct temperature/aridity modeling. Tested by `no_vegetation_in_bottom_25_percent`. Oasis is the only exception (requires water_table > 0.45 and temp < 80°C).
-7. **No vegetation within 10% radius of sub-stellar** — The hottest circular zone around the sub-stellar point (bottom center). Nothing grows, not even oases. Tested by `no_vegetation_near_sub_stellar`. These are simulation correctness tests — if they fail, the temperature model is broken.
+4. **Macro erosion, meso detail** — Erosion runs once at macro level (1024×512). Meso tiles sample the eroded heightmap via nearest-neighbor and add fine-grained ridge/valley noise in high-stress zones.
+5. **45°C hard temperature gate** — Above 45°C, NO vegetation. `BiomeSplines::evaluate_with_light` forces `MoistureClass::Arid`. Tested by `nothing_green_above_45c` (90 combinations).
+6. **No vegetation in bottom 25% of map** — ~100°C, evaporated oceans. Tested by `no_vegetation_in_bottom_25_percent`. Oasis is the only exception (water_table > 0.45 and temp < 80°C).
+7. **No vegetation within 10% radius of sub-stellar** — tested by `no_vegetation_near_sub_stellar`. If these fail, the temperature model is broken.
 
 **Verify with:** `cargo run --release -p rb_noise --example save_debug_layers` → inspect `debug_layers/derived/Heightmap.png`
 
 ### Fractal Noise Hierarchy
 
-Three detail levels with increasing octaves for progressive detail. Each tier uses `octave_offset()` to add extra noise octaves:
+See `docs/TERRAIN_DESIGN.md` for the full noise layer system (5 base + 14 derived layers, seeding conventions, GPU paths).
 
-| Level | octave_offset | Output Size | World Coverage | Use Case |
-|-------|---------------|-------------|----------------|----------|
-| **Macro** | 1 | 512×512 | 64×64 chunk | World overview tiles |
-| **Meso** | 2 | 512×512 | 8×8 area | Regional zoom |
-| **Chunk** | 3 | 512×512 | 1×1 area | Playable tilemap |
+Three detail levels:
 
-The full world (1024×512) is generated once as the base biome data. Macro tiles are pre-generated for all 128 chunks at startup. Meso tiles are generated on demand in the Level Launcher when the user clicks "Generate Mesomap" (64 tiles per macro chunk). Chunks stream around the player during play mode.
+| Level | octave_offset | World Coverage | Use Case |
+|-------|---------------|----------------|----------|
+| **Macro** | 1 | 64×64 chunk | World overview tiles (128 pre-generated) |
+| **Meso** | 2 | 8×8 area | Regional zoom (on-demand in launcher) |
+| **Chunk** | 3 | 1×1 area | Playable tilemap |
 
-**Micro-scale octave splitting** (detail_level=3): At chunk scale, the fBm's high-frequency octaves (12+) contribute <0.1% of the normalized output because `max_amplitude` is dominated by the low-frequency continental octaves. To fix this, `derive_micro_heightmap` independently normalizes octaves 12-17 and adds them with a terrain-type-dependent amplitude budget (0.05-0.25). This produces visible block-level height variation without affecting macro/meso views (detail_level < 3). The detail noise uses `OpenSimplex::new(seed.wrapping_add(50))`, created once outside the pixel loop.
+**Micro-scale octave splitting** (detail_level=3): `derive_micro_heightmap` independently normalizes fBm octaves 12-17 and adds them with terrain-type amplitude budgets (0.05–0.25). This produces visible block-level height variation without affecting macro/meso views. Detail noise uses `OpenSimplex::new(seed.wrapping_add(50))`, created once outside the pixel loop.
 
-`BiomeMap::generate_region()` supports generating any detail level for any world region:
-```rust
-BiomeMap::generate_region(
-    seed,
-    world_x, world_y,       // Top-left corner in world coords
-    world_size,             // Size of region to sample (e.g., 64.0)
-    output_size,            // Pixels (e.g., 512)
-    world_width, world_height,  // Full world dimensions (for light level calc)
-    sub_stellar,            // (f64, f64) sub-stellar point position
-    detail_level,           // octave_offset: 1=macro, 2=meso, 3=micro
-)
-```
+### Three-Domain Architecture
 
-### Noise Layer System (5 Base + 15 Derived = 20 Layers)
+See `docs/DOMAIN_ARCHITECTURE.md` for the full design document.
 
-Layers are split into **base** (independent noise) and **derived** (computed from base layers in topological order):
+> *"Would this exist if no living thing had ever touched the planet?"*
+> Yes → TerrainGen. No → LifeGen. Only visible at street level → SceneGen.
 
-**Base Layers (5)** (generated independently, parallel via rayon or GPU compute shaders):
-- **ContinentalnessStrategy**: 16-octave fBm, 0.01 scale, persistence=0.59, lacunarity=2.0 — output [-1, 1], seed+0
-- **TectonicPlatesStrategy**: Domain-warped Voronoi with PlateRegistry — outputs `TectonicSample` (boundary_distance, plate_id, stress, boundary_type, volcanism) — seed+2. **Always computed on CPU** (too complex for GPU shader). Uses 2-pass domain warping, boundary classification from plate properties, and 3-source volcanism.
-- **HumidityStrategy**: fBm + ocean distance (pure base, no light-level drying) — seed+5
-- **RockHardnessStrategy**: 3-octave fBm, scale ~80.0 — output [0, 1], seed+7
-- **LightLevelStrategy**: Radial cosine falloff from sub-stellar point + atmospheric scatter noise — output [0, 1], seed+6
+**Key boundary**: `TerrainQuery` (`rb_core/src/terrain_query.rs`) is the read-only interface between LifeGen and terrain. LifeGen reads terrain ONLY through this trait, never by importing `BiomeMap` directly. `WorldDefinition` stores parameters, not output — generated civilisation data goes in `LifeGenData`.
 
-Plus **PeaksAndValleysStrategy** (raw ridgeline noise, seed+4) as internal input.
-
-**Tectonic System** (`strategy/tectonic.rs`):
-- `PlateRegistry::from_seed()` generates 25-35 plates with velocity, density, age + 3-8 volcanic hotspots
-- 2-pass domain warping: large-scale (0.002 freq, 120 amplitude) + medium-scale (0.008 freq, 40 amplitude) for fractured boundaries
-- `BoundaryType` classified from plate velocity/density: Convergent, Subduction, OceanicSubduction, Divergent, Transform
-- Stress field: type-dependent intensity + exponential falloff + boundary perturbation noise + interior texture
-- `boundary_distance = 1 - stress` for backward compatibility with derived layers
-- **Volcanism** from 3 independent sources (never sits on boundary line):
-  - **Subduction arcs**: offset 80-200 world units inland, broken into discrete peaks by arc_mask_noise
-  - **Rift fissures**: very narrow, sparse eruption patches at divergent boundaries
-  - **Hotspots**: Gaussian blobs independent of plate geometry, with interior texture
-
-**Derived Layers (14)** (computed per-pixel from base layer results in `derived/mod.rs`):
-
-| Tier | Layer | Formula | Output |
-|------|-------|---------|--------|
-| 1 | Peaks & Valleys | `derive_peaks_valleys(raw_pv, tectonic, rock_hardness)` | [-1, 1] |
-| 1 | Volcanism | from `TectonicSample.volcanism` (3-source: arcs, rifts, hotspots) | [0, 1] |
-| 2 | Heightmap | `derive_heightmap(continentalness, tectonic, peaks_valleys)` + `derive_micro_heightmap` at detail_level>=3 | elevation |
-| 3 | Temperature | `derive_temperature(light_level, heightmap, humidity)` | ~[-80, +150]°C |
-| 3 | Erosion | `derive_erosion(heightmap, rock_hardness, humidity)` | [0, 1] |
-| 3 | River Flow | Two-tier: RiverNetwork (geology-aware D8, lakes, meandering, deltas, climate character) + legacy flat grid | [0, 1] |
-| 4 | Aridity | `derive_aridity(temperature, humidity)` | [0, 1] |
-| 4 | Precipitation Type | `derive_precipitation_type(temperature, humidity, heightmap)` | [-1, 1] |
-| 4 | River Moisture | `derive_river_moisture(river_flow)` | [0, 1] |
-| 4 | Resources | `derive_resource_richness(tectonic, rock_hardness, erosion)` | [0, 1] |
-| 5 | Snowpack | `derive_snowpack(precipitation_type, temperature)` | [0, 1] |
-| 5 | Biome | `BiomeSplines::evaluate(cont, temp, tect, erosion, pv, humid, aridity)` | TileType |
-| 6 | Vegetation Density | `derive_vegetation_density(biome, river_moisture)` | [0, 1] |
-| 6 | Soil Type | `derive_soil_type(biome, erosion, rock_hardness)` | [0, 1] |
-
-**Generation phases** in `BiomeMap::generate()`:
-1. Phase 1: Generate all base layers (parallel) — continentalness, tectonic (via `generate_full()`), humidity, rock_hardness, light_level, raw PV noise. Volcanism comes from `TectonicSample`.
-2. Phase 2: Derive per-pixel layers — peaks, heightmap, temperature, erosion, aridity, precipitation, resources, snowpack, biome
-3. Phase 3: Rivers (geology-aware D8 with rock hardness penalty + tectonic stress bonus, lake detection, meandering, delta generation, climate-aware character classification) + river_moisture + river biome overrides + vegetation + soil + volcanism biome overrides
-
-**GPU paths**: Continentalness, peaks_valleys, humidity, light_level, rock_hardness generated on GPU. Tectonic always on CPU (PlateRegistry + boundary classification too complex for WGSL).
-
-### Biome System
-Biomes determined from continentalness + temperature via `TileType::from_climate()`:
-
-| Biome | Continentalness | Temperature | Color |
-|-------|-----------------|-------------|-------|
-| Sea | < sea_level | normal | Cyan |
-| White (Ice) | < sea_level | < -15°C | White |
-| Beach | sea_level to +0.02 | > 3°C | Tan |
-| Snow | various | < 3°C | Light gray |
-| Plains | +0.02 to +0.1 | moderate | Lime green |
-| Forest | +0.1 to +0.2 | moderate | Dark green |
-| Sahara | low-mid land | > 60°C | Orange |
-| Mountain | +0.2 to +0.3 | < 70°C | Dark gray |
-| Plateau | high elevation | > 70°C | Brown |
-
-Sea level threshold: `-0.025`
+Two seeds: `WorldDefinition.seed` (terrain), `WorldDefinition.civ_seed` (lifegen — iterate politics without regenerating terrain).
 
 ### Tile System
 - 2D top-down view, 1m tiles, player is 1.5 tiles tall
 - Chunks are 64×64 tiles (~64m city blocks)
-- Tiles handle: floor type (terrain/road/building floor) and collision (passable/blocked)
+- Tiles handle: floor type (terrain/road/building floor) and collision
 - Entities handle: buildings, NPCs, interactable objects, street clutter
 - Textures use nearest-neighbor filtering for crisp pixels when zoomed
 
@@ -433,12 +232,15 @@ DetailLevel   // Macro(0) / Meso(1) / Micro(2)
 AuthoredSite  // Capital { FullCityData } | Town { TownParams } | Village { seed } | Landmark { kind }
 ChunkParameters  // district_type, wealth, density, biome — derived from noise
 DistrictPalette  // noise ranges → TilesetId + SpawnTable mappings
-BiomeMap          // Serialize + Deserialize (skips: river_network — Arc<RiverNetwork>, rebuild from terrain)
-RiverNetwork      // Serialize + Deserialize (skips: spatial_index — rebuild via rebuild_spatial_index())
-ResourceMap       // Serialize + Deserialize
-TileType          // Serialize + Deserialize
-ResourceType      // Serialize + Deserialize
-LifeGenData       // Serialize + Deserialize (all nested types: Province, FactionData, SettlementSeed, RoadSegment)
+BiomeMap         // Serialize + Deserialize (skips: river_network — Arc<RiverNetwork>, rebuild from terrain)
+RiverNetwork     // Serialize + Deserialize (skips: spatial_index — rebuild via rebuild_spatial_index())
+LifeGenData      // Serialize + Deserialize (all nested: Province, FactionData, SettlementSeed, RoadSegment)
+// Key resources in src/main.rs:
+WorldDefinition     // Serializable world config: seed, dimensions, noise params, cities, regions
+SelectedChunk       // Macro chunk selected on world map for the level launcher
+SelectedMesoTile    // Meso tile selected within the launcher grid
+RegenerationRequest // Signal to regenerate world map from updated params
+PlayableLevel       // Active playable level state (origin, seed, etc.)
 ```
 
 ### App Modes
@@ -452,200 +254,68 @@ pub enum AppMode {
 }
 ```
 
-The editor loads and saves through `rb_artifacts`. After generating a world in the GUI, the result is auto-saved as a layers artifact. The GUI can also open an existing layers artifact via `randlebrot gui <tag>`, skipping the full generation pipeline. This unifies CLI and GUI workflows: CLI-generated worlds open in the editor, editor-generated worlds are available to the CLI.
-
-### Mode Transitions
-- **F1-F4** keys switch between modes instantly
-- **World Generator** (F1): Generate procedural world, adjust noise params, save/load world definitions. "Open Artifact..." lists available layer artifacts and loads one (replacing the current world via the `LoadingArtifact` path). "Save As Artifact..." saves the current world under a new tag via `rb_artifacts` (available only when a world is generated).
-- **World Map Editor** (F2): Place cities/landmarks, draw region polygons, view overlays
-- **Chunk Editor** (F3): Select chunk from map (Ctrl+Click), edit tiles and entities
-- **Level Launcher** (F4): Multi-step drill-down from macro chunk to playable level (see below)
+The editor loads/saves through `rb_artifacts`. `randlebrot gui <tag>` loads an existing layers artifact, skipping generation. CLI-generated worlds open in the editor and vice versa.
 
 ### Level Launcher Workflow (F4 / CLI)
 
-There are two paths to a playable chunk:
+**CLI path**: `randlebrot launch <level-tag>` opens a level artifact directly.
 
-1. **GUI path (F4)** — Interactive drill-down from the world map through macro → meso → chunk selection.
-2. **CLI path** — `randlebrot launch <level-tag>` opens a level artifact directly. Loads the parent layers artifact for macro context, spawns the player, streams chunks. Press M to toggle a world map overlay showing the player's position.
-
-#### GUI Launcher (F4)
-
-The Level Launcher uses a phase-based state machine (`LauncherPhase` resource) to guide the user from world map selection to a playable chunk:
+**GUI path (F4)** — phase-based state machine:
 
 ```
 World Map (F1)          Level Launcher (F4)
-┌──────────────┐        ┌──────────────────────────────────────────────────┐
-│ Click macro  │──F4──▶ │ MacroView: enlarged selected chunk               │
-│ chunk to     │        │   └─▶ "Generate Mesomap" button                  │
-│ select it    │        │                                                  │
-│              │        │ GeneratingMeso: async 64-tile generation + bar   │
-│              │        │                                                  │
+┌──────────────┐        ┌─────────────────────────────────────────────────┐
+│ Click macro  │──F4──▶ │ MacroView: enlarged selected chunk              │
+│ chunk to     │        │   └─▶ "Generate Mesomap" button                 │
+│ select it    │        │ GeneratingMeso: async 64-tile generation + bar  │
 │              │        │ MesoView: 8×8 meso grid, click to select tile   │
-│              │        │   └─▶ "Generate Chunks" button                   │
-│              │        │                                                  │
-│              │        │ GeneratingMicro: async 64-tile generation + bar  │
-│              │        │                                                  │
-│              │        │ MicroView: 8×8 chunk grid, click to select tile  │
-│              │        │   └─▶ "Play" button + "Save Level" button        │
-│              │        │                                                  │
-│              │        │ Playing: chunks stream around player             │
-│              │        │   └─▶ "Save Level" button                        │
-│              │        │   └─▶ ESC returns to MicroView (not full exit)   │
-└──────────────┘        └──────────────────────────────────────────────────┘
+│              │        │   └─▶ "Generate Chunks" button                  │
+│              │        │ GeneratingMicro: async 64-tile generation + bar │
+│              │        │ MicroView: 8×8 chunk grid, click to select tile │
+│              │        │   └─▶ "Play" + "Save Level" buttons             │
+│              │        │ Playing: chunks stream around player            │
+│              │        │   └─▶ ESC returns to MicroView                  │
+└──────────────┘        └─────────────────────────────────────────────────┘
 ```
 
-**Phase flow:**
-1. **MacroView** — Shows the selected macro chunk enlarged (512px display). Side panel shows chunk coords and "Generate Mesomap" button.
-2. **GeneratingMeso** — Async generates all 64 meso tiles (8×8 grid within the chunk, each 8×8 world units at 512px, detail_level=2). Progress bar shown.
-3. **MesoView** — Displays the 8×8 meso grid. Hover highlights tiles, click to select. Side panel shows meso tile coords and "Generate Chunks" button.
-4. **GeneratingMicro** — Async generates all 64 chunks (8×8 grid within the meso tile, each 1×1 world unit at 512px, detail_level=3). Progress bar shown.
-5. **MicroView** — Displays the 8×8 chunk grid. Click to select a chunk. Side panel shows chunk coords, "Play" button, and "Save Level" button.
-6. **Playing** — Chunks (detail_level=3) stream around the player. "Save Level" button available. ESC returns to MicroView (chunk sprites re-shown, not all the way back to world map).
+**Save Level** coordinate conversion: `global_x = chunk_x * 64 + meso_x * 8 + micro_x`. Saved levels appear in `randlebrot view levels`.
 
-**Save Level** — Available in MicroView and Playing phases when a chunk is selected. Prompts for a tag name, then persists the chunk BiomeMap and a `LevelManifest` (with global chunk coordinates) via `rb_artifacts::save_level()`. The local launcher coordinates (0..8 within meso) are converted to global CLI coordinates (0..1024, 0..512) using the macro chunk + meso tile offsets: `global_x = chunk_x * 64 + meso_x * 8 + micro_x`. Saved levels appear in `randlebrot view levels` output.
+**Key launcher types** (`LauncherPhase`, signal resources): `LauncherPhase` (MacroView|GeneratingMeso|MesoView|GeneratingMicro|MicroView|Playing), `GenerateMesoRequest`, `LaunchLevelRequest`, `StartPlayRequest`, `SaveLevelRequest`, `MesoTileCache`, `MicroTileCache`, `MesoPregenState`, `MicroPregenState`.
 
-**Key implementation details:**
-- World map pool sprites are hidden on `OnEnter(LevelLauncher)` and re-shown on `OnExit(LevelLauncher)`
-- Meso tiles are generated via `AsyncComputeTaskPool` with `MACRO_PREGEN_CONCURRENCY` parallelism
-- `MesoTileCache` stores generated textures; `MesoPregenState` tracks generation progress
-- `MicroTileCache` stores generated chunk textures + `Arc<BiomeMap>` for save
-- Camera pan works in all launcher phases; zoom is available in MesoView/MicroView
-- `LauncherMacroSprite`, `LauncherMesoSprite`, `LauncherMicroSprite`, `MesoHighlight`, `MicroHighlight` entities are all cleaned up on exit
+### Chunk Grid
 
-**Key types:**
-```rust
-LauncherPhase        // MacroView | GeneratingMeso | MesoView | GeneratingMicro | MicroView | Playing
-GenerateMesoRequest  // Signal resource: user clicked "Generate Mesomap"
-LaunchLevelRequest   // Signal resource: user clicked "Generate Chunks"
-StartPlayRequest     // Signal resource: user clicked "Play"
-SaveLevelRequest     // Signal resource: user confirmed a level tag for save
-SaveLevelUiState     // UI state for the save dialog (tag input, status message)
-SelectedChunk        // Macro chunk selected on world map (chunk_coord, origin)
-SelectedMesoTile     // Meso tile selected in launcher grid (meso_coord, origin)
-SelectedMicroTile    // Chunk selected in launcher grid (micro_coord, origin)
-MesoTileCache        // HashMap<(i32,i32), MesoCachedTile> + sprite entity list
-MicroTileCache       // HashMap<(i32,i32), MicroCachedTile> + chunk sprite entity list
-MesoPregenState      // Tracks async meso generation (total, completed, remaining, in_flight)
-MicroPregenState     // Tracks async chunk generation (total, completed, remaining, in_flight)
-PlayableLevel        // Active level state (origin, chunk_coord, seed, world_height)
-```
+The world is **1024×512 world units** in a nested hierarchy:
 
-### Key Resources
-```rust
-WorldDefinition     // Serializable world config: seed, dimensions, noise params, cities, regions
-SelectedChunk       // Macro chunk selected on world map for the level launcher
-SelectedMesoTile    // Meso tile selected within the launcher grid
-RegenerationRequest // Signal to regenerate world map from updated params
-CursorWorldPos      // Cursor position in world coordinates for chunk highlighting
-PlayableLevel       // Active playable level state (origin, seed, etc.)
-LoadLayersTag       // CLI-provided layers tag for load-from-artifact (`gui <tag>`)
-ArtifactSaveState   // Post-generation save dialog state (tag input, error, saving flag)
-```
+| Level | World units per tile | Grid       | Total tiles |
+|-------|----------------------|------------|-------------|
+| Macro | 64 × 64              | 16 × 8     | 128         |
+| Meso  | 8 × 8                | 128 × 64   | 8,192       |
+| Chunk | 1 × 1                | 1024 × 512 | 524,288     |
 
-### Artifact Storage
+All three levels render to 512px BiomeMap output. `TILE_MAP_SIZE = 512`, `CHUNK_WORLD_SIZE = 1.0`.
 
-The `rb_artifacts` crate manages `~/.randlebrot/` for persistent layer and level artifacts.
-
-```
-~/.randlebrot/
-├── layers/
-│   └── <tag>/
-│       ├── manifest.ron           # LayerManifest (seed, civ_seed, timestamp, dims, backend, layer list)
-│       ├── macro_biome.bin        # bincode: BiomeMap (1024×512 macro)
-│       ├── river_network.bin      # bincode: RiverNetwork (separate from BiomeMap — Arc is serde(skip))
-│       ├── lifegen.bin            # bincode: LifeGenData
-│       └── images/                # layer PNGs (4096×2048, same as save_debug_layers output)
-│           ├── biome.png
-│           ├── heightmap.png
-│           └── ... (~20 layers)
-└── levels/
-    └── <tag>/
-        ├── manifest.ron           # LevelManifest (parent layers tag, seed, civ_seed, chunk coord, timestamp)
-        └── micro_biome.bin        # bincode: chunk-level BiomeMap
-```
-
-**Estimated sizes:** Layer artifacts are ~200-400 MB (dominated by bincode BiomeMap at 1024×512 with ~20 f64 layers + LifeGenData at 8192×4096). Layer PNGs add ~20-40 MB. Level artifacts are much smaller (~50-100 MB for a single chunk BiomeMap).
-
-**Tags:** Alphanumeric + hyphens + underscores only. Used as directory names.
-
-**Manifests:** Pretty-printed RON for human readability. `LayerManifest` records seed, civ_seed, world dimensions, backend used, and list of available image filenames. `LevelManifest` records the parent layers tag, seed, civ_seed, chunk coordinate, and timestamp.
+**Coordinate conventions** — do not mix:
+- **GUI launcher local** (`SelectedMicroTile.micro_coord`): local `0..8` indices within a meso tile. Used only in the launcher state machine.
+- **CLI global chunk** (`LevelManifest.chunk_coord`, `generate level` args): global `cx ∈ [0, 1024)`, `cy ∈ [0, 512)`. Canonical module: `src/cli/coords.rs` — use `chunk_coord_to_world_pos` and `validate_chunk_coord` from every CLI surface.
 
 ### Map Navigation & Controls
 
 | Control | Context | Action |
 |---------|---------|--------|
 | **Scroll wheel** | World map / Launcher / Layer Viewer | Zoom in/out |
-| **Left-click drag** | World map / Launcher / Layer Viewer | Pan the map |
-| **Arrow keys** | World map / Launcher | Pan the map |
+| **Left-click drag** | World map / Launcher / Layer Viewer | Pan |
+| **Arrow keys** | World map / Launcher | Pan |
 | **Left-click** | World map | Select macro chunk |
-| **Left-click** | Launcher (MesoView) | Select meso tile |
+| **Left-click** | Launcher MesoView/MicroView | Select tile |
 | **Space** | World map | Cycle layer view |
 | **F1-F4** | Any | Switch editor modes |
-| **ESC** | Launcher (Playing) | Return to MesoView |
-| **Side panel** | Layer Viewer | Select base/overlay layer, adjust opacity |
-| **ESC** | Layer Viewer | Exit |
-| **WASD** | Launch (3D terrain) | Move forward/back/strafe relative to camera yaw |
-| **Mouse** | Launch (3D terrain) | Look (yaw + pitch) |
-| **V** | Launch (3D terrain) | Toggle first-person / third-person camera |
-| **Scroll wheel** | Launch (3D terrain) | Adjust draw distance (100-800) |
-| **M** | Launch (3D terrain) | Toggle world map overlay |
-| **Scroll wheel** | Launch (Map overlay) | Zoom map overlay |
-| **ESC** | Launch (3D terrain) | Exit |
-
-### World Map View
-
-The world map (F1) displays only macro-level tiles. Meso and chunk detail are accessed through the Level Launcher (F4).
-
-- **Macro tiles**: Pre-generated 128 tiles (16×8 grid) covering the full 1024×512 world, each 64×64 world units at 512×512 pixels, detail_level=1
-- **Zoom range**: Camera scale 0.05–10.0, all at macro resolution
-- **Chunk highlighting**: Hover shows which macro tile the cursor is over
-- **Click to select**: Left-click selects a macro chunk (stores `SelectedChunk`), then press F4 to enter Level Launcher
-- **No on-scroll streaming**: Meso/chunk tiles are never generated on the world map screen
-
-**Debug layer export**: After macro pre-generation, all 128 tiles are stitched into full-world PNGs (8192×4096) saved to `debug_layers/`. This exports exactly what the world map displays.
-
-### Chunk Grid
-
-The world is **1024×512 world units**, organised into a nested chunk hierarchy. All constants below match the canonical values in `src/cli/coords.rs` and `src/main.rs`.
-
-| Level | World units per tile | Grid          | Total tiles |
-|-------|----------------------|---------------|-------------|
-| Macro | 64 × 64              | 16 × 8        | 128         |
-| Meso  | 8 × 8                | 128 × 64      | 8,192       |
-| Chunk | 1 × 1                | 1024 × 512    | 524,288     |
-
-- `CHUNK_SIZE = 64.0` world units (macro chunk size, also the terminology used for level launcher entry)
-- `MESO_WORLD_SIZE = 8.0` world units (8×8 meso tiles inside a macro chunk = 64 per macro)
-- `CHUNK_WORLD_SIZE = 1.0` world units (8×8 chunks inside a meso tile = 64 per meso; 524,288 total globally)
-- All three levels render to a `TILE_MAP_SIZE = 512` pixel BiomeMap regardless of world coverage
-- `detail_level` octave offsets: `1` = macro, `2` = meso, `3` = chunk
-
-#### Coordinate conventions
-
-**Macro / chunk coordinates** (GUI world map, `SelectedChunk`): `(chunk_x, chunk_y)` where `chunk_x = floor(world_x / CHUNK_SIZE)`. Range: `0..16 × 0..8 = 128`.
-
-**Meso coordinates** (launcher 8×8 grid, `SelectedMesoTile`): **local** indices `0..8 × 0..8` within a single macro chunk. Convert to world position via `meso_origin + (mx, my) * MESO_WORLD_SIZE`.
-
-**Chunk coordinates** have **two different conventions** — do not mix them:
-
-1. **GUI launcher local** (`SelectedMicroTile.micro_coord`): local indices `0..8 × 0..8` within a selected meso tile. World position = `meso_origin + (local_x, local_y) * CHUNK_WORLD_SIZE`. Used only inside the level launcher state machine.
-2. **CLI global chunk** (`LevelManifest.chunk_coord`, `generate level` / `view levels` args): **global** indices `(cx, cy)` where `cx ∈ [0, 1024)` and `cy ∈ [0, 512)`. World position = `(cx * CHUNK_WORLD_SIZE, cy * CHUNK_WORLD_SIZE) = (cx, cy)` (since `CHUNK_WORLD_SIZE = 1.0`). The canonical module is `src/cli/coords.rs` — use `cli::coords::chunk_coord_to_world_pos` and `cli::coords::validate_chunk_coord` from every CLI surface that touches a chunk coordinate.
-
-Example: `randlebrot generate level my-world 512,256 terminus-village` samples the 1×1 chunk whose top-left corner is at world `(512, 256)` — the approximate centre of the map.
-
-### Voxel Rendering
-
-The level launcher (`randlebrot launch`) uses **Bevy 3D mesh rendering** to display Minecraft-style block terrain. Each chunk's heightmap is converted to a mesh of block-face quads.
-
-**Block mesh generation** (`generate_chunk_mesh` in `src/commands/launch.rs`):
-1. Uses the derived `heightmap` field from `BiomeMap` directly. At micro scale (detail_level=3), this includes independently-normalized high-frequency detail from `derive_micro_heightmap` (octaves 12-17 with terrain-type amplitude budgets 0.05-0.25).
-2. **Absolute height scaling**: `block_y = floor(raw_height * HEIGHT_SCALE)` where `HEIGHT_SCALE = 128`. All chunks share a consistent vertical reference, eliminating seams at chunk boundaries.
-3. **Greedy meshing** for top faces: adjacent blocks with the same height and biome color are merged into larger quads (scan rows along X, then extend along Z). Typically 5-10x vertex reduction.
-4. **Depth-based side face coloring**: top of the cliff face uses darkened biome color, transitioning to dirt color at 1 block depth, then stone at 3+ blocks. This replaces the old uniform dark shading.
-5. **Terrain height following**: each chunk stores a `block_heights` grid (64x64 f32 values). The camera samples this grid each frame to set Y = ground + `EYE_HEIGHT`.
-6. Vertex colors encode biome + face shading. `StandardMaterial` with vertex colors, directional + ambient light.
-
-**The `rb_voxel` crate** still contains the Comanche-style column raycaster and player marker utilities. These are no longer used by `launch.rs` but remain available for other use cases (e.g., world-map flyover preview).
+| **ESC** | Launcher Playing | Return to MicroView |
+| **WASD** | Launch 3D terrain | Move (relative to camera yaw) |
+| **Mouse** | Launch 3D terrain | Look (yaw + pitch, ±60°) |
+| **V** | Launch 3D terrain | Toggle first/third-person camera |
+| **Scroll wheel** | Launch 3D terrain | Adjust draw distance (100-800) |
+| **M** | Launch 3D terrain | Toggle world map overlay |
+| **ESC** | Launch 3D terrain | Exit |
 
 ## Conventions
 
@@ -659,61 +329,8 @@ The level launcher (`randlebrot launch`) uses **Bevy 3D mesh rendering** to disp
 - Prefer `&impl Trait` over `Box<dyn Trait>` except where type erasure is required for storage
 - Noise-only code (strategies, chunk hierarchy) should not depend on Bevy rendering — keep the Bevy Resource wrapper thin
 
-## Prototype Code Reference
-
-Two prototype files exist that contain working noise logic to port:
-- `Climate_Noise_Maps_with_Strategy_Pattern.txt` — NoiseStrategy trait, ContinentalnessStrategy, TemperatureStrategy, ClimateMap. Uses the `noise` crate's OpenSimplex. This version takes `(x: usize, y: usize, width, height)`.
-- `Complete_Nested_Chunk_Hierarchy.txt` — MacroChunk/MesoChunk/MicroChunk with LRU caching, WorldChunks top-level struct. Uses a different NoiseStrategy trait signature: `generate(&self, x: f64, y: f64, detail_level: u32) -> f64`. This is the version to follow for the chunk hierarchy; reconcile the trait signatures during porting.
-
-When porting: use the `generate(x: f64, y: f64, detail_level: u32)` signature from the chunk hierarchy prototype. The strategy impls should be adapted from the climate map prototype's fBm logic but converted to use f64 world coordinates instead of usize pixel coordinates.
-
 ## Bevy Version
 Pin to `bevy = "0.18"` in workspace Cargo.toml. All crate dependencies on bevy sub-crates should use `workspace = true`.
-
-## Three-Domain Architecture
-
-See `docs/DOMAIN_ARCHITECTURE.md` for the full design document.
-
-### Domain Boundaries
-
-> *"Would this exist if no living thing had ever touched the planet?"*
-> Yes → TerrainGen. No → LifeGen. Only visible at street level → SceneGen.
-
-- **TerrainGen** (`rb_noise`): Dead planet. Noise layers, biomes, rivers, erosion. Output is immutable after generation.
-- **LifeGen** (`rb_world`): Civilisation. Reads terrain via `TerrainQuery` trait in `rb_core`. Provinces, factions, settlements, roads, trade. Operates at 8192×4096 meso pixel resolution.
-- **SceneGen** (future): Chunk-level tile generation for settlements. Pure function from terrain + lifegen inputs. No state, no cache.
-
-### Interface Contracts
-
-- **`TerrainQuery`** (`rb_core/src/terrain_query.rs`): Read-only trait for sampling the dead planet at meso pixel resolution. `MesoTerrainView` in `rb_noise` wraps the 128 cached `Arc<BiomeMap>` tiles and implements this trait.
-- **`LifeGenQuery`** (`rb_core/src/lifegen_query.rs`): Read-only trait for querying civilisation data. Implemented on `LifeGenData`.
-- **`TerrainQuery` is the boundary.** LifeGen reads terrain ONLY through this trait, never by importing `BiomeMap` directly. (Legacy code in `rb_world` still uses `BiomeMap` — migration is ongoing.)
-- **`WorldDefinition` stores parameters, not output.** Generated civilisation data goes in `LifeGenData`, not `WorldDefinition`. (Legacy fields like `cities`, `factions`, `roads` still exist in `WorldDefinition` — migration is ongoing.)
-
-### LifeGen Resolution
-
-- LifeGen operates at **8192×4096** (the stitched meso terrain resolution)
-- Coordinate mapping: `meso_x = world_x * 8.0`, `meso_y = world_y * 8.0`
-- Each meso pixel maps to chunk + local: `chunk_x = meso_x / 512`, `local_x = meso_x % 512`
-- Debug PNGs saved to `debug_layers/lifegen/` at 8192×4096, downscaled 2× like terrain layers
-
-### LifeGen Data (`rb_world/src/lifegen_data.rs`)
-
-```rust
-LifeGenData {
-    // Analysis grids (8192×4096, continuous f32)
-    habitability, navigation_cost, resource_desirability,
-    // Province bitmap (8192×4096, u16 per pixel)
-    province_ids, provinces: Vec<Province>,
-    // Faction, settlement, road data
-    faction_ids, factions, settlement_seeds, road_segments,
-}
-```
-
-### Separate Seeds
-
-- `WorldDefinition.seed` — terrain seed
-- `WorldDefinition.civ_seed` — lifegen seed (allows iterating on politics without regenerating terrain)
 
 ## Sub-Agent Routing Rules
 
