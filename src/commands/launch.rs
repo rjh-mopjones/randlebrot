@@ -259,6 +259,10 @@ struct FlyThroughState {
 impl FlyThroughState {
     fn new() -> Self {
         let output_dir = PathBuf::from("/tmp/randlebrot_flythrough");
+        // Clean old frames from previous runs
+        if output_dir.exists() {
+            let _ = std::fs::remove_dir_all(&output_dir);
+        }
         std::fs::create_dir_all(&output_dir).expect("create flythrough output dir");
         Self {
             waypoints: vec![
