@@ -119,6 +119,7 @@ cargo run -- view levels level-tag               # inspect a specific level arti
 
 # ─── Launch playable level (Comanche-style 3D terrain) ───
 cargo run -- launch level-tag                    # 3D terrain flyover via rb_voxel raycaster
+cargo run --release -- launch level-tag --flythrough   # automated flythrough → screenshots in /tmp/randlebrot_flythrough/
 
 # ─── Tests & examples ───
 cargo test                                       # workspace tests
@@ -226,6 +227,8 @@ Always use `--release` — debug builds are unacceptably slow (tile generation d
 - Egui HUD (non-interactive, top-left) shows level tag, coordinate, seed, player world position, camera mode, draw distance, and FPS.
 
 **Implementation**: `src/commands/launch.rs`. Standalone Bevy app with `Camera3d`, directional light, ambient light, distance fog. Chunks stream via async `BiomeMap` generation → `build_local_heightmap()` (derives from base noise layers, not the flat derived heightmap) → `generate_chunk_mesh()` (local normalization + block face quad generation) → `Mesh3d` entity spawn. On macOS Sequoia, a `.app` bundle trampoline at `/tmp/Randlebrot.app` is used to acquire keyboard focus.
+
+**Flythrough mode**: `randlebrot launch <tag> --flythrough` runs an automated camera path through 10 waypoints (spawn view, rotations, movement, elevation changes), captures a screenshot at each waypoint via Bevy's `Screenshot` API, saves them to `/tmp/randlebrot_flythrough/frame_NNN.png`, and auto-exits. No cursor grab, no HUD, no manual input. The macOS `.app` trampoline is skipped in flythrough mode. Total duration is approximately 8 seconds. **Visual changes to the launcher MUST be verified via flythrough** — run `cargo run --release -- launch <tag> --flythrough` and inspect the output frames.
 
 ## Workspace Crate Map
 
