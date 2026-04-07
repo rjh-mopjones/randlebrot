@@ -1,3 +1,4 @@
+use noise::OpenSimplex;
 use rayon::prelude::*;
 use rb_core::{NoiseStrategy, TileType};
 use serde::{Deserialize, Serialize};
@@ -1076,6 +1077,7 @@ impl BiomeMap {
         );
         let rock_hardness_strategy = RockHardnessStrategy::new_wrapping(seed.wrapping_add(7), world_width);
         let splines = BiomeSplines::new(SEA_LEVEL);
+        let detail_noise = OpenSimplex::new(seed.wrapping_add(50));
 
         let total_pixels = output_size * output_size;
         let scale = world_size / output_size as f64;
@@ -1114,6 +1116,11 @@ impl BiomeMap {
                 let peaks = derived::derive_peaks_valleys(raw_peaks, tect, rock);
                 let volc = tect_sample.volcanism;
                 let hm = derived::derive_heightmap(cont, tect, peaks);
+                let hm = if detail_level >= 3 {
+                    derived::derive_micro_heightmap(hm, wx, wy, &detail_noise)
+                } else {
+                    hm
+                };
                 let temp = derived::derive_temperature(light, hm, humid, cont);
                 let eros = derived::derive_erosion(hm, rock, humid);
                 let arid = derived::derive_aridity(temp, humid);
@@ -1286,6 +1293,7 @@ impl BiomeMap {
         );
         let rock_hardness_strategy = RockHardnessStrategy::new_wrapping(seed.wrapping_add(7), world_width);
         let splines = BiomeSplines::new(SEA_LEVEL);
+        let detail_noise = OpenSimplex::new(seed.wrapping_add(50));
 
         let total_pixels = output_size * output_size;
         let scale = world_size / output_size as f64;
@@ -1319,6 +1327,11 @@ impl BiomeMap {
                     let peaks = derived::derive_peaks_valleys(raw_peaks, tect, rock);
                     let volc = tect_sample.volcanism;
                     let hm = derived::derive_heightmap(cont, tect, peaks);
+                    let hm = if detail_level >= 3 {
+                        derived::derive_micro_heightmap(hm, wx, wy, &detail_noise)
+                    } else {
+                        hm
+                    };
                     let temp = derived::derive_temperature(light, hm, humid, cont);
                     let eros = derived::derive_erosion(hm, rock, humid);
                     let arid = derived::derive_aridity(temp, humid);
@@ -1633,6 +1646,7 @@ impl BiomeMap {
 
         // Derive all per-pixel layers in parallel
         let splines = BiomeSplines::new(SEA_LEVEL);
+        let detail_noise = OpenSimplex::new(seed.wrapping_add(50));
         let derived_data: Vec<_> = (0..total_pixels)
             .into_par_iter()
             .map(|idx| {
@@ -1644,9 +1658,16 @@ impl BiomeMap {
 
                 let px = idx % output_size;
                 let py = idx / output_size;
+                let wx = world_x + (px as f64 * scale);
+                let wy = world_y + (py as f64 * scale);
                 let peaks = derived::derive_peaks_valleys(raw_peaks[idx], tect, rock);
                 let volc = tectonic_volcanism[idx];
                 let hm = derived::derive_heightmap(cont, tect, peaks);
+                let hm = if detail_level >= 3 {
+                    derived::derive_micro_heightmap(hm, wx, wy, &detail_noise)
+                } else {
+                    hm
+                };
                 let temp = derived::derive_temperature(light, hm, humid, cont);
                 let eros = derived::derive_erosion(hm, rock, humid);
                 let arid = derived::derive_aridity(temp, humid);
@@ -2027,5 +2048,47 @@ mod tests {
         assert_eq!(map.world_height, decoded.world_height);
         // river_network is skipped (Arc<RiverNetwork>), so it deserializes as None
         assert!(decoded.river_network.is_none());
+    }
+
+    #[test]
+    fn chunk_boundary_heights_deterministic() {
+        // Generate the same chunk twice — must produce identical heightmaps.
+        // This verifies that derive_micro_heightmap is deterministic and
+        // uses absolute world coordinates (not chunk-local ones).
+        let bm_a = BiomeMap::generate_meso_full_with_backend(
+            42, 200.0, 180.0, 1.0, 512, 512.0, 3, None, NoiseBackend::Cpu, None, None,
+        );
+        let bm_b = BiomeMap::generate_meso_full_with_backend(
+            42, 200.0, 180.0, 1.0, 512, 512.0, 3, None, NoiseBackend::Cpu, None, None,
+        );
+
+        // Every pixel must match exactly (same seed, same coordinates).
+        for i in 0..bm_a.heightmap.len() {
+            assert!(
+                (bm_a.heightmap[i] - bm_b.heightmap[i]).abs() < 1e-14,
+                "heightmap mismatch at pixel {i}: {} vs {}",
+                bm_a.heightmap[i],
+                bm_b.heightmap[i],
+            );
+        }
+    }
+
+    #[test]
+    fn micro_heightmap_has_variation() {
+        // At detail_level=3 (micro), the heightmap should have meaningful
+        // block-level variation thanks to derive_micro_heightmap.
+        let bm = BiomeMap::generate_meso_full_with_backend(
+            42, 200.0, 180.0, 1.0, 512, 512.0, 3, None, NoiseBackend::Cpu, None, None,
+        );
+
+        let hmin = bm.heightmap.iter().cloned().fold(f64::INFINITY, f64::min);
+        let hmax = bm.heightmap.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let span = hmax - hmin;
+
+        // Before the fix, span was ~0.004. After, it should be >0.05.
+        assert!(
+            span > 0.05,
+            "micro heightmap span {span:.6} is too small — derive_micro_heightmap may not be working"
+        );
     }
 }
