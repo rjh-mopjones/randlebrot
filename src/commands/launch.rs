@@ -48,9 +48,14 @@ const BLOCKS_PER_CHUNK: usize = 64;
 const BLOCK_WORLD_SIZE: f32 = 1.0;
 const CHUNK_BEVY_SIZE: f32 = BLOCKS_PER_CHUNK as f32 * BLOCK_WORLD_SIZE;
 
-/// Max block height range per chunk — local normalization stretches whatever
-/// height variation exists to fill this many block levels.
-const MAX_BLOCK_HEIGHT: f32 = 64.0;
+/// Height scale: multiplier from raw heightmap values to block Y position.
+/// Absolute height so that all chunks share a consistent vertical reference.
+const HEIGHT_SCALE: f32 = 128.0;
+
+/// Dirt layer colors (RGB, 0-255).
+const DIRT_COLOR: [u8; 3] = [101, 67, 33];
+/// Stone layer color (RGB, 0-255).
+const STONE_COLOR: [u8; 3] = [120, 120, 120];
 
 /// Chunk load radius.
 const LOAD_RADIUS: i32 = 8;
@@ -62,10 +67,12 @@ const UNLOAD_RADIUS: i32 = 10;
 const MAX_CONCURRENT: usize = 4;
 
 /// Player movement speed (world units per second).
-const MOVE_SPEED: f32 = 2.0;
+/// Minecraft walk speed is ~4.3 blocks/sec. With 64 blocks per chunk
+/// (1 world unit), that maps to 4.3/64 ~ 0.067 world units/sec.
+const MOVE_SPEED: f32 = 0.067;
 
-/// Mouse look sensitivity.
-const MOUSE_SENS: f32 = 0.002;
+/// Mouse look sensitivity (tuned for natural feel at ~1280x720).
+const MOUSE_SENS: f32 = 0.003;
 
 /// Pitch clamp (±60 degrees).
 const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_3;
@@ -223,12 +230,21 @@ struct ChunkTask {
 
 struct ChunkMeshData {
     mesh: Mesh,
-    biome_map: BiomeMap,
+    /// Block heights grid (BLOCKS_PER_CHUNK x BLOCKS_PER_CHUNK) for terrain following.
+    block_heights: Vec<f32>,
+}
+
+/// Stores per-chunk height data for terrain following.
+struct ChunkHeightInfo {
+    entity: Entity,
+    /// Block heights (BLOCKS_PER_CHUNK x BLOCKS_PER_CHUNK). Each entry is the
+    /// Y position (in Bevy world units) of the top of the block at that grid cell.
+    block_heights: Vec<f32>,
 }
 
 #[derive(Resource, Default)]
 struct LoadedChunks {
-    entities: HashMap<(i32, i32), Entity>,
+    chunks: HashMap<(i32, i32), ChunkHeightInfo>,
 }
 
 #[derive(Resource)]
@@ -398,33 +414,18 @@ fn setup_scene(
     let chunk_bx = manifest.chunk_coord.0 as f32 * CHUNK_BEVY_SIZE;
     let chunk_bz = manifest.chunk_coord.1 as f32 * CHUNK_BEVY_SIZE;
 
-    // Camera spawns at center of chunk, on the ground
-    // Find local min/max for normalization (same as generate_chunk_mesh)
+    // Camera spawns at center of chunk, on the ground (absolute height)
     let step = initial_biome.width / BLOCKS_PER_CHUNK;
     let step = if step == 0 { 1 } else { step };
-    let mut hmin = f32::INFINITY;
-    let mut hmax = f32::NEG_INFINITY;
-    for bz in 0..BLOCKS_PER_CHUNK {
-        for bx in 0..BLOCKS_PER_CHUNK {
-            let px = (bx * step + step / 2).min(initial_biome.width - 1);
-            let pz = (bz * step + step / 2).min(initial_biome.height - 1);
-            let idx = pz * initial_biome.width + px;
-            let h = *initial_biome.heightmap.get(idx).unwrap_or(&0.0) as f32;
-            if h < hmin { hmin = h; }
-            if h > hmax { hmax = h; }
-        }
-    }
-    let h_range = if hmax > hmin { hmax - hmin } else { 1.0 };
     let center_px = (BLOCKS_PER_CHUNK / 2 * step + step / 2).min(initial_biome.width - 1);
     let center_pz = (BLOCKS_PER_CHUNK / 2 * step + step / 2).min(initial_biome.height - 1);
     let center_idx = center_pz * initial_biome.width + center_px;
     let center_h = *initial_biome.heightmap.get(center_idx).unwrap_or(&0.0) as f32;
-    let ground_blocks = ((center_h - hmin) / h_range * MAX_BLOCK_HEIGHT).floor();
-    let ground_y = ground_blocks * BLOCK_WORLD_SIZE;
+    let ground_y = (center_h * HEIGHT_SCALE).floor() * BLOCK_WORLD_SIZE;
     let spawn_y = ground_y + EYE_HEIGHT;
     let spawn_x = chunk_bx + CHUNK_BEVY_SIZE / 2.0;
     let spawn_z = chunk_bz + CHUNK_BEVY_SIZE / 2.0;
-    eprintln!("Spawn: ({spawn_x:.1}, {spawn_y:.1}, {spawn_z:.1}), ground blocks: {ground_blocks:.0}");
+    eprintln!("Spawn: ({spawn_x:.1}, {spawn_y:.1}, {spawn_z:.1}), ground_y: {ground_y:.0}");
 
     commands.insert_resource(PlayerState {
         yaw: initial_yaw,
@@ -442,8 +443,10 @@ fn setup_scene(
         initial_pitch.sin(),
         initial_yaw.sin() * initial_pitch.cos(),
     );
+    // 3D camera for terrain rendering
     commands.spawn((
         Camera3d::default(),
+        Camera { order: 0, ..default() },
         Transform::from_xyz(spawn_x, spawn_y, spawn_z)
             .looking_to(look_dir, Vec3::Y),
         DistanceFog {
@@ -451,6 +454,12 @@ fn setup_scene(
             falloff: FogFalloff::Linear { start: 2.0, end: 15.0 },
             ..default()
         },
+    ));
+
+    // 2D camera for egui HUD overlay (bevy_egui requires a Camera2d to render)
+    commands.spawn((
+        Camera2d,
+        Camera { order: 1, clear_color: ClearColorConfig::None, ..default() },
     ));
 
     // Directional light (sun)
@@ -471,8 +480,8 @@ fn setup_scene(
     });
 
     // Generate initial chunk mesh
-    let mesh = generate_chunk_mesh(&initial_biome);
-    let mesh_handle = meshes.add(mesh);
+    let chunk_data = generate_chunk_mesh(&initial_biome);
+    let mesh_handle = meshes.add(chunk_data.mesh);
     let material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.9,
@@ -487,7 +496,10 @@ fn setup_scene(
     )).id();
 
     let mut loaded = LoadedChunks::default();
-    loaded.entities.insert(manifest.chunk_coord, entity);
+    loaded.chunks.insert(manifest.chunk_coord, ChunkHeightInfo {
+        entity,
+        block_heights: chunk_data.block_heights,
+    });
     commands.insert_resource(loaded);
 }
 
@@ -500,21 +512,55 @@ fn grab_cursor(mut cursor_q: Query<&mut CursorOptions, With<PrimaryWindow>>) {
 
 // ─── Chunk Mesh Generation ─────────────────────────────────────────────────
 
+/// Interpolate between two RGB colors by factor t (0..1).
+fn lerp_color(a: [u8; 3], b: [u8; 3], t: f32) -> [f32; 4] {
+    let t = t.clamp(0.0, 1.0);
+    [
+        (a[0] as f32 * (1.0 - t) + b[0] as f32 * t) / 255.0,
+        (a[1] as f32 * (1.0 - t) + b[1] as f32 * t) / 255.0,
+        (a[2] as f32 * (1.0 - t) + b[2] as f32 * t) / 255.0,
+        1.0,
+    ]
+}
+
+/// Compute the side face color for a given depth below the block top.
+/// depth=0 is right at the top (grass-tinted), deeper transitions to dirt, then stone.
+fn side_color_at_depth(biome_color: [u8; 3], depth: f32) -> [f32; 4] {
+    if depth < 1.0 {
+        // Top layer: biome color darkened, transitioning to dirt
+        let darkened = [
+            (biome_color[0] as f32 * 0.6) as u8,
+            (biome_color[1] as f32 * 0.6) as u8,
+            (biome_color[2] as f32 * 0.6) as u8,
+        ];
+        lerp_color(darkened, DIRT_COLOR, depth)
+    } else if depth < 3.0 {
+        // Dirt layer
+        let t = (depth - 1.0) / 2.0;
+        lerp_color(DIRT_COLOR, STONE_COLOR, t)
+    } else {
+        // Deep stone
+        [
+            STONE_COLOR[0] as f32 / 255.0 * 0.5,
+            STONE_COLOR[1] as f32 / 255.0 * 0.5,
+            STONE_COLOR[2] as f32 / 255.0 * 0.5,
+            1.0,
+        ]
+    }
+}
+
 /// Convert a chunk's BiomeMap into a Bevy Mesh of block faces.
-/// Uses local normalization: the height variation within the chunk is stretched
-/// to fill [0, MAX_BLOCK_HEIGHT] block levels. This preserves fractal shape
-/// continuity while making variation visible at block scale.
-fn generate_chunk_mesh(bm: &BiomeMap) -> Mesh {
+/// Uses absolute height scaling so all chunks share a consistent vertical
+/// reference, eliminating seams between adjacent chunks.
+/// Applies greedy meshing to merge adjacent same-height top face blocks.
+fn generate_chunk_mesh(bm: &BiomeMap) -> ChunkMeshData {
     let step = bm.width / BLOCKS_PER_CHUNK;
     let step = if step == 0 { 1 } else { step };
 
-    // Sample heightmap at block resolution and find local min/max
-    let mut raw_heights = vec![0.0f32; BLOCKS_PER_CHUNK * BLOCKS_PER_CHUNK];
+    // Sample heightmap at block resolution (absolute heights, no local normalization)
+    let mut heights = vec![0i32; BLOCKS_PER_CHUNK * BLOCKS_PER_CHUNK];
     let mut colors = vec![[0u8; 4]; BLOCKS_PER_CHUNK * BLOCKS_PER_CHUNK];
     let color_data = bm.to_layer_image(NoiseLayer::Biome);
-
-    let mut hmin = f32::INFINITY;
-    let mut hmax = f32::NEG_INFINITY;
 
     for bz in 0..BLOCKS_PER_CHUNK {
         for bx in 0..BLOCKS_PER_CHUNK {
@@ -522,9 +568,7 @@ fn generate_chunk_mesh(bm: &BiomeMap) -> Mesh {
             let pz = (bz * step + step / 2).min(bm.height - 1);
             let idx = pz * bm.width + px;
             let h = *bm.heightmap.get(idx).unwrap_or(&0.0) as f32;
-            raw_heights[bz * BLOCKS_PER_CHUNK + bx] = h;
-            if h < hmin { hmin = h; }
-            if h > hmax { hmax = h; }
+            heights[bz * BLOCKS_PER_CHUNK + bx] = (h * HEIGHT_SCALE).floor() as i32;
 
             // Sample biome color
             let ci = idx * 4;
@@ -533,18 +577,15 @@ fn generate_chunk_mesh(bm: &BiomeMap) -> Mesh {
                     color_data[ci], color_data[ci + 1], color_data[ci + 2], 255
                 ];
             } else {
-                colors[bz * BLOCKS_PER_CHUNK + bx] = [100, 150, 80, 255]; // fallback green
+                colors[bz * BLOCKS_PER_CHUNK + bx] = [100, 100, 80, 255]; // fallback
             }
         }
     }
 
-    // Local normalization: stretch height range to [0, MAX_BLOCK_HEIGHT]
-    let h_range = if hmax > hmin { hmax - hmin } else { 1.0 };
-    let mut heights = vec![0i32; BLOCKS_PER_CHUNK * BLOCKS_PER_CHUNK];
-    for i in 0..heights.len() {
-        let normalized = (raw_heights[i] - hmin) / h_range;
-        heights[i] = (normalized * MAX_BLOCK_HEIGHT).floor() as i32;
-    }
+    // Build block_heights for terrain following (in Bevy world units)
+    let block_heights: Vec<f32> = heights.iter()
+        .map(|&h| h as f32 * BLOCK_WORLD_SIZE)
+        .collect();
 
     let bs = BLOCK_WORLD_SIZE;
     let mut positions: Vec<[f32; 3]> = Vec::new();
@@ -559,87 +600,131 @@ fn generate_chunk_mesh(bm: &BiomeMap) -> Mesh {
         heights[bz as usize * BLOCKS_PER_CHUNK + bx as usize]
     };
 
-    for bz in 0..BLOCKS_PER_CHUNK as i32 {
-        for bx in 0..BLOCKS_PER_CHUNK as i32 {
-            let h = get_h(bx, bz);
+    // --- Greedy meshing for TOP faces ---
+    // visited[z][x] tracks whether a block's top face has been merged
+    let n = BLOCKS_PER_CHUNK;
+    let mut visited = vec![false; n * n];
+
+    for bz in 0..n {
+        for bx in 0..n {
+            if visited[bz * n + bx] { continue; }
+
+            let h = heights[bz * n + bx];
+            let ci = bz * n + bx;
+            let [r, g, b, _] = colors[ci];
+
+            // Extend the run along X (same height and same color)
+            let mut run_x = 1;
+            while bx + run_x < n {
+                let ni = bz * n + bx + run_x;
+                if visited[ni] { break; }
+                if heights[ni] != h { break; }
+                let [nr, ng, nb, _] = colors[ni];
+                if nr != r || ng != g || nb != b { break; }
+                run_x += 1;
+            }
+
+            // Extend the run along Z (all blocks in the wider row must match)
+            let mut run_z = 1;
+            'outer: while bz + run_z < n {
+                for dx in 0..run_x {
+                    let ni = (bz + run_z) * n + bx + dx;
+                    if visited[ni] { break 'outer; }
+                    if heights[ni] != h { break 'outer; }
+                    let [nr, ng, nb, _] = colors[ni];
+                    if nr != r || ng != g || nb != b { break 'outer; }
+                }
+                run_z += 1;
+            }
+
+            // Mark all blocks in the merged quad as visited
+            for dz in 0..run_z {
+                for dx in 0..run_x {
+                    visited[(bz + dz) * n + bx + dx] = true;
+                }
+            }
+
+            // Emit a single merged top face quad
             let x0 = bx as f32 * bs;
             let z0 = bz as f32 * bs;
-            let y = h as f32 * bs; // block top Y in world units
-
-            let ci = bz as usize * BLOCKS_PER_CHUNK + bx as usize;
-            let [r, g, b, _] = colors[ci];
+            let y = h as f32 * bs;
+            let w = run_x as f32 * bs;
+            let d = run_z as f32 * bs;
             let top_color = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
-            let side_color = [
-                r as f32 / 255.0 * 0.6,
-                g as f32 / 255.0 * 0.6,
-                b as f32 / 255.0 * 0.6,
-                1.0
-            ];
 
-            // TOP face (always visible)
             let vi = positions.len() as u32;
             positions.extend_from_slice(&[
                 [x0, y, z0],
-                [x0 + bs, y, z0],
-                [x0 + bs, y, z0 + bs],
-                [x0, y, z0 + bs],
+                [x0 + w, y, z0],
+                [x0 + w, y, z0 + d],
+                [x0, y, z0 + d],
             ]);
             normals.extend_from_slice(&[[0.0, 1.0, 0.0]; 4]);
             vertex_colors.extend_from_slice(&[top_color; 4]);
             indices.extend_from_slice(&[vi, vi + 2, vi + 1, vi, vi + 3, vi + 2]);
+        }
+    }
 
-            // SIDE faces: only where neighbor is shorter
+    // --- Side faces (per-block, with depth-based color variation) ---
+    for bz in 0..n as i32 {
+        for bx in 0..n as i32 {
+            let h = get_h(bx, bz);
+            let x0 = bx as f32 * bs;
+            let z0 = bz as f32 * bs;
+            let y = h as f32 * bs;
+            let ci = bz as usize * n + bx as usize;
+            let biome_rgb = [colors[ci][0], colors[ci][1], colors[ci][2]];
+
+            // Helper: emit a side face with depth-based coloring
+            let mut emit_side = |normal: [f32; 3], corners: [[f32; 3]; 4], y_top: f32, y_bottom: f32| {
+                let depth = (y_top - y_bottom).abs();
+                if depth < 0.001 { return; }
+                // Use the midpoint depth for color
+                let mid_depth = depth / 2.0;
+                let color = side_color_at_depth(biome_rgb, mid_depth);
+
+                let vi = positions.len() as u32;
+                positions.extend_from_slice(&corners);
+                normals.extend_from_slice(&[normal; 4]);
+                vertex_colors.extend_from_slice(&[color; 4]);
+                indices.extend_from_slice(&[vi, vi + 1, vi + 2, vi, vi + 2, vi + 3]);
+            };
+
             // North face (-Z)
             if get_h(bx, bz - 1) < h {
-                let neighbor_h = get_h(bx, bz - 1).max(0);
-                let y_bottom = neighbor_h as f32 * bs;
-                let vi = positions.len() as u32;
-                positions.extend_from_slice(&[
+                let nb_h = get_h(bx, bz - 1).max(0);
+                let y_bottom = nb_h as f32 * bs;
+                emit_side([0.0, 0.0, -1.0], [
                     [x0, y, z0], [x0 + bs, y, z0],
                     [x0 + bs, y_bottom, z0], [x0, y_bottom, z0],
-                ]);
-                normals.extend_from_slice(&[[0.0, 0.0, -1.0]; 4]);
-                vertex_colors.extend_from_slice(&[side_color; 4]);
-                indices.extend_from_slice(&[vi, vi + 1, vi + 2, vi, vi + 2, vi + 3]);
+                ], y, y_bottom);
             }
             // South face (+Z)
             if get_h(bx, bz + 1) < h {
-                let neighbor_h = get_h(bx, bz + 1).max(0);
-                let y_bottom = neighbor_h as f32 * bs;
-                let vi = positions.len() as u32;
-                positions.extend_from_slice(&[
+                let nb_h = get_h(bx, bz + 1).max(0);
+                let y_bottom = nb_h as f32 * bs;
+                emit_side([0.0, 0.0, 1.0], [
                     [x0 + bs, y, z0 + bs], [x0, y, z0 + bs],
                     [x0, y_bottom, z0 + bs], [x0 + bs, y_bottom, z0 + bs],
-                ]);
-                normals.extend_from_slice(&[[0.0, 0.0, 1.0]; 4]);
-                vertex_colors.extend_from_slice(&[side_color; 4]);
-                indices.extend_from_slice(&[vi, vi + 1, vi + 2, vi, vi + 2, vi + 3]);
+                ], y, y_bottom);
             }
             // West face (-X)
             if get_h(bx - 1, bz) < h {
-                let neighbor_h = get_h(bx - 1, bz).max(0);
-                let y_bottom = neighbor_h as f32 * bs;
-                let vi = positions.len() as u32;
-                positions.extend_from_slice(&[
+                let nb_h = get_h(bx - 1, bz).max(0);
+                let y_bottom = nb_h as f32 * bs;
+                emit_side([-1.0, 0.0, 0.0], [
                     [x0, y, z0 + bs], [x0, y, z0],
                     [x0, y_bottom, z0], [x0, y_bottom, z0 + bs],
-                ]);
-                normals.extend_from_slice(&[[-1.0, 0.0, 0.0]; 4]);
-                vertex_colors.extend_from_slice(&[side_color; 4]);
-                indices.extend_from_slice(&[vi, vi + 1, vi + 2, vi, vi + 2, vi + 3]);
+                ], y, y_bottom);
             }
             // East face (+X)
             if get_h(bx + 1, bz) < h {
-                let neighbor_h = get_h(bx + 1, bz).max(0);
-                let y_bottom = neighbor_h as f32 * bs;
-                let vi = positions.len() as u32;
-                positions.extend_from_slice(&[
+                let nb_h = get_h(bx + 1, bz).max(0);
+                let y_bottom = nb_h as f32 * bs;
+                emit_side([1.0, 0.0, 0.0], [
                     [x0 + bs, y, z0], [x0 + bs, y, z0 + bs],
                     [x0 + bs, y_bottom, z0 + bs], [x0 + bs, y_bottom, z0],
-                ]);
-                normals.extend_from_slice(&[[1.0, 0.0, 0.0]; 4]);
-                vertex_colors.extend_from_slice(&[side_color; 4]);
-                indices.extend_from_slice(&[vi, vi + 1, vi + 2, vi, vi + 2, vi + 3]);
+                ], y, y_bottom);
             }
         }
     }
@@ -652,10 +737,30 @@ fn generate_chunk_mesh(bm: &BiomeMap) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vertex_colors);
     mesh.insert_indices(Indices::U32(indices));
-    mesh
+    ChunkMeshData { mesh, block_heights }
 }
 
 // ─── Camera Input ──────────────────────────────────────────────────────────
+
+/// Sample terrain height at a world XZ position from the loaded chunk data.
+/// Returns the block top Y in Bevy world units, or None if no chunk is loaded there.
+fn sample_terrain_height(loaded: &LoadedChunks, world_x: f32, world_z: f32) -> Option<f32> {
+    let cx = (world_x / CHUNK_BEVY_SIZE).floor() as i32;
+    let cz = (world_z / CHUNK_BEVY_SIZE).floor() as i32;
+
+    let info = loaded.chunks.get(&(cx, cz))?;
+
+    // Local position within chunk, in block coordinates
+    let local_x = world_x - cx as f32 * CHUNK_BEVY_SIZE;
+    let local_z = world_z - cz as f32 * CHUNK_BEVY_SIZE;
+    let bx = (local_x / BLOCK_WORLD_SIZE).floor() as usize;
+    let bz = (local_z / BLOCK_WORLD_SIZE).floor() as usize;
+
+    let bx = bx.min(BLOCKS_PER_CHUNK - 1);
+    let bz = bz.min(BLOCKS_PER_CHUNK - 1);
+
+    Some(info.block_heights[bz * BLOCKS_PER_CHUNK + bx])
+}
 
 fn camera_input(
     keyboard: Res<ButtonInput<KeyCode>>,
@@ -664,6 +769,7 @@ fn camera_input(
     mut player: ResMut<PlayerState>,
     mut camera_q: Query<&mut Transform, With<Camera3d>>,
     mut cursor_q: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    loaded: Res<LoadedChunks>,
 ) {
     let dt = time.delta_secs();
     let Ok(mut cam_transform) = camera_q.single_mut() else { return };
@@ -712,8 +818,13 @@ fn camera_input(
     let look_y = player.pitch.sin();
     let look_z = player.yaw.sin() * player.pitch.cos();
 
-    // Camera follows terrain — smoothly interpolate Y toward terrain height
-    // For now, just maintain current Y and let user adjust with mouse pitch
+    // Terrain height following: sample the chunk heightmap at player position
+    let target_y = sample_terrain_height(&loaded, player.world_x, player.world_z)
+        .unwrap_or(cam_transform.translation.y - EYE_HEIGHT)
+        + EYE_HEIGHT;
+    // Smooth interpolation to avoid jarring jumps
+    let lerp_speed = 10.0 * dt;
+    cam_transform.translation.y += (target_y - cam_transform.translation.y) * lerp_speed.min(1.0);
     cam_transform.translation.x = player.world_x;
     cam_transform.translation.z = player.world_z;
     cam_transform.look_to(Vec3::new(look_x, look_y, look_z), Vec3::Y);
@@ -746,7 +857,7 @@ fn chunk_stream(
             if cx < 0 || cz < 0 || cx >= WORLD_WIDTH as i32 || cz >= WORLD_HEIGHT as i32 {
                 continue;
             }
-            if loaded.entities.contains_key(&coord) || in_flight.contains(&coord) {
+            if loaded.chunks.contains_key(&coord) || in_flight.contains(&coord) {
                 continue;
             }
             if queue.in_flight.len() >= MAX_CONCURRENT {
@@ -765,8 +876,8 @@ fn chunk_stream(
                     height, 3, None, NoiseBackend::Cpu,
                     Some(&macro_map), rn_ref,
                 );
-                let mesh = generate_chunk_mesh(&biome_map);
-                (coord, ChunkMeshData { mesh, biome_map })
+                let chunk_data = generate_chunk_mesh(&biome_map);
+                (coord, chunk_data)
             });
 
             queue.in_flight.push(ChunkTask { coord, task });
@@ -805,7 +916,10 @@ fn chunk_poll(
                 ChunkEntity,
             )).id();
 
-            loaded.entities.insert(coord, entity);
+            loaded.chunks.insert(coord, ChunkHeightInfo {
+                entity,
+                block_heights: data.block_heights,
+            });
             completed += 1;
         } else {
             i += 1;
@@ -821,7 +935,7 @@ fn chunk_unload(
     let cam_cx = (player.world_x / CHUNK_BEVY_SIZE).floor() as i32;
     let cam_cz = (player.world_z / CHUNK_BEVY_SIZE).floor() as i32;
 
-    let to_remove: Vec<(i32, i32)> = loaded.entities.keys()
+    let to_remove: Vec<(i32, i32)> = loaded.chunks.keys()
         .filter(|(cx, cz)| {
             (cx - cam_cx).abs() > UNLOAD_RADIUS || (cz - cam_cz).abs() > UNLOAD_RADIUS
         })
@@ -829,8 +943,8 @@ fn chunk_unload(
         .collect();
 
     for coord in to_remove {
-        if let Some(entity) = loaded.entities.remove(&coord) {
-            commands.entity(entity).despawn();
+        if let Some(info) = loaded.chunks.remove(&coord) {
+            commands.entity(info.entity).despawn();
         }
     }
 }
