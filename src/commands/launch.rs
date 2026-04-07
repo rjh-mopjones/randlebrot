@@ -50,8 +50,8 @@ const MAX_BLOCK_HEIGHT: f32 = 64.0;
 /// Chunk load radius.
 const LOAD_RADIUS: i32 = 8;
 
-/// Chunk unload radius.
-const UNLOAD_RADIUS: i32 = 5;
+/// Chunk unload radius (must be > LOAD_RADIUS to avoid load/unload thrashing).
+const UNLOAD_RADIUS: i32 = 10;
 
 /// Max concurrent chunk generation tasks.
 const MAX_CONCURRENT: usize = 4;

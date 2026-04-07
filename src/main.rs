@@ -558,9 +558,8 @@ fn launch_gui(layers_tag: Option<String>) {
     #[cfg(target_os = "macos")]
     {
         unsafe {
-            use std::ffi::CStr;
             let cls = objc2::runtime::AnyClass::get(
-                CStr::from_bytes_with_nul(b"NSApplication\0").unwrap()
+                c"NSApplication"
             );
             if let Some(cls) = cls {
                 let shared_app: *mut objc2::runtime::AnyObject =

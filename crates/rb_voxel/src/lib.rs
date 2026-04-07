@@ -532,7 +532,7 @@ pub fn draw_player_marker(
     );
 
     // Draw a 3-pixel-wide vertical bar (the "player") with a brighter center column
-    let col_start = if col >= 1 { col - 1 } else { 0 };
+    let col_start = col.saturating_sub(1);
     let col_end = (col + 2).min(screen_width);
 
     for row in top..bottom {
