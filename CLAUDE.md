@@ -119,7 +119,7 @@ cargo run -- view levels level-tag               # inspect a specific level arti
 
 # ─── Launch playable level (Comanche-style 3D terrain) ───
 cargo run -- launch level-tag                    # 3D terrain flyover via rb_voxel raycaster
-cargo run -- launch level-tag --flythrough       # automated flythrough → screenshots in /tmp/randlebrot_flythrough/
+cargo run --release -- launch level-tag --flythrough   # automated flythrough → screenshots in /tmp/randlebrot_flythrough/
 
 # ─── Tests & examples ───
 cargo test                                       # workspace tests
