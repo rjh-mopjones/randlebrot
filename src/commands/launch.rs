@@ -1,8 +1,11 @@
 //! Launch a playable level with Minecraft-style 3D block terrain.
 //!
-//! `randlebrot launch <level-tag>` opens a Bevy 3D window. The heightmap
-//! from each chunk is converted into a block mesh (one quad per visible face).
-//! Chunks stream in as the player moves.
+//! `randlebrot launch <level-tag>` opens a Bevy 3D window. The derived
+//! heightmap from each chunk's BiomeMap is converted into a block mesh
+//! (one quad per visible face). At micro scale (detail_level=3), the
+//! heightmap includes independently-normalized high-frequency detail via
+//! `derive_micro_heightmap` in `rb_noise`. Chunks stream in as the player
+//! moves.
 //!
 //! Controls:
 //!   WASD            — move (forward/back/strafe relative to camera yaw)
@@ -262,7 +265,6 @@ fn setup_scene(
     let chunk_bz = manifest.chunk_coord.1 as f32 * CHUNK_BEVY_SIZE;
 
     // Camera spawns at center of chunk, on the ground
-    let local_hm = build_local_heightmap(&initial_biome);
     // Find local min/max for normalization (same as generate_chunk_mesh)
     let step = initial_biome.width / BLOCKS_PER_CHUNK;
     let step = if step == 0 { 1 } else { step };
@@ -273,7 +275,7 @@ fn setup_scene(
             let px = (bx * step + step / 2).min(initial_biome.width - 1);
             let pz = (bz * step + step / 2).min(initial_biome.height - 1);
             let idx = pz * initial_biome.width + px;
-            let h = local_hm.get(idx).copied().unwrap_or(0.0);
+            let h = *initial_biome.heightmap.get(idx).unwrap_or(&0.0) as f32;
             if h < hmin { hmin = h; }
             if h > hmax { hmax = h; }
         }
@@ -282,7 +284,7 @@ fn setup_scene(
     let center_px = (BLOCKS_PER_CHUNK / 2 * step + step / 2).min(initial_biome.width - 1);
     let center_pz = (BLOCKS_PER_CHUNK / 2 * step + step / 2).min(initial_biome.height - 1);
     let center_idx = center_pz * initial_biome.width + center_px;
-    let center_h = local_hm.get(center_idx).copied().unwrap_or(0.0);
+    let center_h = *initial_biome.heightmap.get(center_idx).unwrap_or(&0.0) as f32;
     let ground_blocks = ((center_h - hmin) / h_range * MAX_BLOCK_HEIGHT).floor();
     let ground_y = ground_blocks * BLOCK_WORLD_SIZE;
     let spawn_y = ground_y + EYE_HEIGHT;
@@ -364,28 +366,11 @@ fn grab_cursor(mut cursor_q: Query<&mut CursorOptions, With<PrimaryWindow>>) {
 
 // ─── Chunk Mesh Generation ─────────────────────────────────────────────────
 
-/// Build a local heightmap from base noise layers (the derived heightmap is
-/// flat at micro scale — see debug_level diagnostic).
-fn build_local_heightmap(bm: &BiomeMap) -> Vec<f32> {
-    let n = bm.width * bm.height;
-    let mut hm = vec![0.0f32; n];
-    for i in 0..n {
-        let cont = *bm.continentalness.get(i).unwrap_or(&0.0) as f32;
-        let pv = *bm.peaks_valleys.get(i).unwrap_or(&0.0) as f32;
-        let tect = *bm.tectonic.get(i).unwrap_or(&0.5) as f32;
-        let erosion = *bm.erosion.get(i).unwrap_or(&0.5) as f32;
-        let rock = *bm.rock_hardness.get(i).unwrap_or(&0.5) as f32;
-        hm[i] = cont * 3.0 + pv * 2.0 + (1.0 - tect) * 1.5 + erosion * 1.0 + rock * 0.5;
-    }
-    hm
-}
-
 /// Convert a chunk's BiomeMap into a Bevy Mesh of block faces.
 /// Uses local normalization: the height variation within the chunk is stretched
 /// to fill [0, MAX_BLOCK_HEIGHT] block levels. This preserves fractal shape
 /// continuity while making variation visible at block scale.
 fn generate_chunk_mesh(bm: &BiomeMap) -> Mesh {
-    let full_hm = build_local_heightmap(bm);
     let step = bm.width / BLOCKS_PER_CHUNK;
     let step = if step == 0 { 1 } else { step };
 
@@ -402,7 +387,7 @@ fn generate_chunk_mesh(bm: &BiomeMap) -> Mesh {
             let px = (bx * step + step / 2).min(bm.width - 1);
             let pz = (bz * step + step / 2).min(bm.height - 1);
             let idx = pz * bm.width + px;
-            let h = full_hm.get(idx).copied().unwrap_or(0.0);
+            let h = *bm.heightmap.get(idx).unwrap_or(&0.0) as f32;
             raw_heights[bz * BLOCKS_PER_CHUNK + bx] = h;
             if h < hmin { hmin = h; }
             if h > hmax { hmax = h; }

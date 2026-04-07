@@ -1,3 +1,4 @@
+use noise::{NoiseFn, OpenSimplex};
 use rb_core::TileType;
 
 /// Temperature derived from light level + elevation + humidity + continentalness.
@@ -64,6 +65,54 @@ pub fn derive_heightmap(continentalness: f64, _tectonic: f64, peaks_valleys: f64
         1.0
     };
     (continental_base + relief * coastal_taper).clamp(-1.0, 1.0)
+}
+
+/// Split-fBm micro heightmap: adds independently-normalized high-frequency
+/// detail from octaves 12+ on top of the base heightmap value.
+///
+/// The `detail_noise` OpenSimplex must be created ONCE outside the pixel loop
+/// (e.g., `OpenSimplex::new(seed.wrapping_add(50))`) and passed in.
+/// Do NOT construct per-pixel.
+pub fn derive_micro_heightmap(
+    base_heightmap: f64,
+    wx: f64,
+    wy: f64,
+    detail_noise: &OpenSimplex,
+) -> f64 {
+    // Start at octave 12: frequency where 1 world unit contains ~41 cycles.
+    let start_freq = 0.01 * 2.0_f64.powi(12); // = 40.96
+
+    let mut value = 0.0;
+    let mut amp = 1.0;
+    let mut freq = start_freq;
+    let mut max_amp = 0.0;
+
+    // 6 octaves of detail (12-17), normalized independently
+    for _ in 0..6 {
+        value += detail_noise.get([wx * freq, wy * freq]) * amp;
+        max_amp += amp;
+        amp *= 0.5; // sharper falloff than continental (0.59)
+        freq *= 2.0;
+    }
+    let detail = value / max_amp; // normalized to [-1, 1] INDEPENDENTLY
+
+    // Amplitude budget by terrain type.
+    // Thresholds calibrated from actual heightmap data (seed 42):
+    //   +0.03+ = high terrain (mountains, inland plateau)
+    //   -0.01 to +0.03 = mid terrain (hills, coast)
+    //   -0.025 to -0.01 = low terrain (plains, forest)
+    //   below -0.025 = very low (ocean edge, frozen)
+    let budget = if base_heightmap > 0.03 {
+        0.25 // mountains: dramatic cliffs
+    } else if base_heightmap > -0.01 {
+        0.15 // hills/coast: moderate
+    } else if base_heightmap > -0.025 {
+        0.10 // plains/forest: gentle rolling
+    } else {
+        0.05 // ocean/frozen: barely perceptible
+    };
+
+    (base_heightmap + detail * budget).clamp(-1.0, 1.0)
 }
 
 /// Erosion derived from heightmap, rock hardness, and humidity.
