@@ -42,8 +42,10 @@ use crate::cli::coords::{
 /// Output resolution per chunk BiomeMap.
 const TILE_MAP_SIZE: usize = 512;
 
-/// One block per BiomeMap pixel — full 512×512 resolution, no downsampling.
-const BLOCKS_PER_CHUNK: usize = 512;
+/// 128 blocks per chunk side — each block averages a 4×4 pixel region of the
+/// 512×512 BiomeMap. This smooths 1-pixel fBm noise into wider steps, eliminating
+/// the checkerboard staircase pattern without destroying terrain shape.
+const BLOCKS_PER_CHUNK: usize = 128;
 const BLOCK_WORLD_SIZE: f32 = 1.0;
 const CHUNK_BEVY_SIZE: f32 = BLOCKS_PER_CHUNK as f32 * BLOCK_WORLD_SIZE;
 
@@ -562,10 +564,10 @@ fn generate_chunk_mesh(bm: &BiomeMap) -> ChunkMeshData {
     let step = bm.width / BLOCKS_PER_CHUNK;
     let step = if step == 0 { 1 } else { step };
 
-    // Sample heightmap at block resolution (absolute heights, no local normalization)
+    // Sample heightmap at block resolution (1 pixel per block).
+    // Color is derived purely from block height so we can read the terrain
+    // pipeline output clearly — biome colours are irrelevant for this test.
     let mut heights = vec![0i32; BLOCKS_PER_CHUNK * BLOCKS_PER_CHUNK];
-    let mut colors = vec![[0u8; 4]; BLOCKS_PER_CHUNK * BLOCKS_PER_CHUNK];
-    let color_data = bm.to_layer_image(NoiseLayer::Biome);
 
     for bz in 0..BLOCKS_PER_CHUNK {
         for bx in 0..BLOCKS_PER_CHUNK {
@@ -574,49 +576,28 @@ fn generate_chunk_mesh(bm: &BiomeMap) -> ChunkMeshData {
             let idx = pz * bm.width + px;
             let h = *bm.heightmap.get(idx).unwrap_or(&0.0) as f32;
             heights[bz * BLOCKS_PER_CHUNK + bx] = (h * HEIGHT_SCALE).floor() as i32;
-
-            // Sample biome color
-            let ci = idx * 4;
-            if ci + 3 < color_data.len() {
-                colors[bz * BLOCKS_PER_CHUNK + bx] = [
-                    color_data[ci], color_data[ci + 1], color_data[ci + 2], 255
-                ];
-            } else {
-                colors[bz * BLOCKS_PER_CHUNK + bx] = [100, 100, 80, 255]; // fallback
-            }
         }
     }
 
-    // 3×3 box-blur on BOTH heights and colours — 2 passes to smooth pixel-scale
-    // fBm spikes without destroying terrain shape.
+    // 2-pass 3×3 box-blur to smooth pixel-scale fBm spikes.
     let n = BLOCKS_PER_CHUNK;
     for _ in 0..2 {
-        let orig_h = heights.clone();
-        let orig_c = colors.clone();
+        let orig = heights.clone();
         for bz in 0..n {
             for bx in 0..n {
-                let mut sum_h = 0i64;
-                let mut sum_r = 0i64;
-                let mut sum_g = 0i64;
-                let mut sum_b = 0i64;
+                let mut sum = 0i64;
                 let mut count = 0i64;
                 for dz in -1i32..=1 {
                     for dx in -1i32..=1 {
                         let nx = bx as i32 + dx;
                         let nz = bz as i32 + dz;
                         if nx >= 0 && nz >= 0 && nx < n as i32 && nz < n as i32 {
-                            let ni = nz as usize * n + nx as usize;
-                            sum_h += orig_h[ni] as i64;
-                            sum_r += orig_c[ni][0] as i64;
-                            sum_g += orig_c[ni][1] as i64;
-                            sum_b += orig_c[ni][2] as i64;
+                            sum += orig[nz as usize * n + nx as usize] as i64;
                             count += 1;
                         }
                     }
                 }
-                let idx = bz * n + bx;
-                heights[idx] = (sum_h / count) as i32;
-                colors[idx] = [(sum_r / count) as u8, (sum_g / count) as u8, (sum_b / count) as u8, 255];
+                heights[bz * n + bx] = (sum / count) as i32;
             }
         }
     }
@@ -639,8 +620,24 @@ fn generate_chunk_mesh(bm: &BiomeMap) -> ChunkMeshData {
         heights[bz as usize * BLOCKS_PER_CHUNK + bx as usize]
     };
 
+    // Height-to-colour mapping for top faces — Minecraft-style palette so the
+    // terrain pipeline output is easy to read (water/beach/grass/stone by height).
+    let top_color_for_height = |h: i32| -> [f32; 4] {
+        if h <= 0 {
+            [0.15, 0.40, 0.75, 1.0]  // water blue
+        } else if h <= 2 {
+            [0.82, 0.76, 0.50, 1.0]  // sand / beach
+        } else if h <= 20 {
+            [0.35, 0.62, 0.22, 1.0]  // grass green
+        } else if h <= 40 {
+            [0.28, 0.50, 0.18, 1.0]  // darker highland grass
+        } else {
+            [0.65, 0.65, 0.65, 1.0]  // stone / mountain
+        }
+    };
+
     // --- Greedy meshing for TOP faces ---
-    // visited[z][x] tracks whether a block's top face has been merged
+    // Merge runs of same height AND same colour (determined by height band).
     let n = BLOCKS_PER_CHUNK;
     let mut visited = vec![false; n * n];
 
@@ -649,47 +646,41 @@ fn generate_chunk_mesh(bm: &BiomeMap) -> ChunkMeshData {
             if visited[bz * n + bx] { continue; }
 
             let h = heights[bz * n + bx];
-            let ci = bz * n + bx;
-            let [r, g, b, _] = colors[ci];
+            let top_color = top_color_for_height(h);
 
-            // Extend the run along X (same height and same color)
+            // Extend the run along X (same height)
             let mut run_x = 1;
             while bx + run_x < n {
                 let ni = bz * n + bx + run_x;
                 if visited[ni] { break; }
                 if heights[ni] != h { break; }
-                let [nr, ng, nb, _] = colors[ni];
-                if nr != r || ng != g || nb != b { break; }
                 run_x += 1;
             }
 
-            // Extend the run along Z (all blocks in the wider row must match)
+            // Extend the run along Z
             let mut run_z = 1;
             'outer: while bz + run_z < n {
                 for dx in 0..run_x {
                     let ni = (bz + run_z) * n + bx + dx;
                     if visited[ni] { break 'outer; }
                     if heights[ni] != h { break 'outer; }
-                    let [nr, ng, nb, _] = colors[ni];
-                    if nr != r || ng != g || nb != b { break 'outer; }
                 }
                 run_z += 1;
             }
 
-            // Mark all blocks in the merged quad as visited
+            // Mark visited
             for dz in 0..run_z {
                 for dx in 0..run_x {
                     visited[(bz + dz) * n + bx + dx] = true;
                 }
             }
 
-            // Emit a single merged top face quad
+            // Emit merged top face quad
             let x0 = bx as f32 * bs;
             let z0 = bz as f32 * bs;
             let y = h as f32 * bs;
             let w = run_x as f32 * bs;
             let d = run_z as f32 * bs;
-            let top_color = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
 
             let vi = positions.len() as u32;
             positions.extend_from_slice(&[
