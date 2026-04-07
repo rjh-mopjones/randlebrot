@@ -57,7 +57,7 @@ pub fn run(level_tag: &str) -> Result<(), String> {
     }
     println!("\n  biomes:");
     let mut sorted: Vec<_> = biome_counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
     for (biome, count) in &sorted {
         let pct = *count as f64 / biome_map.biomes.len() as f64 * 100.0;
         println!("    {biome}: {count} ({pct:.1}%)");
