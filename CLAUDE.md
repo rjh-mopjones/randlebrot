@@ -332,6 +332,8 @@ Three detail levels with increasing octaves for progressive detail. Each tier us
 
 The full world (1024×512) is generated once as the base biome data. Macro tiles are pre-generated for all 128 chunks at startup. Meso tiles are generated on demand in the Level Launcher when the user clicks "Generate Mesomap" (64 tiles per macro chunk). Chunks stream around the player during play mode.
 
+**Micro-scale octave splitting** (detail_level=3): At chunk scale, the fBm's high-frequency octaves (12+) contribute <0.1% of the normalized output because `max_amplitude` is dominated by the low-frequency continental octaves. To fix this, `derive_micro_heightmap` independently normalizes octaves 12-17 and adds them with a terrain-type-dependent amplitude budget (0.05-0.25). This produces visible block-level height variation without affecting macro/meso views (detail_level < 3). The detail noise uses `OpenSimplex::new(seed.wrapping_add(50))`, created once outside the pixel loop.
+
 `BiomeMap::generate_region()` supports generating any detail level for any world region:
 ```rust
 BiomeMap::generate_region(
@@ -375,7 +377,7 @@ Plus **PeaksAndValleysStrategy** (raw ridgeline noise, seed+4) as internal input
 |------|-------|---------|--------|
 | 1 | Peaks & Valleys | `derive_peaks_valleys(raw_pv, tectonic, rock_hardness)` | [-1, 1] |
 | 1 | Volcanism | from `TectonicSample.volcanism` (3-source: arcs, rifts, hotspots) | [0, 1] |
-| 2 | Heightmap | `derive_heightmap(continentalness, tectonic, peaks_valleys)` | elevation |
+| 2 | Heightmap | `derive_heightmap(continentalness, tectonic, peaks_valleys)` + `derive_micro_heightmap` at detail_level>=3 | elevation |
 | 3 | Temperature | `derive_temperature(light_level, heightmap, humidity)` | ~[-80, +150]°C |
 | 3 | Erosion | `derive_erosion(heightmap, rock_hardness, humidity)` | [0, 1] |
 | 3 | River Flow | Two-tier: RiverNetwork (geology-aware D8, lakes, meandering, deltas, climate character) + legacy flat grid | [0, 1] |
@@ -633,12 +635,10 @@ Example: `randlebrot generate level my-world 512,256 terminus-village` samples t
 The level launcher (`randlebrot launch`) uses **Bevy 3D mesh rendering** to display Minecraft-style block terrain. Each chunk's heightmap is converted to a mesh of block-face quads.
 
 **Block mesh generation** (`generate_chunk_mesh` in `src/commands/launch.rs`):
-1. `build_local_heightmap()` derives height from base noise layers (continentalness, peaks_valleys, tectonic, erosion, rock_hardness) — NOT the derived `heightmap` field which is flat at micro scale.
+1. Uses the derived `heightmap` field from `BiomeMap` directly. At micro scale (detail_level=3), this includes independently-normalized high-frequency detail from `derive_micro_heightmap` (octaves 12-17 with terrain-type amplitude budgets 0.05-0.25).
 2. **Local normalization**: find min/max across the chunk, stretch to [0, `MAX_BLOCK_HEIGHT`] (64 blocks). This makes fractal variation visible regardless of the raw noise amplitude.
 3. For each of 64×64 blocks: emit a TOP face quad (biome color) + SIDE face quads where neighbors are shorter (darker color).
 4. Vertex colors encode biome + face shading. `StandardMaterial` with vertex colors, directional + ambient light.
-
-**Known issue — fractal amplitude**: The noise persistence (0.59) means octaves that vary at block scale have amplitude ~0.00005. Local normalization compensates but produces relative variation only — neighbouring chunks may have different absolute heights, causing visible seams. A proper fix requires either: (a) cross-chunk normalization, (b) higher persistence at micro detail levels, or (c) a separate block-frequency noise layer (like Minecraft's multi-layer approach).
 
 **The `rb_voxel` crate** still contains the Comanche-style column raycaster and player marker utilities. These are no longer used by `launch.rs` but remain available for other use cases (e.g., world-map flyover preview).
 
