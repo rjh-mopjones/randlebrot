@@ -358,7 +358,23 @@ Wait for the user's response. Do not proceed automatically.
 ## Phase 3 — Spawn parallel implementation agents
 
 For each ready work unit, spawn an Agent with `isolation: "worktree"` and
-`run_in_background: true`. Agent prompt template:
+`run_in_background: true`.
+
+**IMPORTANT — Spec files**: Before constructing the agent prompt, check if a spec
+file exists for this issue:
+
+```bash
+ls specs/<NUMBER>-*.md 2>/dev/null
+```
+
+If a spec file exists, the spec IS the agent prompt. Read the spec file and include
+its full contents in the agent prompt instead of the GitHub issue body. The spec
+contains exact code, file paths, verification commands, and constraints — it is
+more precise than the issue body.
+
+If no spec file exists, fall back to the issue body (legacy workflow).
+
+Agent prompt template:
 
 ```
 You are a Randlebrot implementation agent. Your task is to implement issue #<NUMBER>
@@ -366,29 +382,30 @@ and raise a pull request that closes it.
 
 Issue title: <title>
 Parent issue: #<parent_number> (or "stand-alone")
-Crates to touch: <from body>
 
-Issue description:
-<body>
+## Specification
+
+<IF SPEC FILE EXISTS: include full contents of specs/<NUMBER>-*.md>
+<IF NO SPEC FILE: include the issue body>
 
 ---
 
 ## Step 0 — Read context
 
-Read CLAUDE.md in full — it is the authoritative spec. Pay special attention to:
+Read CLAUDE.md in full — it is the authoritative architecture guide. Pay special
+attention to:
 - Workspace Crate Map and Dependency Graph
 - Architecture (chunk pipeline, noise hierarchy, three-domain split)
 - World Rules (never violate)
 - Conventions
 
-If this issue has a parent (a feature tracker), read the parent's body too for
-broader context:
+If this issue has a parent (a feature tracker), read the parent's body too:
 ```bash
 gh issue view <parent_number> --json title,body
 ```
 
-Read the "Documentation Updates" section of this issue — you MUST update the
-specified files.
+If the spec has a "Documentation Updates" or "Constraints" section, follow those
+exactly.
 
 ## Step 1 — Create branch
 

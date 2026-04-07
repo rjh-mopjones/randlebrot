@@ -10,6 +10,8 @@ Randlebrot is the engine; Margin's Grip (mgrip) is the game. The engine handles 
 
 **The `docs/` folder** in this repo is the source of truth for implementation details and technical architecture.
 
+**The `specs/` folder** contains structured specification files for open work items. Each spec is the single source of truth for what an implementation agent should build. GitHub issues track STATUS (open/closed); specs contain CONTENT (exact code, file paths, verification commands). See `specs/README.md` for the format. When implementing an issue, check `specs/<issue-number>-*.md` first — if a spec exists, it takes priority over the issue body.
+
 **When they conflict:** the Obsidian vault wins for design intent; the repo docs win for how things are currently implemented.
 
 ### Repo Design Documents
