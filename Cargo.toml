@@ -66,6 +66,9 @@ rb_persistence.workspace = true
 rb_artifacts.workspace = true
 rb_voxel.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+
 [workspace.lints.clippy]
 # TODO: fix these and remove the allows
 too_many_arguments = "allow"

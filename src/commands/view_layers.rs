@@ -34,7 +34,11 @@ use rb_artifacts::ArtifactStore;
 /// Validates the tag (returns an error if it does not exist), loads the
 /// manifest to discover available layer images, and then runs a minimal
 /// Bevy app. The Bevy `App::run()` call blocks until the window is closed.
+///
 pub fn run(tag: String) -> Result<(), String> {
+    // On macOS: re-launch inside a .app bundle for proper GUI focus.
+    #[cfg(target_os = "macos")]
+    super::launch::macos_ensure_app_bundle(&std::env::args().collect::<Vec<_>>());
     // ─── Validate tag + load manifest ───────────────────────────────────────
     let store = ArtifactStore::new()
         .map_err(|e| format!("failed to initialise artifact store at ~/.randlebrot: {e}"))?;

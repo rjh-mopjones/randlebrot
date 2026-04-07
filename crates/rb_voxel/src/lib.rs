@@ -302,6 +302,9 @@ pub fn render_frame(
     let output_ptr = output.as_mut_ptr() as usize;
     let output_len = output.len();
 
+    // Block size = 1.0 — each heightmap coordinate is one block
+    let block_size = 1.0_f64;
+
     (0..screen_width).into_par_iter().for_each(|col| {
         let ptr = output_ptr as *mut u8;
 
@@ -315,62 +318,104 @@ pub fn render_frame(
         let cos_correction = (ray_angle - cam_yaw).cos();
 
         let mut max_drawn_y = screen_height; // bottom of the screen (we draw upward)
+        let mut prev_block_height = f64::MIN;
 
         let mut distance = 1.0_f64;
         while distance < draw_distance {
             let sample_x = cam_x + ray_dx * distance;
             let sample_y = cam_y + ray_dy * distance;
 
-            // Sample terrain height
+            // Sample terrain height and quantize to blocks
             let raw_height = sample_heightmap(heightmap, map_width, map_height, sample_x, sample_y);
-            let world_height = raw_height * height_scale;
+            let block_height = (raw_height * height_scale / block_size).floor() * block_size;
 
-            // Project to screen Y.
-            // Perpendicular distance to avoid fisheye distortion.
+            // Perpendicular distance to avoid fisheye distortion
             let perp_dist = distance * cos_correction;
             if perp_dist <= 0.0 {
                 distance += step;
                 continue;
             }
 
-            let height_diff = world_height - cam_height;
+            let height_diff = block_height - cam_height;
             let screen_y_f =
                 half_screen_h - (height_diff * half_screen_h) / perp_dist - pitch_offset;
             let screen_y = screen_y_f as isize;
-
-            // Clamp to valid screen range
             let draw_top = screen_y.max(0) as usize;
 
             if draw_top < max_drawn_y {
-                // Sample color
+                // Sample base color from colormap
                 let base_color =
                     sample_colormap(colormap, map_width, map_height, sample_x, sample_y);
-                let fogged = apply_fog(base_color, fog_color, distance, draw_distance);
 
-                // Draw the vertical strip from draw_top to max_drawn_y
-                for row in draw_top..max_drawn_y {
-                    let offset = (row * screen_width + col) * 4;
-                    // Safety: col is unique per parallel iteration, row is in range,
-                    // and offset + 3 < output_len.
-                    debug_assert!(offset + 3 < output_len);
-                    unsafe {
-                        *ptr.add(offset) = fogged[0];
-                        *ptr.add(offset + 1) = fogged[1];
-                        *ptr.add(offset + 2) = fogged[2];
-                        *ptr.add(offset + 3) = fogged[3];
+                // Minecraft-style face shading with top/side color distinction
+                let is_side_face = block_height > prev_block_height + 0.5;
+
+                // Fog factor for this distance (applied to all pixels in the strip)
+                let fog_t = (distance / draw_distance).clamp(0.0, 1.0);
+                let fog_t2 = fog_t * fog_t; // quadratic falloff
+
+                if is_side_face {
+                    // SIDE FACE: draw individual block layers within the cliff.
+                    // Each block_size unit of height gets its own row with a visible edge.
+                    // Walk from draw_top to max_drawn_y, computing which block layer
+                    // each screen row belongs to, and shade accordingly.
+                    for row in draw_top..max_drawn_y {
+                        // Reverse-project screen row to world height at this distance
+                        let row_height = cam_height + (half_screen_h - row as f64 - pitch_offset) * perp_dist / half_screen_h;
+                        let block_layer = (row_height / block_size).floor() as i64;
+
+                        // Alternate block layers between two shades for visibility
+                        let layer_bright = if block_layer % 2 == 0 { 0.6 } else { 0.7 };
+
+                        // Edge between block layers: dark line at the boundary
+                        let frac_in_block = ((row_height / block_size) - (row_height / block_size).floor()).abs();
+                        let on_edge = frac_in_block < 0.08 || frac_in_block > 0.92;
+                        let edge_mult = if on_edge { 0.4 } else { 1.0 };
+
+                        // Side color: darken the biome color
+                        let shade = layer_bright * edge_mult;
+                        let r = lerp_u8(base_color[0], fog_color[0], fog_t2);
+                        let g = lerp_u8(base_color[1], fog_color[1], fog_t2);
+                        let b = lerp_u8(base_color[2], fog_color[2], fog_t2);
+
+                        let offset = (row * screen_width + col) * 4;
+                        debug_assert!(offset + 3 < output_len);
+                        unsafe {
+                            *ptr.add(offset) = (r as f64 * shade) as u8;
+                            *ptr.add(offset + 1) = (g as f64 * shade) as u8;
+                            *ptr.add(offset + 2) = (b as f64 * shade) as u8;
+                            *ptr.add(offset + 3) = 255;
+                        }
                     }
-                }
+                } else {
+                    // TOP FACE: biome color with fog
+                    let r = lerp_u8(base_color[0], fog_color[0], fog_t2);
+                    let g = lerp_u8(base_color[1], fog_color[1], fog_t2);
+                    let b = lerp_u8(base_color[2], fog_color[2], fog_t2);
+
+                    for row in draw_top..max_drawn_y {
+                        let offset = (row * screen_width + col) * 4;
+                        debug_assert!(offset + 3 < output_len);
+                        unsafe {
+                            *ptr.add(offset) = r;
+                            *ptr.add(offset + 1) = g;
+                            *ptr.add(offset + 2) = b;
+                            *ptr.add(offset + 3) = 255;
+                        }
+                    }
+                };
                 max_drawn_y = draw_top;
             }
+
+            prev_block_height = block_height;
 
             // If the entire column is filled, stop marching
             if max_drawn_y == 0 {
                 break;
             }
 
-            // Adaptive step: increase step with distance for efficiency
-            // Close terrain needs fine detail; far terrain can be coarser.
-            distance += step + distance * 0.002;
+            // Adaptive step: coarser at distance for performance
+            distance += step + distance * 0.005;
         }
     });
 }
@@ -387,6 +432,143 @@ pub fn terrain_height_at(
     offset: f64,
 ) -> f64 {
     sample_heightmap(heightmap, map_width, map_height, x, y) * height_scale + offset
+}
+
+/// Draw a simple 3D player placeholder (vertical capsule/pillar) at a world
+/// position onto the already-rendered output buffer. Call this AFTER `render_frame`.
+///
+/// The player is rendered as a colored vertical bar projected into the scene
+/// using the same perspective math as the terrain. In third-person mode, the
+/// player appears at `(player_x, player_y)` — the camera's logical position.
+pub fn draw_player_marker(
+    heightmap: &[f64],
+    map_width: usize,
+    map_height: usize,
+    player_x: f64,
+    player_y: f64,
+    camera: &Camera,
+    config: &RenderConfig,
+    output: &mut [u8],
+    screen_width: usize,
+    screen_height: usize,
+    player_color: [u8; 3],
+    player_height: f64, // world units tall (e.g., 3.0)
+) {
+    // Only draw in third-person (in first-person you ARE the player)
+    if matches!(camera.mode, CameraMode::FirstPerson) {
+        return;
+    }
+
+    let (cam_x, cam_y, cam_height, cam_yaw, cam_pitch) = effective_camera(camera);
+    let half_fov = camera.fov / 2.0;
+    let half_screen_h = screen_height as f64 / 2.0;
+    let pitch_offset = cam_pitch.tan() * half_screen_h;
+
+    // Vector from camera to player
+    let dx = player_x - cam_x;
+    let dy = player_y - cam_y;
+    let distance = (dx * dx + dy * dy).sqrt();
+    if distance < 1.0 {
+        return; // Too close, skip
+    }
+
+    // Angle from camera to player
+    let angle_to_player = dy.atan2(dx);
+
+    // Relative angle within the FOV
+    let mut rel_angle = angle_to_player - cam_yaw;
+    // Normalize to [-PI, PI]
+    while rel_angle > std::f64::consts::PI {
+        rel_angle -= 2.0 * std::f64::consts::PI;
+    }
+    while rel_angle < -std::f64::consts::PI {
+        rel_angle += 2.0 * std::f64::consts::PI;
+    }
+
+    // Check if player is within FOV
+    if rel_angle.abs() > half_fov {
+        return;
+    }
+
+    // Screen X column
+    let screen_x = ((rel_angle + half_fov) / camera.fov * screen_width as f64) as isize;
+    if screen_x < 0 || screen_x >= screen_width as isize {
+        return;
+    }
+    let col = screen_x as usize;
+
+    // Perpendicular distance (for correct projection, avoiding fisheye)
+    let cos_correction = rel_angle.cos();
+    let perp_dist = distance * cos_correction;
+    if perp_dist <= 0.0 {
+        return;
+    }
+
+    // Terrain height at player position
+    let terrain_h = sample_heightmap(heightmap, map_width, map_height, player_x, player_y)
+        * config.height_scale;
+
+    // Project feet (terrain surface) and head (terrain + player_height)
+    let feet_diff = terrain_h - cam_height;
+    let head_diff = (terrain_h + player_height) - cam_height;
+
+    let feet_screen_y =
+        (half_screen_h - (feet_diff * half_screen_h) / perp_dist - pitch_offset) as isize;
+    let head_screen_y =
+        (half_screen_h - (head_diff * half_screen_h) / perp_dist - pitch_offset) as isize;
+
+    let top = head_screen_y.max(0) as usize;
+    let bottom = feet_screen_y.min(screen_height as isize).max(0) as usize;
+    if top >= bottom {
+        return;
+    }
+
+    // Apply distance fog to player color
+    let fogged = apply_fog(
+        [player_color[0], player_color[1], player_color[2], 255],
+        config.fog_color,
+        distance,
+        camera.draw_distance,
+    );
+
+    // Draw a 3-pixel-wide vertical bar (the "player") with a brighter center column
+    let col_start = col.saturating_sub(1);
+    let col_end = (col + 2).min(screen_width);
+
+    for row in top..bottom {
+        for c in col_start..col_end {
+            let offset = (row * screen_width + c) * 4;
+            if offset + 3 < output.len() {
+                // Center column is full brightness, sides are slightly darker
+                let brightness = if c == col { 1.0 } else { 0.7 };
+                output[offset] = (fogged[0] as f64 * brightness) as u8;
+                output[offset + 1] = (fogged[1] as f64 * brightness) as u8;
+                output[offset + 2] = (fogged[2] as f64 * brightness) as u8;
+                output[offset + 3] = 255;
+            }
+        }
+    }
+
+    // Draw a small "head" circle (5x5 pixels) at the top
+    let head_center_y = top;
+    let head_radius: isize = 2;
+    for dy_px in -head_radius..=head_radius {
+        for dx_px in -head_radius..=head_radius {
+            if dx_px * dx_px + dy_px * dy_px <= head_radius * head_radius {
+                let px = col as isize + dx_px;
+                let py = head_center_y as isize + dy_px;
+                if px >= 0 && px < screen_width as isize && py >= 0 && py < screen_height as isize {
+                    let offset = (py as usize * screen_width + px as usize) * 4;
+                    if offset + 3 < output.len() {
+                        output[offset] = fogged[0];
+                        output[offset + 1] = fogged[1];
+                        output[offset + 2] = fogged[2];
+                        output[offset + 3] = 255;
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
